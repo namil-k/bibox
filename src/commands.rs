@@ -96,7 +96,7 @@ pub async fn cmd_add(
         if let Some(existing_key) = db.entries.iter().find_map(|e| {
             e.doi.as_ref().filter(|d| d.trim().to_lowercase() == doi_norm).map(|_| e.bibtex_key.clone())
         }) {
-            println!("{}", config.msgs.already_exists(&existing_key));
+            println!("{}", config.msgs.already_exists_with_hint(&existing_key));
             return Ok(());
         }
     }
@@ -354,6 +354,11 @@ pub fn cmd_list(
     let db_path = db_path_from_config(config);
     let db = load_db(&db_path)?;
 
+    // No collection + no filters → show collections summary
+    if collection.is_none() && entry_type.is_none() && tag.is_none() && year.is_none() {
+        return list_collections(&db, config);
+    }
+
     let entries = filter_entries(
         &db,
         collection.as_deref(),
@@ -379,6 +384,35 @@ pub fn cmd_list(
         println!("{}", config.msgs.showing_of(page_size, total));
     } else {
         println!("{}", config.msgs.total(total));
+    }
+
+    Ok(())
+}
+
+fn list_collections(db: &crate::models::Database, config: &Config) -> Result<()> {
+    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut uncollected = 0usize;
+
+    for entry in &db.entries {
+        if entry.collections.is_empty() {
+            uncollected += 1;
+        } else {
+            for col in &entry.collections {
+                *counts.entry(col.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+
+    let total = db.entries.len();
+
+    println!("{}", config.msgs.collections_header());
+    println!();
+    println!("{:<28} {}", "(all)", config.msgs.entry_count(total));
+    for (name, count) in &counts {
+        println!("{:<28} {}", name, config.msgs.entry_count(*count));
+    }
+    if uncollected > 0 {
+        println!("{:<28} {}", "(uncollected)", config.msgs.entry_count(uncollected));
     }
 
     Ok(())
@@ -530,8 +564,6 @@ pub fn cmd_edit(
 
     let entry = find_by_key_mut(&mut db, &id_or_key)
         .with_context(|| config.msgs.entry_not_found(&id_or_key))?;
-
-    let _old_title = entry.title.clone();
 
     if let Some(t) = title {
         entry.title = Some(t);
@@ -778,11 +810,12 @@ pub fn cmd_import(file: PathBuf, to: Option<String>, config: &Config) -> Result<
         .with_context(|| config.msgs.file_read_failed(&file.to_string_lossy()))?;
 
     let mut added = 0;
+    let mut merged: Vec<String> = vec![];
     let mut skipped: Vec<String> = vec![];
 
     let entries = parse_bibtex(&content);
 
-    for raw in entries {
+    for mut raw in entries {
         let entry_type: EntryType = raw.entry_type.parse().unwrap_or(EntryType::Misc);
 
         let authors: Vec<String> = raw
@@ -815,6 +848,40 @@ pub fn cmd_import(file: PathBuf, to: Option<String>, config: &Config) -> Result<
                 config.msgs.no_required_fields()
             ));
             continue;
+        }
+
+        // Duplicate DOI check — merge missing fields instead of skipping
+        if let Some(ref doi) = raw.doi {
+            let doi_norm = doi.trim().to_lowercase();
+            if let Some(idx) = db.entries.iter().position(|e| {
+                e.doi.as_ref()
+                    .map(|d| d.trim().to_lowercase() == doi_norm)
+                    .unwrap_or(false)
+            }) {
+                let existing_key = db.entries[idx].bibtex_key.clone();
+                let mut n = 0usize;
+                let e = &mut db.entries[idx];
+                if e.title.is_none() { if let Some(v) = raw.title.take() { e.title = Some(v); n += 1; } }
+                if e.author.is_empty() && !authors.is_empty() { e.author = authors.clone(); n += 1; }
+                if e.year.is_none() { if let Some(v) = raw.year.take() { e.year = Some(v); n += 1; } }
+                if e.journal.is_none() { if let Some(v) = raw.journal.take() { e.journal = Some(v); n += 1; } }
+                if e.volume.is_none() { if let Some(v) = raw.volume.take() { e.volume = Some(v); n += 1; } }
+                if e.number.is_none() { if let Some(v) = raw.number.take() { e.number = Some(v); n += 1; } }
+                if e.pages.is_none() { if let Some(v) = raw.pages.take() { e.pages = Some(v); n += 1; } }
+                if e.publisher.is_none() { if let Some(v) = raw.publisher.take() { e.publisher = Some(v); n += 1; } }
+                if e.editor.is_none() { if let Some(v) = raw.editor.take() { e.editor = Some(v); n += 1; } }
+                if e.edition.is_none() { if let Some(v) = raw.edition.take() { e.edition = Some(v); n += 1; } }
+                if e.isbn.is_none() { if let Some(v) = raw.isbn.take() { e.isbn = Some(v); n += 1; } }
+                if e.booktitle.is_none() { if let Some(v) = raw.booktitle.take() { e.booktitle = Some(v); n += 1; } }
+                if e.url.is_none() { if let Some(v) = raw.url.take() { e.url = Some(v); n += 1; } }
+                if e.note.is_none() { if let Some(v) = raw.note.take() { e.note = Some(v); n += 1; } }
+                if n > 0 {
+                    merged.push(config.msgs.merged_fields(&existing_key, n));
+                } else {
+                    skipped.push(config.msgs.already_exists(&existing_key));
+                }
+                continue;
+            }
         }
 
         let base_key = raw.key.unwrap_or_else(|| {
@@ -859,6 +926,11 @@ pub fn cmd_import(file: PathBuf, to: Option<String>, config: &Config) -> Result<
     save_db(&db, &db_path)?;
 
     println!("{}", config.msgs.import_complete(added));
+    if !merged.is_empty() {
+        for m in &merged {
+            println!("  ~ {}", m);
+        }
+    }
     if !skipped.is_empty() {
         println!("{}", config.msgs.skipped_header(skipped.len()));
         for s in &skipped {

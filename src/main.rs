@@ -77,8 +77,7 @@ enum Commands {
 
     /// List entries
     List {
-        /// Filter by collection name
-        #[arg(long)]
+        /// Collection name (omit to list all collections)
         collection: Option<String>,
 
         /// Filter by type: article, book, inproceedings, misc

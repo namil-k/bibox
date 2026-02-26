@@ -34,6 +34,20 @@ impl Msgs {
         }
     }
 
+    pub fn collections_header(&self) -> &'static str {
+        match self.lang {
+            Lang::En => "# collections:",
+            Lang::Ko => "# 컬렉션:",
+        }
+    }
+
+    pub fn entry_count(&self, n: usize) -> String {
+        match self.lang {
+            Lang::En => format!("{} {}", n, if n == 1 { "entry" } else { "entries" }),
+            Lang::Ko => format!("{}개", n),
+        }
+    }
+
     pub fn no_title(&self) -> &'static str {
         match self.lang {
             Lang::En => "(no title)",
@@ -115,6 +129,26 @@ impl Msgs {
         match self.lang {
             Lang::En => format!("Already in library: [{}]. Skipping.", key),
             Lang::Ko => format!("이미 라이브러리에 있습니다: [{}]. 건너뜀.", key),
+        }
+    }
+
+    pub fn already_exists_with_hint(&self, key: &str) -> String {
+        match self.lang {
+            Lang::En => format!(
+                "Already in library: [{}]. Use 'bibox meta {}' to update metadata.",
+                key, key
+            ),
+            Lang::Ko => format!(
+                "이미 라이브러리에 있습니다: [{}]. 'bibox meta {}'로 메타데이터를 업데이트하세요.",
+                key, key
+            ),
+        }
+    }
+
+    pub fn merged_fields(&self, key: &str, n: usize) -> String {
+        match self.lang {
+            Lang::En => format!("Merged [{}]: {} field(s) updated.", key, n),
+            Lang::Ko => format!("병합됨 [{}]: {}개 필드 업데이트.", key, n),
         }
     }
 
