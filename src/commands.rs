@@ -7,6 +7,7 @@ use uuid::Uuid;
 use crate::bibtex::{entries_to_bibtex, entry_to_filename};
 use crate::config::Config;
 use crate::crossref;
+use crate::git;
 use crate::interactive::{interactive_select, SelectItem};
 use crate::models::{Entry, EntryType};
 use crate::pdf;
@@ -16,6 +17,7 @@ use crate::storage::{
 };
 use crate::arxiv;
 use crate::unpaywall;
+use crate::openlibrary;
 
 fn db_path_from_config(_config: &Config) -> PathBuf {
     crate::config::db_path()
@@ -75,6 +77,7 @@ pub async fn cmd_add(
     file: Option<PathBuf>,
     to: Option<String>,
     doi_arg: Option<String>,
+    isbn_arg: Option<String>,
     key_arg: Option<String>,
     title_arg: Option<String>,
     author_arg: Option<String>,
@@ -97,6 +100,38 @@ pub async fn cmd_add(
             e.doi.as_ref().filter(|d| d.trim().to_lowercase() == doi_norm).map(|_| e.bibtex_key.clone())
         }) {
             println!("{}", config.msgs.already_exists_with_hint(&existing_key));
+            return Ok(());
+        }
+    }
+
+    // ISBN-only mode (no file, no DOI)
+    if file.is_none() && doi_arg.is_none() {
+        if let Some(ref isbn) = isbn_arg {
+            println!("Fetching metadata from Open Library for ISBN {}...", isbn);
+            let mut entry = openlibrary::fetch_by_isbn(isbn, &db).await?;
+            // Apply collection
+            entry.collections = to
+                .or_else(|| config.default_collection.clone())
+                .map(|c| vec![c])
+                .unwrap_or_default();
+            // Apply overrides
+            if let Some(k) = key_arg {
+                entry.bibtex_key = generate_unique_key(&db, &k);
+            }
+            if let Some(t) = title_arg { entry.title = Some(t); }
+            if let Some(a) = author_arg {
+                entry.author = a.split(';').map(|s| s.trim().to_string()).collect();
+            }
+            if let Some(y) = year_arg { entry.year = Some(y); }
+            if let Some(p) = publisher_arg { entry.publisher = Some(p); }
+
+            println!("Added: {} — {}", entry.bibtex_key, entry.title.as_deref().unwrap_or("?"));
+            let key_clone = entry.bibtex_key.clone();
+            db.entries.push(entry);
+            save_db(&db, &db_path)?;
+            if config.git {
+                git::auto_commit(&db_path, &format!("bibox: add {}", key_clone))?;
+            }
             return Ok(());
         }
     }
@@ -338,8 +373,12 @@ pub async fn cmd_add(
             .msgs
             .added(&entry.bibtex_key, entry.title.as_deref().unwrap_or("?"))
     );
+    let add_key = entry.bibtex_key.clone();
     db.entries.push(entry);
     save_db(&db, &db_path)?;
+    if config.git {
+        git::auto_commit(&db_path, &format!("bibox: add {}", add_key))?;
+    }
 
     Ok(())
 }
@@ -632,6 +671,9 @@ pub fn cmd_edit(
 
     let key = entry.bibtex_key.clone();
     save_db(&db, &db_path)?;
+    if config.git {
+        git::auto_commit(&db_path, &format!("bibox: edit {}", key))?;
+    }
     println!("{}", config.msgs.updated(&key));
 
     Ok(())
@@ -663,10 +705,14 @@ pub fn cmd_delete(id_or_key: String, force: bool, config: &Config) -> Result<()>
         }
     }
 
+    let del_key = entry.bibtex_key.clone();
     db.entries
         .retain(|e| e.bibtex_key != entry.bibtex_key && e.id != entry.id);
     save_db(&db, &db_path)?;
-    println!("{}", config.msgs.deleted(&entry.bibtex_key));
+    if config.git {
+        git::auto_commit(&db_path, &format!("bibox: delete {}", del_key))?;
+    }
+    println!("{}", config.msgs.deleted(&del_key));
 
     Ok(())
 }
@@ -833,7 +879,12 @@ pub async fn cmd_meta(
         println!("{}", config.msgs.meta_manual_updated(&key));
     }
 
+    // extract the key for git commit message
+    let meta_key = find_by_key(&db, &id_or_key).map(|e| e.bibtex_key.clone()).unwrap_or_else(|| id_or_key.clone());
     save_db(&db, &db_path)?;
+    if config.git {
+        git::auto_commit(&db_path, &format!("bibox: meta {}", meta_key))?;
+    }
     Ok(())
 }
 
@@ -961,6 +1012,9 @@ pub fn cmd_import(file: PathBuf, to: Option<String>, config: &Config) -> Result<
     }
 
     save_db(&db, &db_path)?;
+    if config.git {
+        git::auto_commit(&db_path, &format!("bibox: import {} entries", added))?;
+    }
 
     println!("{}", config.msgs.import_complete(added));
     if !merged.is_empty() {
@@ -1255,6 +1309,210 @@ pub fn cmd_sync(config: &Config) -> Result<()> {
 
     save_db(&db, &db_path)?;
     println!("{}", config.msgs.sync_complete());
+
+    Ok(())
+}
+
+// ── note ─────────────────────────────────────────────────────────────────────
+
+pub fn cmd_note(id_or_key: String, config: &Config) -> Result<()> {
+    let db_path = db_path_from_config(config);
+    let db = load_db(&db_path)?;
+
+    let entry = find_by_key(&db, &id_or_key)
+        .with_context(|| config.msgs.entry_not_found(&id_or_key))?;
+
+    let notes_dir = &config.notes_dir;
+    std::fs::create_dir_all(notes_dir)?;
+
+    let note_path = notes_dir.join(format!("{}.md", entry.bibtex_key));
+
+    if !note_path.exists() {
+        let header = format!(
+            "# {}\n\ncitekey: {}\n",
+            entry.title.as_deref().unwrap_or("Untitled"),
+            entry.bibtex_key
+        );
+        std::fs::write(&note_path, &header)?;
+    }
+
+    // Find editor: $EDITOR → nano → vi
+    let editor = std::env::var("EDITOR").unwrap_or_else(|_| {
+        if which_editor("nano") { "nano".to_string() } else { "vi".to_string() }
+    });
+
+    std::process::Command::new(&editor)
+        .arg(&note_path)
+        .status()
+        .with_context(|| format!("Failed to launch editor '{}'", editor))?;
+
+    println!("Note saved: {}", note_path.display());
+    Ok(())
+}
+
+fn which_editor(name: &str) -> bool {
+    std::process::Command::new("which")
+        .arg(name)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+// ── modify ───────────────────────────────────────────────────────────────────
+
+pub fn cmd_modify(
+    assignments: Vec<String>,
+    filter: Option<String>,
+    all: bool,
+    yes: bool,
+    config: &Config,
+) -> Result<()> {
+    // 1. Require --filter or --all
+    if filter.is_none() && !all {
+        anyhow::bail!("Specify --filter or --all");
+    }
+
+    // 2. Parse assignments
+    struct Assignment {
+        field: String,
+        value: String,
+    }
+    let mut parsed_assignments: Vec<Assignment> = Vec::new();
+    for a in &assignments {
+        let (field, value) = a
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("Invalid assignment '{}': expected field=value", a))?;
+        let field = field.trim().to_string();
+        let value = value.trim().to_string();
+        // Validate field name
+        match field.as_str() {
+            "year" | "journal" | "publisher" | "booktitle" | "volume" | "number" | "pages"
+            | "note" | "tags_add" | "tags_remove" => {}
+            other => anyhow::bail!("Unknown field '{}'", other),
+        }
+        parsed_assignments.push(Assignment { field, value });
+    }
+
+    // 3. Load DB
+    let db_path = db_path_from_config(config);
+    let mut db = load_db(&db_path)?;
+
+    // 4. Parse filter and collect matching entry indices
+    let matching_indices: Vec<usize> = if let Some(ref filter_str) = filter {
+        // Parse comma-separated filter conditions
+        struct FilterCond {
+            kind: String,
+            value: String,
+        }
+        let conditions: Vec<FilterCond> = filter_str
+            .split(',')
+            .map(|part| {
+                let part = part.trim();
+                if let Some((k, v)) = part.split_once(':') {
+                    FilterCond {
+                        kind: k.trim().to_string(),
+                        value: v.trim().to_string(),
+                    }
+                } else {
+                    FilterCond {
+                        kind: String::new(),
+                        value: part.to_string(),
+                    }
+                }
+            })
+            .collect();
+
+        db.entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                conditions.iter().all(|cond| match cond.kind.as_str() {
+                    "collection" => entry.collections.contains(&cond.value),
+                    "tag" => entry.tags.contains(&cond.value),
+                    "type" => entry.entry_type.to_string() == cond.value,
+                    "year" => {
+                        if let Ok(y) = cond.value.parse::<u32>() {
+                            entry.year == Some(y)
+                        } else {
+                            false
+                        }
+                    }
+                    _ => false,
+                })
+            })
+            .map(|(i, _)| i)
+            .collect()
+    } else {
+        // --all
+        (0..db.entries.len()).collect()
+    };
+
+    if matching_indices.is_empty() {
+        println!("No entries matched the filter.");
+        return Ok(());
+    }
+
+    // 5. Show what will change
+    println!("Matching entries ({}):", matching_indices.len());
+    for &i in &matching_indices {
+        println!("  - {}", db.entries[i].bibtex_key);
+    }
+    println!("Changes to apply:");
+    for a in &parsed_assignments {
+        println!("  {} = {}", a.field, a.value);
+    }
+
+    // 6. Confirm
+    if !yes {
+        if !prompt_confirm(&format!("Apply to {} entries?", matching_indices.len())) {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+
+    // 7. Apply assignments
+    let mut modified = 0usize;
+    for &i in &matching_indices {
+        let entry = &mut db.entries[i];
+        for a in &parsed_assignments {
+            match a.field.as_str() {
+                "year" => {
+                    entry.year = Some(a.value.parse::<u32>().with_context(|| {
+                        format!("Invalid year value: '{}'", a.value)
+                    })?);
+                }
+                "journal" => entry.journal = Some(a.value.clone()),
+                "publisher" => entry.publisher = Some(a.value.clone()),
+                "booktitle" => entry.booktitle = Some(a.value.clone()),
+                "volume" => entry.volume = Some(a.value.clone()),
+                "number" => entry.number = Some(a.value.clone()),
+                "pages" => entry.pages = Some(a.value.clone()),
+                "note" => entry.note = Some(a.value.clone()),
+                "tags_add" => {
+                    for tag in a.value.split(',') {
+                        let tag = tag.trim().to_string();
+                        if !tag.is_empty() && !entry.tags.contains(&tag) {
+                            entry.tags.push(tag);
+                        }
+                    }
+                }
+                "tags_remove" => {
+                    let to_remove: Vec<String> = a
+                        .value
+                        .split(',')
+                        .map(|t| t.trim().to_string())
+                        .collect();
+                    entry.tags.retain(|t| !to_remove.contains(t));
+                }
+                _ => {}
+            }
+        }
+        modified += 1;
+    }
+
+    // 8. Save and report
+    save_db(&db, &db_path)?;
+    println!("Modified {} entries.", modified);
 
     Ok(())
 }

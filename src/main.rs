@@ -7,9 +7,11 @@ mod bibtex;
 mod commands;
 mod config;
 mod crossref;
+mod git;
 mod i18n;
 mod interactive;
 mod models;
+mod openlibrary;
 mod pdf;
 mod storage;
 mod tui;
@@ -38,6 +40,10 @@ enum Commands {
         /// DOI to look up (skips PDF if provided alone)
         #[arg(long)]
         doi: Option<String>,
+
+        /// ISBN to look up via Open Library (skips PDF if provided alone)
+        #[arg(long)]
+        isbn: Option<String>,
 
         /// Assign to a collection
         #[arg(long)]
@@ -292,6 +298,31 @@ enum Commands {
 
     /// Reconcile the bibox directory with the database
     Sync,
+
+    /// Open or create a per-entry note file in $EDITOR
+    Note {
+        /// Citation key or entry ID
+        key: String,
+    },
+
+    /// Bulk-update fields across multiple entries
+    Modify {
+        /// Field=value pairs to set, e.g. year=2024 journal="Nature"
+        #[arg(required = true)]
+        assignments: Vec<String>,
+
+        /// Filter: collection:<name>, tag:<tag>, type:<type>, year:<year>
+        #[arg(long, short = 'f')]
+        filter: Option<String>,
+
+        /// Apply to all entries (required if no --filter)
+        #[arg(long)]
+        all: bool,
+
+        /// Skip confirmation
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
 }
 
 #[tokio::main]
@@ -307,6 +338,7 @@ async fn main() -> Result<()> {
         Some(Commands::Add {
             file,
             doi,
+            isbn,
             to,
             key,
             title,
@@ -318,7 +350,7 @@ async fn main() -> Result<()> {
             booktitle,
         }) => {
             commands::cmd_add(
-                file, to, doi, key, title, author, year, r#type, journal, publisher, booktitle,
+                file, to, doi, isbn, key, title, author, year, r#type, journal, publisher, booktitle,
                 &config,
             )
             .await?;
@@ -434,6 +466,19 @@ async fn main() -> Result<()> {
 
         Some(Commands::Sync) => {
             commands::cmd_sync(&config)?;
+        }
+
+        Some(Commands::Note { key }) => {
+            commands::cmd_note(key, &config)?;
+        }
+
+        Some(Commands::Modify {
+            assignments,
+            filter,
+            all,
+            yes,
+        }) => {
+            commands::cmd_modify(assignments, filter, all, yes, &config)?;
         }
     }
 

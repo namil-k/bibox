@@ -13,6 +13,12 @@ pub struct Config {
     pub default_page_size: usize,
     #[serde(default = "default_language")]
     pub language: String,
+    /// Auto-commit the database to git after every write (default: false)
+    #[serde(default)]
+    pub git: bool,
+    /// Directory for per-entry note files (default: ~/.local/share/bibox/notes/)
+    #[serde(default = "default_notes_dir")]
+    pub notes_dir: PathBuf,
     #[serde(skip)]
     pub msgs: Msgs,
 }
@@ -26,6 +32,8 @@ impl Default for Config {
             search_case_sensitive: false,
             default_page_size: 20,
             language: default_language(),
+            git: false,
+            notes_dir: default_notes_dir(),
             msgs: Msgs::default(),
         }
     }
@@ -33,6 +41,18 @@ impl Default for Config {
 
 fn default_language() -> String {
     "en".to_string()
+}
+
+fn default_notes_dir() -> PathBuf {
+    dirs::data_local_dir()
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".local")
+                .join("share")
+        })
+        .join("bibox")
+        .join("notes")
 }
 
 fn default_bibox_dir() -> PathBuf {

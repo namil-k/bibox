@@ -655,6 +655,8 @@ pub fn run_tui(config: &Config) -> Result<()> {
         search_case_sensitive: config.search_case_sensitive,
         default_page_size: config.default_page_size,
         language: config.language.clone(),
+        git: config.git,
+        notes_dir: config.notes_dir.clone(),
         msgs: crate::i18n::Msgs::new(&config.language),
     };
 
