@@ -12,6 +12,7 @@ mod interactive;
 mod models;
 mod pdf;
 mod storage;
+mod tui;
 mod unpaywall;
 
 use config::load_config;
@@ -24,7 +25,7 @@ use config::load_config;
 )]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -283,6 +284,12 @@ enum Commands {
         zip: bool,
     },
 
+    /// Open the PDF for an entry
+    Open {
+        /// Citation key or entry ID
+        key: String,
+    },
+
     /// Reconcile the bibox directory with the database
     Sync,
 }
@@ -293,7 +300,11 @@ async fn main() -> Result<()> {
     let config = load_config()?;
 
     match cli.command {
-        Commands::Add {
+        None => {
+            tui::run_tui(&config)?;
+        }
+
+        Some(Commands::Add {
             file,
             doi,
             to,
@@ -305,7 +316,7 @@ async fn main() -> Result<()> {
             journal,
             publisher,
             booktitle,
-        } => {
+        }) => {
             commands::cmd_add(
                 file, to, doi, key, title, author, year, r#type, journal, publisher, booktitle,
                 &config,
@@ -313,29 +324,29 @@ async fn main() -> Result<()> {
             .await?;
         }
 
-        Commands::List {
+        Some(Commands::List {
             collection,
             r#type,
             tag,
             year,
             limit,
-        } => {
+        }) => {
             commands::cmd_list(collection, r#type, tag, year, limit, &config)?;
         }
 
-        Commands::Search {
+        Some(Commands::Search {
             query,
             collection,
             field,
-        } => {
+        }) => {
             commands::cmd_search(query, collection, field, &config)?;
         }
 
-        Commands::Show { key } => {
+        Some(Commands::Show { key }) => {
             commands::cmd_show(key, &config)?;
         }
 
-        Commands::Edit {
+        Some(Commands::Edit {
             key,
             title,
             author,
@@ -350,7 +361,7 @@ async fn main() -> Result<()> {
             note,
             tags_add,
             tags_remove,
-        } => {
+        }) => {
             commands::cmd_edit(
                 key,
                 title,
@@ -370,19 +381,19 @@ async fn main() -> Result<()> {
             )?;
         }
 
-        Commands::Delete { key, yes } => {
+        Some(Commands::Delete { key, yes }) => {
             commands::cmd_delete(key, yes, &config)?;
         }
 
-        Commands::Collect { key, collections } => {
+        Some(Commands::Collect { key, collections }) => {
             commands::cmd_collect(key, collections, &config)?;
         }
 
-        Commands::Uncollect { key, collection } => {
+        Some(Commands::Uncollect { key, collection }) => {
             commands::cmd_uncollect(key, collection, &config)?;
         }
 
-        Commands::Meta {
+        Some(Commands::Meta {
             key,
             doi,
             title,
@@ -391,18 +402,18 @@ async fn main() -> Result<()> {
             journal,
             publisher,
             booktitle,
-        } => {
+        }) => {
             commands::cmd_meta(
                 key, doi, title, author, year, journal, publisher, booktitle, &config,
             )
             .await?;
         }
 
-        Commands::Import { file, to } => {
+        Some(Commands::Import { file, to }) => {
             commands::cmd_import(file, to, &config)?;
         }
 
-        Commands::Out {
+        Some(Commands::Out {
             collection,
             key,
             r#type,
@@ -411,13 +422,17 @@ async fn main() -> Result<()> {
             clipboard,
             as_pdf,
             zip,
-        } => {
+        }) => {
             commands::cmd_out(
                 collection, key, output, clipboard, r#type, tag, as_pdf, zip, &config,
             )?;
         }
 
-        Commands::Sync => {
+        Some(Commands::Open { key }) => {
+            commands::cmd_open(key, &config)?;
+        }
+
+        Some(Commands::Sync) => {
             commands::cmd_sync(&config)?;
         }
     }

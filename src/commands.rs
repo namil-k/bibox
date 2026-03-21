@@ -302,7 +302,10 @@ pub async fn cmd_add(
         None
     };
 
-    let collections: Vec<String> = to.map(|c| vec![c]).unwrap_or_default();
+    let collections: Vec<String> = to
+        .or_else(|| config.default_collection.clone())
+        .map(|c| vec![c])
+        .unwrap_or_default();
 
     let entry = Entry {
         id: Uuid::new_v4().to_string(),
@@ -764,6 +767,23 @@ pub async fn cmd_meta(
                 entry.pages = meta.pages;
                 entry.url = meta.url;
 
+                // Rename file if metadata changed
+                if entry.file_path.is_some() {
+                    let new_filename = format!("{}.pdf", entry_to_filename(entry));
+                    let old_fp = entry.file_path.as_ref().unwrap().clone();
+                    if old_fp != new_filename {
+                        let old_path = config.bibox_dir.join(&old_fp);
+                        let new_path = config.bibox_dir.join(&new_filename);
+                        if old_path.exists() {
+                            std::fs::rename(&old_path, &new_path).with_context(|| {
+                                config.msgs.file_rename_failed(&old_path.to_string_lossy())
+                            })?;
+                            entry.file_path = Some(new_filename.clone());
+                            println!("{}", config.msgs.file_renamed(&old_fp, &new_filename));
+                        }
+                    }
+                }
+
                 let key = entry.bibtex_key.clone();
                 println!("{}", config.msgs.meta_updated(&key));
             }
@@ -790,6 +810,23 @@ pub async fn cmd_meta(
         }
         if let Some(bt) = booktitle {
             entry.booktitle = Some(bt);
+        }
+
+        // Rename file if metadata changed
+        if entry.file_path.is_some() {
+            let new_filename = format!("{}.pdf", entry_to_filename(entry));
+            let old_fp = entry.file_path.as_ref().unwrap().clone();
+            if old_fp != new_filename {
+                let old_path = config.bibox_dir.join(&old_fp);
+                let new_path = config.bibox_dir.join(&new_filename);
+                if old_path.exists() {
+                    std::fs::rename(&old_path, &new_path).with_context(|| {
+                        config.msgs.file_rename_failed(&old_path.to_string_lossy())
+                    })?;
+                    entry.file_path = Some(new_filename.clone());
+                    println!("{}", config.msgs.file_renamed(&old_fp, &new_filename));
+                }
+            }
         }
 
         let key = entry.bibtex_key.clone();
@@ -1058,6 +1095,50 @@ pub fn cmd_out(
     Ok(())
 }
 
+// ── open ─────────────────────────────────────────────────────────────────────
+
+pub fn cmd_open(id_or_key: String, config: &Config) -> Result<()> {
+    let db_path = db_path_from_config(config);
+    let db = load_db(&db_path)?;
+
+    let entry = find_by_key(&db, &id_or_key)
+        .with_context(|| config.msgs.entry_not_found(&id_or_key))?;
+
+    let fp = entry
+        .file_path
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("No PDF file associated with '{}'", id_or_key))?;
+
+    let full_path = config.bibox_dir.join(fp);
+    if !full_path.exists() {
+        anyhow::bail!("PDF file not found: {}", full_path.display());
+    }
+
+    let path_str = full_path.to_string_lossy().to_string();
+
+    if let Some(viewer) = &config.pdf_viewer {
+        std::process::Command::new(viewer)
+            .arg(&path_str)
+            .spawn()
+            .with_context(|| format!("Failed to launch viewer '{}'", viewer))?;
+    } else {
+        #[cfg(target_os = "macos")]
+        std::process::Command::new("open")
+            .arg(&path_str)
+            .spawn()
+            .context("Failed to run 'open'")?;
+
+        #[cfg(not(target_os = "macos"))]
+        std::process::Command::new("xdg-open")
+            .arg(&path_str)
+            .spawn()
+            .context("Failed to run 'xdg-open'")?;
+    }
+
+    println!("Opening: {}", full_path.display());
+    Ok(())
+}
+
 // ── sync ─────────────────────────────────────────────────────────────────────
 
 pub fn cmd_sync(config: &Config) -> Result<()> {
@@ -1066,6 +1147,28 @@ pub fn cmd_sync(config: &Config) -> Result<()> {
 
     std::fs::create_dir_all(&config.bibox_dir)?;
 
+    // Entries whose stored filename doesn't match the canonical name (metadata drift)
+    let mut renamed_count = 0usize;
+    for entry in db.entries.iter_mut() {
+        if let Some(ref fp) = entry.file_path.clone() {
+            let canonical = format!("{}.pdf", crate::bibtex::entry_to_filename(entry));
+            if *fp != canonical {
+                let old_path = config.bibox_dir.join(fp);
+                let new_path = config.bibox_dir.join(&canonical);
+                if old_path.exists() && !new_path.exists() {
+                    std::fs::rename(&old_path, &new_path).ok();
+                    entry.file_path = Some(canonical.clone());
+                    println!("{}", config.msgs.file_renamed(fp, &canonical));
+                    renamed_count += 1;
+                }
+            }
+        }
+    }
+    if renamed_count > 0 {
+        println!("Renamed {} file(s) to match current metadata.", renamed_count);
+    }
+
+    // Re-compute actual/db file lists after renames
     let actual_files: Vec<String> = std::fs::read_dir(&config.bibox_dir)?
         .filter_map(|e| e.ok())
         .filter(|e| {
