@@ -288,6 +288,10 @@ enum Commands {
         /// Compress --as-pdf output into a ZIP archive
         #[arg(long, requires = "as_pdf")]
         zip: bool,
+
+        /// Output format: bibtex (default), yaml, ris, csv
+        #[arg(long, default_value = "bibtex")]
+        format: String,
     },
 
     /// Open the PDF for an entry
@@ -322,6 +326,21 @@ enum Commands {
         /// Skip confirmation
         #[arg(short = 'y', long)]
         yes: bool,
+    },
+
+    /// Review entries interactively one by one
+    Review {
+        /// Filter by collection
+        #[arg(long, short = 'c')]
+        collection: Option<String>,
+
+        /// Filter: same syntax as modify (collection:<name>, tag:<tag>, type:<type>, year:<year>)
+        #[arg(long, short = 'f')]
+        filter: Option<String>,
+
+        /// Only show entries without the "reviewed" tag
+        #[arg(long)]
+        unreviewed: bool,
     },
 }
 
@@ -454,9 +473,10 @@ async fn main() -> Result<()> {
             clipboard,
             as_pdf,
             zip,
+            format,
         }) => {
             commands::cmd_out(
-                collection, key, output, clipboard, r#type, tag, as_pdf, zip, &config,
+                collection, key, output, clipboard, r#type, tag, as_pdf, zip, format, &config,
             )?;
         }
 
@@ -479,6 +499,14 @@ async fn main() -> Result<()> {
             yes,
         }) => {
             commands::cmd_modify(assignments, filter, all, yes, &config)?;
+        }
+
+        Some(Commands::Review {
+            collection,
+            filter,
+            unreviewed,
+        }) => {
+            commands::cmd_review(collection, filter, unreviewed, &config)?;
         }
     }
 

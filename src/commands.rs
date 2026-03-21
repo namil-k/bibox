@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::Local;
+use crossterm::event::{self as ct_event, Event, KeyCode, KeyModifiers};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -1043,6 +1045,7 @@ pub fn cmd_out(
     tag: Option<String>,
     as_pdf: bool,
     zip: bool,
+    format: String,
     config: &Config,
 ) -> Result<()> {
     let db_path = db_path_from_config(config);
@@ -1051,6 +1054,7 @@ pub fn cmd_out(
     let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
 
     if as_pdf {
+        // --as-pdf only makes sense for bibtex format; proceed regardless
         let entries = if let Some(ref k) = key {
             vec![find_by_key(&db, k)
                 .with_context(|| config.msgs.entry_not_found(k))?]
@@ -1108,7 +1112,7 @@ pub fn cmd_out(
         return Ok(());
     }
 
-    // BibTeX export
+    // Collect entries for text-based export
     let entries: Vec<&Entry> = if let Some(ref k) = key {
         vec![find_by_key(&db, k)
             .with_context(|| config.msgs.entry_not_found(k))?]
@@ -1124,9 +1128,15 @@ pub fn cmd_out(
         db.entries.iter().collect()
     };
 
-    let bibtex = entries_to_bibtex(&entries);
+    let fmt = format.to_lowercase();
 
+    // Clipboard only supported for BibTeX
     if clipboard {
+        if fmt != "bibtex" {
+            println!("Clipboard only supported for BibTeX format");
+            return Ok(());
+        }
+        let bibtex = entries_to_bibtex(&entries);
         copy_to_clipboard(&bibtex, config)?;
         println!("{}", config.msgs.clipboard_copied_entries(entries.len()));
         return Ok(());
@@ -1136,17 +1146,260 @@ pub fn cmd_out(
         .as_deref()
         .or(collection.as_deref())
         .unwrap_or("references");
-    let filename = format!("{}_{}.bib", col_name, timestamp);
-    let out_path = output.unwrap_or_else(|| PathBuf::from(&filename));
-    std::fs::write(&out_path, &bibtex)?;
-    println!(
-        "{}",
-        config
-            .msgs
-            .bibtex_saved(&out_path.to_string_lossy(), entries.len())
-    );
+
+    match fmt.as_str() {
+        "bibtex" => {
+            let bibtex = entries_to_bibtex(&entries);
+            let filename = format!("{}_{}.bib", col_name, timestamp);
+            let out_path = output.unwrap_or_else(|| PathBuf::from(&filename));
+            std::fs::write(&out_path, &bibtex)?;
+            println!(
+                "{}",
+                config
+                    .msgs
+                    .bibtex_saved(&out_path.to_string_lossy(), entries.len())
+            );
+        }
+        "yaml" => {
+            let yaml = entries_to_yaml(&entries);
+            if let Some(path) = output {
+                std::fs::write(&path, &yaml)?;
+                println!("Exported {} entries to {}", entries.len(), path.display());
+            } else {
+                print!("{}", yaml);
+            }
+        }
+        "ris" => {
+            let ris = entries_to_ris(&entries);
+            if let Some(path) = output {
+                std::fs::write(&path, &ris)?;
+                println!("Exported {} entries to {}", entries.len(), path.display());
+            } else {
+                print!("{}", ris);
+            }
+        }
+        "csv" => {
+            let csv = entries_to_csv(&entries);
+            if let Some(path) = output {
+                std::fs::write(&path, &csv)?;
+                println!("Exported {} entries to {}", entries.len(), path.display());
+            } else {
+                print!("{}", csv);
+            }
+        }
+        other => {
+            anyhow::bail!(
+                "Unknown format '{}'. Supported formats: bibtex, yaml, ris, csv",
+                other
+            );
+        }
+    }
 
     Ok(())
+}
+
+// ── export helpers ────────────────────────────────────────────────────────────
+
+fn entries_to_yaml(entries: &[&Entry]) -> String {
+    let mut out = String::new();
+    for entry in entries {
+        out.push_str("---\n");
+        out.push_str(&format!("key: {}\n", yaml_scalar(&entry.bibtex_key)));
+        out.push_str(&format!("type: {}\n", yaml_scalar(&entry.entry_type.to_string())));
+        if let Some(ref t) = entry.title {
+            out.push_str(&format!("title: {}\n", yaml_scalar(t)));
+        }
+        if !entry.author.is_empty() {
+            out.push_str("authors:\n");
+            for a in &entry.author {
+                out.push_str(&format!("  - {}\n", yaml_scalar(a)));
+            }
+        }
+        if let Some(y) = entry.year {
+            out.push_str(&format!("year: {}\n", y));
+        }
+        if let Some(ref j) = entry.journal {
+            out.push_str(&format!("journal: {}\n", yaml_scalar(j)));
+        }
+        if let Some(ref v) = entry.volume {
+            out.push_str(&format!("volume: {}\n", yaml_scalar(v)));
+        }
+        if let Some(ref n) = entry.number {
+            out.push_str(&format!("number: {}\n", yaml_scalar(n)));
+        }
+        if let Some(ref p) = entry.pages {
+            out.push_str(&format!("pages: {}\n", yaml_scalar(p)));
+        }
+        if let Some(ref p) = entry.publisher {
+            out.push_str(&format!("publisher: {}\n", yaml_scalar(p)));
+        }
+        if let Some(ref bt) = entry.booktitle {
+            out.push_str(&format!("booktitle: {}\n", yaml_scalar(bt)));
+        }
+        if let Some(ref d) = entry.doi {
+            out.push_str(&format!("doi: {}\n", yaml_scalar(d)));
+        }
+        if let Some(ref u) = entry.url {
+            out.push_str(&format!("url: {}\n", yaml_scalar(u)));
+        }
+        if let Some(ref isbn) = entry.isbn {
+            out.push_str(&format!("isbn: {}\n", yaml_scalar(isbn)));
+        }
+        if let Some(ref ed) = entry.editor {
+            out.push_str(&format!("editor: {}\n", yaml_scalar(ed)));
+        }
+        if let Some(ref ed) = entry.edition {
+            out.push_str(&format!("edition: {}\n", yaml_scalar(ed)));
+        }
+        if let Some(ref note) = entry.note {
+            out.push_str(&format!("note: {}\n", yaml_scalar(note)));
+        }
+        if !entry.tags.is_empty() {
+            out.push_str("tags:\n");
+            for tag in &entry.tags {
+                out.push_str(&format!("  - {}\n", yaml_scalar(tag)));
+            }
+        }
+        if !entry.collections.is_empty() {
+            out.push_str("collections:\n");
+            for col in &entry.collections {
+                out.push_str(&format!("  - {}\n", yaml_scalar(col)));
+            }
+        }
+    }
+    out
+}
+
+/// Wrap a string in single-quotes if it contains special YAML characters,
+/// or return as a plain scalar. Escapes internal single-quotes.
+fn yaml_scalar(s: &str) -> String {
+    let needs_quoting = s.contains(':')
+        || s.contains('#')
+        || s.contains('"')
+        || s.contains('\'')
+        || s.contains('\n')
+        || s.starts_with('{')
+        || s.starts_with('[')
+        || s.starts_with('&')
+        || s.starts_with('*')
+        || s.starts_with('!')
+        || s.starts_with('|')
+        || s.starts_with('>')
+        || s.is_empty();
+    if needs_quoting {
+        // Use double-quote style; escape backslash and double-quote
+        let escaped = s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
+        format!("\"{}\"", escaped)
+    } else {
+        s.to_string()
+    }
+}
+
+fn entries_to_ris(entries: &[&Entry]) -> String {
+    let mut out = String::new();
+    for entry in entries {
+        // TY field
+        let ty = match entry.entry_type {
+            crate::models::EntryType::Article => "JOUR",
+            crate::models::EntryType::Book => "BOOK",
+            crate::models::EntryType::InProceedings => "CONF",
+            crate::models::EntryType::Misc => "GEN",
+        };
+        out.push_str(&format!("TY  - {}\n", ty));
+        out.push_str(&format!("ID  - {}\n", entry.bibtex_key));
+        if let Some(ref t) = entry.title {
+            out.push_str(&format!("TI  - {}\n", t));
+        }
+        for author in &entry.author {
+            out.push_str(&format!("AU  - {}\n", author.trim()));
+        }
+        if let Some(y) = entry.year {
+            out.push_str(&format!("PY  - {}\n", y));
+        }
+        if let Some(ref j) = entry.journal {
+            out.push_str(&format!("JO  - {}\n", j));
+        }
+        if let Some(ref v) = entry.volume {
+            out.push_str(&format!("VL  - {}\n", v));
+        }
+        if let Some(ref n) = entry.number {
+            out.push_str(&format!("IS  - {}\n", n));
+        }
+        if let Some(ref p) = entry.pages {
+            // Split pages into SP/EP if a dash is present
+            if let Some(idx) = p.find('-') {
+                let sp = p[..idx].trim();
+                // skip over multiple dashes (e.g. em-dash --)
+                let rest = p[idx..].trim_start_matches('-').trim();
+                if !sp.is_empty() {
+                    out.push_str(&format!("SP  - {}\n", sp));
+                }
+                if !rest.is_empty() {
+                    out.push_str(&format!("EP  - {}\n", rest));
+                }
+            } else {
+                out.push_str(&format!("SP  - {}\n", p));
+            }
+        }
+        if let Some(ref d) = entry.doi {
+            out.push_str(&format!("DO  - {}\n", d));
+        }
+        if let Some(ref isbn) = entry.isbn {
+            out.push_str(&format!("SN  - {}\n", isbn));
+        }
+        if let Some(ref pub_) = entry.publisher {
+            out.push_str(&format!("PB  - {}\n", pub_));
+        }
+        out.push_str("ER  - \n\n");
+    }
+    out
+}
+
+fn entries_to_csv(entries: &[&Entry]) -> String {
+    let mut out = String::new();
+    out.push_str("key,type,title,authors,year,journal,doi,tags,collections\n");
+    for entry in entries {
+        let title = entry.title.as_deref().unwrap_or("");
+        let authors = entry.author.join("; ");
+        let year = entry
+            .year
+            .map(|y| y.to_string())
+            .unwrap_or_default();
+        let journal = entry.journal.as_deref().unwrap_or("");
+        let doi = entry.doi.as_deref().unwrap_or("");
+        let tags = entry.tags.join("; ");
+        let collections = entry.collections.join("; ");
+
+        out.push_str(&csv_field(&entry.bibtex_key));
+        out.push(',');
+        out.push_str(&csv_field(&entry.entry_type.to_string()));
+        out.push(',');
+        out.push_str(&csv_field(title));
+        out.push(',');
+        out.push_str(&csv_field(&authors));
+        out.push(',');
+        out.push_str(&csv_field(&year));
+        out.push(',');
+        out.push_str(&csv_field(journal));
+        out.push(',');
+        out.push_str(&csv_field(doi));
+        out.push(',');
+        out.push_str(&csv_field(&tags));
+        out.push(',');
+        out.push_str(&csv_field(&collections));
+        out.push('\n');
+    }
+    out
+}
+
+/// Wrap a CSV field in double-quotes if it contains commas, quotes, or newlines.
+/// Internal double-quotes are escaped as `""`.
+fn csv_field(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
 }
 
 // ── open ─────────────────────────────────────────────────────────────────────
@@ -1514,6 +1767,315 @@ pub fn cmd_modify(
     save_db(&db, &db_path)?;
     println!("Modified {} entries.", modified);
 
+    Ok(())
+}
+
+// ── review ───────────────────────────────────────────────────────────────────
+
+pub fn cmd_review(
+    collection: Option<String>,
+    filter: Option<String>,
+    unreviewed: bool,
+    config: &Config,
+) -> Result<()> {
+    let db_path = db_path_from_config(config);
+    let mut db = load_db(&db_path)?;
+
+    // Collect matching indices
+    let indices: Vec<usize> = {
+        // Start with all
+        let mut idxs: Vec<usize> = (0..db.entries.len()).collect();
+
+        // Filter by collection
+        if let Some(ref col) = collection {
+            idxs.retain(|&i| db.entries[i].collections.contains(col));
+        }
+
+        // Filter by generic filter string (same logic as cmd_modify)
+        if let Some(ref filter_str) = filter {
+            struct FilterCond {
+                kind: String,
+                value: String,
+            }
+            let conditions: Vec<FilterCond> = filter_str
+                .split(',')
+                .map(|part| {
+                    let part = part.trim();
+                    if let Some((k, v)) = part.split_once(':') {
+                        FilterCond {
+                            kind: k.trim().to_string(),
+                            value: v.trim().to_string(),
+                        }
+                    } else {
+                        FilterCond {
+                            kind: String::new(),
+                            value: part.to_string(),
+                        }
+                    }
+                })
+                .collect();
+
+            idxs.retain(|&i| {
+                let entry = &db.entries[i];
+                conditions.iter().all(|cond| match cond.kind.as_str() {
+                    "collection" => entry.collections.contains(&cond.value),
+                    "tag" => entry.tags.contains(&cond.value),
+                    "type" => entry.entry_type.to_string() == cond.value,
+                    "year" => {
+                        if let Ok(y) = cond.value.parse::<u32>() {
+                            entry.year == Some(y)
+                        } else {
+                            false
+                        }
+                    }
+                    _ => false,
+                })
+            });
+        }
+
+        // Filter unreviewed
+        if unreviewed {
+            idxs.retain(|&i| !db.entries[i].tags.contains(&"reviewed".to_string()));
+        }
+
+        // Sort by year desc, then bibtex_key asc
+        idxs.sort_by(|&a, &b| {
+            let ea = &db.entries[a];
+            let eb = &db.entries[b];
+            let year_cmp = eb.year.unwrap_or(0).cmp(&ea.year.unwrap_or(0));
+            if year_cmp != std::cmp::Ordering::Equal {
+                year_cmp
+            } else {
+                ea.bibtex_key.cmp(&eb.bibtex_key)
+            }
+        });
+
+        idxs
+    };
+
+    let total = indices.len();
+    if total == 0 {
+        println!("No entries to review.");
+        return Ok(());
+    }
+
+    let mut reviewed_count = 0usize;
+    let sep = "─────────────────────────────────────────────";
+
+    // We iterate through entries with a cursor (supports prev)
+    let mut cursor: usize = 0;
+
+    loop {
+        if cursor >= total {
+            break;
+        }
+
+        let db_idx = indices[cursor];
+        let entry = &db.entries[db_idx];
+
+        // Display entry
+        println!("\n{}", sep);
+        println!("[{}/{}] {}", cursor + 1, total, entry.bibtex_key);
+        println!("{}", sep);
+        println!(
+            "{:<10}: {}",
+            "Title",
+            entry.title.as_deref().unwrap_or("(none)")
+        );
+        let authors_str = if entry.author.is_empty() {
+            "(none)".to_string()
+        } else {
+            entry.author.join("; ")
+        };
+        println!("{:<10}: {}", "Authors", authors_str);
+        println!(
+            "{:<10}: {}",
+            "Year",
+            entry
+                .year
+                .map(|y| y.to_string())
+                .unwrap_or_else(|| "(none)".to_string())
+        );
+        println!("{:<10}: {}", "Type", entry.entry_type);
+
+        // Journal / booktitle / publisher
+        if let Some(j) = &entry.journal {
+            println!("{:<10}: {}", "Journal", j);
+        } else if let Some(bt) = &entry.booktitle {
+            println!("{:<10}: {}", "Booktitle", bt);
+        } else if let Some(p) = &entry.publisher {
+            println!("{:<10}: {}", "Publisher", p);
+        }
+
+        let tags_str = if entry.tags.is_empty() {
+            "(none)".to_string()
+        } else {
+            entry.tags.join(", ")
+        };
+        println!("{:<10}: {}", "Tags", tags_str);
+        println!(
+            "{:<10}: {}",
+            "Note",
+            entry.note.as_deref().unwrap_or("(none)")
+        );
+
+        // PDF info
+        if let Some(fp) = &entry.file_path {
+            let full_path = config.bibox_dir.join(fp);
+            let status = if full_path.exists() { "[exists]" } else { "[missing]" };
+            println!("{:<10}: {}  {}", "PDF", full_path.display(), status);
+        } else {
+            println!("{:<10}: (none)", "PDF");
+        }
+        println!("{}", sep);
+        println!("Actions: [n]ext  [p]rev  [o]pen PDF  [t]ag  [e]dit note  [s]kip  [q]uit");
+        print!("> ");
+        io::stdout().flush()?;
+
+        // Raw keypress input
+        enable_raw_mode()?;
+        let key = loop {
+            match ct_event::read() {
+                Ok(Event::Key(k)) => {
+                    // Ignore modifier-only events
+                    if k.modifiers == KeyModifiers::NONE || k.modifiers == KeyModifiers::SHIFT {
+                        break k.code;
+                    }
+                }
+                Ok(_) => continue,
+                Err(e) => {
+                    disable_raw_mode()?;
+                    return Err(e.into());
+                }
+            }
+        };
+        disable_raw_mode()?;
+        println!(); // newline after the keypress echo
+
+        match key {
+            // next / Enter → mark reviewed, move forward
+            KeyCode::Char('n') | KeyCode::Enter => {
+                let entry = &mut db.entries[db_idx];
+                if !entry.tags.contains(&"reviewed".to_string()) {
+                    entry.tags.push("reviewed".to_string());
+                    reviewed_count += 1;
+                }
+                save_db(&db, &db_path)?;
+                println!("Reviewed: {}/{}", reviewed_count, total);
+                cursor += 1;
+            }
+
+            // prev
+            KeyCode::Char('p') => {
+                if cursor > 0 {
+                    cursor -= 1;
+                } else {
+                    println!("Already at the first entry.");
+                }
+            }
+
+            // open PDF
+            KeyCode::Char('o') => {
+                let fp_opt = db.entries[db_idx].file_path.clone();
+                if let Some(fp) = fp_opt {
+                    let full_path = config.bibox_dir.join(&fp);
+                    if full_path.exists() {
+                        let path_str = full_path.to_string_lossy().to_string();
+                        if let Some(viewer) = &config.pdf_viewer {
+                            let _ = std::process::Command::new(viewer)
+                                .arg(&path_str)
+                                .spawn();
+                        } else {
+                            #[cfg(target_os = "macos")]
+                            let _ = std::process::Command::new("open")
+                                .arg(&path_str)
+                                .spawn();
+                            #[cfg(not(target_os = "macos"))]
+                            let _ = std::process::Command::new("xdg-open")
+                                .arg(&path_str)
+                                .spawn();
+                        }
+                        println!("Opening PDF...");
+                    } else {
+                        println!("PDF file not found: {}", full_path.display());
+                    }
+                } else {
+                    println!("No PDF associated with this entry.");
+                }
+                // Stay on same entry (don't advance cursor)
+            }
+
+            // tag
+            KeyCode::Char('t') => {
+                print!("Tags to add (comma-separated): ");
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                let new_tags: Vec<String> = input
+                    .trim()
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if !new_tags.is_empty() {
+                    let entry = &mut db.entries[db_idx];
+                    for tag in &new_tags {
+                        if !entry.tags.contains(tag) {
+                            entry.tags.push(tag.clone());
+                        }
+                    }
+                    save_db(&db, &db_path)?;
+                    println!("Tags added: {}", new_tags.join(", "));
+                }
+            }
+
+            // edit note
+            KeyCode::Char('e') => {
+                let key_str = db.entries[db_idx].bibtex_key.clone();
+                let title_str = db.entries[db_idx].title.clone();
+                let notes_dir = &config.notes_dir;
+                std::fs::create_dir_all(notes_dir)?;
+                let note_path = notes_dir.join(format!("{}.md", key_str));
+                if !note_path.exists() {
+                    let header = format!(
+                        "# {}\n\ncitekey: {}\n",
+                        title_str.as_deref().unwrap_or("Untitled"),
+                        key_str
+                    );
+                    std::fs::write(&note_path, &header)?;
+                }
+                let editor = std::env::var("EDITOR").unwrap_or_else(|_| {
+                    if which_editor("nano") {
+                        "nano".to_string()
+                    } else {
+                        "vi".to_string()
+                    }
+                });
+                let _ = std::process::Command::new(&editor)
+                    .arg(&note_path)
+                    .status();
+                println!("Note saved: {}", note_path.display());
+            }
+
+            // skip
+            KeyCode::Char('s') => {
+                println!("Skipped.");
+                cursor += 1;
+            }
+
+            // quit
+            KeyCode::Char('q') | KeyCode::Esc => {
+                println!("Quitting review session.");
+                break;
+            }
+
+            _ => {
+                println!("Unknown action. Use n/p/o/t/e/s/q.");
+            }
+        }
+    }
+
+    println!("\nSession complete. Reviewed {} of {} entries.", reviewed_count, total);
     Ok(())
 }
 
