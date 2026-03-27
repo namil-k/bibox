@@ -2,6 +2,13 @@
 name = "bibox"
 version = "0.1.0"
 edition = "2021"
+description = "Terminal-based bibliography manager with three-panel TUI and AI-agent-friendly Markdown notes"
+license = "MIT"
+repository = "https://github.com/namil-k/bibox"
+homepage = "https://github.com/namil-k/bibox"
+readme = "README.md"
+keywords = ["bibliography", "bibtex", "tui", "reference-manager", "academic"]
+categories = ["command-line-utilities", "science"]
 
 [[bin]]
 name = "bibox"
