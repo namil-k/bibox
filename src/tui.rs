@@ -355,7 +355,7 @@ fn draw(f: &mut Frame, app: &mut App) {
             format!("/ {} (Esc to clear)", app.search_query)
         }
         _ => {
-            "j/k navigate  Tab/h/l tabs  / search  Enter detail  y copy  o export  p open  d delete  q quit".to_string()
+            "/ search  s sort  e export  o open  d delete  c collect  t tag  n note  ? help  q quit".to_string()
         }
     };
     let status_widget = Paragraph::new(status).style(Style::default().fg(Color::DarkGray));
@@ -560,8 +560,8 @@ fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
             }
         }
 
-        // Open PDF with 'p'
-        KeyCode::Char('p') => {
+        // Open PDF with 'o'
+        KeyCode::Char('o') => {
             if let Some(entry) = app.selected_entry() {
                 let entry = entry.clone();
                 app.open_pdf(&entry);
@@ -569,7 +569,7 @@ fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
         }
 
         // Export .bib for current collection
-        KeyCode::Char('o') => {
+        KeyCode::Char('e') => {
             let path = app.export_collection_bib();
             app.mode = Mode::Message(format!("Exported: {}", path));
         }
