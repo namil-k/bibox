@@ -504,20 +504,6 @@ impl Msgs {
         }
     }
 
-    pub fn meta_updated(&self, key: &str) -> String {
-        match self.lang {
-            Lang::En => format!("Metadata updated: [{}]", key),
-            Lang::Ko => format!("메타데이터 업데이트됨: [{}]", key),
-        }
-    }
-
-    pub fn meta_manual_updated(&self, key: &str) -> String {
-        match self.lang {
-            Lang::En => format!("Metadata manually updated: [{}]", key),
-            Lang::Ko => format!("메타데이터 수동 업데이트됨: [{}]", key),
-        }
-    }
-
     pub fn file_read_failed(&self, path: &str) -> String {
         match self.lang {
             Lang::En => format!("Cannot read file: {}", path),
