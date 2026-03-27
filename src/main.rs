@@ -63,12 +63,16 @@ Examples:
         #[arg(long)]
         isbn: Option<String>,
 
+        /// arXiv ID to look up (e.g., 2301.12345)
+        #[arg(long, conflicts_with_all = ["doi", "isbn", "file", "url", "search"])]
+        arxiv: Option<String>,
+
         /// URL to resolve (academic paper page)
-        #[arg(long, conflicts_with_all = ["doi", "isbn", "file", "search"])]
+        #[arg(long, conflicts_with_all = ["doi", "isbn", "file", "arxiv", "search"])]
         url: Option<String>,
 
         /// Search Crossref by title and select interactively
-        #[arg(long, conflicts_with_all = ["doi", "isbn", "file", "url"])]
+        #[arg(long, conflicts_with_all = ["doi", "isbn", "file", "arxiv", "url"])]
         search: Option<String>,
 
         /// Assign to a collection
@@ -134,6 +138,10 @@ Examples:
         /// Maximum number of entries to show
         #[arg(long)]
         limit: Option<usize>,
+
+        /// Output as JSON (for scripting and AI agents)
+        #[arg(long)]
+        json: bool,
     },
 
     /// Search entries by keyword across all fields. Copies citekey to clipboard on Enter
@@ -141,7 +149,8 @@ Examples:
 Examples:
   bibox search \"transformer\"
   bibox search \"kim\" --field author
-  bibox search \"2024\" --collection ml")]
+  bibox search \"2024\" --collection ml
+  bibox search \"transformer\" --json")]
     Search {
         /// Search query
         query: String,
@@ -153,13 +162,21 @@ Examples:
         /// Search in a specific field: title, author, journal, doi, tag
         #[arg(long)]
         field: Option<String>,
+
+        /// Output as JSON (for scripting and AI agents)
+        #[arg(long)]
+        json: bool,
     },
 
     /// Show full metadata of an entry (title, authors, DOI, tags, collections, file path)
-    #[command(after_long_help = "Examples:\n  bibox show kim2025rust")]
+    #[command(after_long_help = "Examples:\n  bibox show kim2025rust\n  bibox show kim2025rust --json")]
     Show {
         /// Citation key or entry ID
         key: String,
+
+        /// Output as JSON (for scripting and AI agents)
+        #[arg(long)]
+        json: bool,
     },
 
     /// Edit entry metadata. When --doi is provided, re-fetches from Crossref (preserving existing values)
@@ -325,8 +342,13 @@ Examples:
         key: String,
     },
 
-    /// Reconcile the bibox directory with the database (detect orphaned PDFs, missing entries).
-    Sync,
+    /// Reconcile the bibox directory with the database (detect orphaned PDFs, missing entries)
+    #[command(after_long_help = "Examples:\n  bibox sync\n  bibox sync --yes   # non-interactive")]
+    Sync {
+        /// Auto-confirm all prompts (for scripting and AI agents)
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
 
     /// Initialize a portable bibox home directory. All data (db, pdfs, notes) lives in one folder
     #[command(after_long_help = "\
@@ -433,6 +455,7 @@ async fn main() -> Result<()> {
             file,
             doi,
             isbn,
+            arxiv,
             url,
             search,
             to,
@@ -446,7 +469,7 @@ async fn main() -> Result<()> {
             booktitle,
         }) => {
             commands::cmd_add(
-                file, to, doi, isbn, url, search, key, title, author, year, r#type, journal,
+                file, to, doi, isbn, arxiv, url, search, key, title, author, year, r#type, journal,
                 publisher, booktitle, &config,
             )
             .await?;
@@ -458,20 +481,22 @@ async fn main() -> Result<()> {
             tag,
             year,
             limit,
+            json,
         }) => {
-            commands::cmd_list(collection, r#type, tag, year, limit, &config)?;
+            commands::cmd_list(collection, r#type, tag, year, limit, json, &config)?;
         }
 
         Some(Commands::Search {
             query,
             collection,
             field,
+            json,
         }) => {
-            commands::cmd_search(query, collection, field, &config)?;
+            commands::cmd_search(query, collection, field, json, &config)?;
         }
 
-        Some(Commands::Show { key }) => {
-            commands::cmd_show(key, &config)?;
+        Some(Commands::Show { key, json }) => {
+            commands::cmd_show(key, json, &config)?;
         }
 
         Some(Commands::Edit {
@@ -546,8 +571,8 @@ async fn main() -> Result<()> {
             commands::cmd_open(key, &config)?;
         }
 
-        Some(Commands::Sync) => {
-            commands::cmd_sync(&config)?;
+        Some(Commands::Sync { yes }) => {
+            commands::cmd_sync(yes, &config)?;
         }
 
         Some(Commands::Init { path, migrate }) => {

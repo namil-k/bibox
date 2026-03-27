@@ -6,6 +6,9 @@ pub struct ArxivResult {
     pub pdf_url: String,
     pub title: String,
     pub arxiv_id: String,
+    pub authors: Vec<String>,
+    pub year: Option<u32>,
+    pub doi: Option<String>,
 }
 
 /// Build a compact search term from a full title.
@@ -56,16 +59,34 @@ pub async fn search_by_title(title: &str, max_results: usize) -> Result<Vec<Arxi
     parse_arxiv_response(&xml)
 }
 
+/// Fetch a single arXiv entry by ID (e.g., "2301.12345").
+pub async fn fetch_by_id(arxiv_id: &str) -> Result<Option<ArxivResult>> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .get("https://export.arxiv.org/api/query")
+        .query(&[("id_list", arxiv_id)])
+        .send()
+        .await
+        .context("arXiv API request failed")?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!("arXiv API error: HTTP {}", resp.status());
+    }
+
+    let xml = resp.text().await.context("arXiv response read failed")?;
+    let mut results = parse_arxiv_response(&xml)?;
+    Ok(results.pop())
+}
+
 fn parse_arxiv_response(xml: &str) -> Result<Vec<ArxivResult>> {
     let re_entry = Regex::new(r"(?s)<entry>(.*?)</entry>").unwrap();
-    // Title is the first <title> tag inside each entry
     let re_title = Regex::new(r"(?s)<title>(.*?)</title>").unwrap();
-    // Match any <link> tag containing title="pdf" (attribute order varies)
     let re_pdf_tag = Regex::new(r#"(?i)<link\b[^>]*\btitle="pdf"[^>]*/>"#).unwrap();
-    // Extract href value from a tag string
     let re_href = Regex::new(r#"\bhref="([^"]+)""#).unwrap();
-    // arXiv ID: <id>http://arxiv.org/abs/XXXXXXXX</id>
     let re_id = Regex::new(r"<id>https?://arxiv\.org/abs/([^<\s]+)</id>").unwrap();
+    let re_author = Regex::new(r"<author>\s*<name>([^<]+)</name>").unwrap();
+    let re_published = Regex::new(r"<published>(\d{4})").unwrap();
+    let re_doi = Regex::new(r#"<arxiv:doi[^>]*>([^<]+)</arxiv:doi>"#).unwrap();
 
     let mut results = vec![];
 
@@ -76,7 +97,6 @@ fn parse_arxiv_response(xml: &str) -> Result<Vec<ArxivResult>> {
             .captures(entry)
             .and_then(|c| c.get(1))
             .map(|m| {
-                // Collapse whitespace and decode basic HTML entities
                 m.as_str()
                     .split_whitespace()
                     .collect::<Vec<_>>()
@@ -88,7 +108,6 @@ fn parse_arxiv_response(xml: &str) -> Result<Vec<ArxivResult>> {
             })
             .unwrap_or_default();
 
-        // Find the <link> tag with title="pdf", then extract its href (order-independent)
         let pdf_url = re_pdf_tag
             .find(entry)
             .and_then(|tag_match| re_href.captures(tag_match.as_str()))
@@ -101,12 +120,30 @@ fn parse_arxiv_response(xml: &str) -> Result<Vec<ArxivResult>> {
             .map(|m| m.as_str().trim().to_string())
             .unwrap_or_default();
 
+        let authors: Vec<String> = re_author
+            .captures_iter(entry)
+            .filter_map(|c| c.get(1).map(|m| m.as_str().trim().to_string()))
+            .collect();
+
+        let year = re_published
+            .captures(entry)
+            .and_then(|c| c.get(1))
+            .and_then(|m| m.as_str().parse::<u32>().ok());
+
+        let doi = re_doi
+            .captures(entry)
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_str().trim().to_string());
+
         if let Some(url) = pdf_url {
             if !title.is_empty() {
                 results.push(ArxivResult {
                     pdf_url: url,
                     title,
                     arxiv_id,
+                    authors,
+                    year,
+                    doi,
                 });
             }
         }

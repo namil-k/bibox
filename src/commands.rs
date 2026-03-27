@@ -80,6 +80,7 @@ pub async fn cmd_add(
     to: Option<String>,
     doi_arg: Option<String>,
     isbn_arg: Option<String>,
+    arxiv_arg: Option<String>,
     url_arg: Option<String>,
     search_arg: Option<String>,
     key_arg: Option<String>,
@@ -97,8 +98,48 @@ pub async fn cmd_add(
 
     std::fs::create_dir_all(&config.bibox_dir)?;
 
-    // ── Mutable copies for --search/--url resolution ──
+    // ── Mutable copies for resolution ──
     let mut doi_arg = doi_arg;
+    let mut title_arg = title_arg;
+    let mut author_arg = author_arg;
+    let mut year_arg = year_arg;
+
+    // ── --arxiv: fetch metadata directly from arXiv API ──
+    if let Some(ref arxiv_id) = arxiv_arg {
+        let id = arxiv_id.trim();
+        println!("Fetching arXiv entry: {}", id);
+        match crate::arxiv::fetch_by_id(id).await? {
+            Some(result) => {
+                // Use DOI if available, otherwise use arXiv metadata directly
+                if let Some(doi) = result.doi {
+                    doi_arg = Some(doi);
+                } else {
+                    // No DOI — use arXiv metadata directly
+                    if title_arg.is_none() { title_arg = Some(result.title.clone()); }
+                    if author_arg.is_none() && !result.authors.is_empty() {
+                        author_arg = Some(result.authors.join("; "));
+                    }
+                    if year_arg.is_none() { year_arg = result.year; }
+                }
+                // Try to download PDF
+                let tmp = std::env::temp_dir().join("bibox_download.pdf");
+                if file.is_none() {
+                    println!("Downloading PDF from arXiv...");
+                    match crate::unpaywall::download_pdf(&result.pdf_url, &tmp).await {
+                        Ok(()) => {
+                            // We'll handle the file below in the normal flow
+                        }
+                        Err(e) => {
+                            println!("PDF download failed: {}. Adding without PDF.", e);
+                        }
+                    }
+                }
+            }
+            None => {
+                anyhow::bail!("arXiv entry not found: {}", id);
+            }
+        }
+    }
 
     // ── --search: Crossref title search → interactive select → DOI ──
     if let Some(ref query) = search_arg {
@@ -489,6 +530,7 @@ pub fn cmd_list(
     tag: Option<String>,
     year: Option<u32>,
     limit: Option<usize>,
+    json: bool,
     config: &Config,
 ) -> Result<()> {
     let db_path = db_path_from_config(config);
@@ -496,6 +538,20 @@ pub fn cmd_list(
 
     // No collection + no filters → show collections summary
     if collection.is_none() && entry_type.is_none() && tag.is_none() && year.is_none() {
+        if json {
+            let mut collections: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+            for entry in &db.entries {
+                for col in &entry.collections {
+                    *collections.entry(col.clone()).or_insert(0) += 1;
+                }
+            }
+            let output = serde_json::json!({
+                "total": db.entries.len(),
+                "collections": collections,
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+            return Ok(());
+        }
         return list_collections(&db, config);
     }
 
@@ -506,6 +562,12 @@ pub fn cmd_list(
         tag.as_deref(),
         year,
     );
+
+    if json {
+        let output: Vec<&Entry> = entries.iter().take(limit.unwrap_or(usize::MAX)).cloned().collect();
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
 
     let page_size = limit.unwrap_or(config.default_page_size);
     let total = entries.len();
@@ -564,6 +626,7 @@ pub fn cmd_search(
     query: String,
     collection: Option<String>,
     field: Option<String>,
+    json: bool,
     config: &Config,
 ) -> Result<()> {
     let db_path = db_path_from_config(config);
@@ -576,6 +639,12 @@ pub fn cmd_search(
         collection.as_deref(),
         config.search_case_sensitive,
     );
+
+    if json {
+        let output: Vec<&Entry> = entries;
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(());
+    }
 
     if entries.is_empty() {
         println!("{}", config.msgs.no_results(&query));
@@ -616,12 +685,17 @@ pub fn cmd_search(
 
 // ── show ─────────────────────────────────────────────────────────────────────
 
-pub fn cmd_show(id_or_key: String, config: &Config) -> Result<()> {
+pub fn cmd_show(id_or_key: String, json: bool, config: &Config) -> Result<()> {
     let db_path = db_path_from_config(config);
     let db = load_db(&db_path)?;
 
     let entry = find_by_key(&db, &id_or_key)
         .with_context(|| config.msgs.entry_not_found(&id_or_key))?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(entry)?);
+        return Ok(());
+    }
 
     let sep = "─────────────────────────────────────────";
     println!("{}", sep);
@@ -1542,7 +1616,7 @@ pub fn cmd_init(path: PathBuf, migrate: bool, config: &Config) -> Result<()> {
     Ok(())
 }
 
-pub fn cmd_sync(config: &Config) -> Result<()> {
+pub fn cmd_sync(yes: bool, config: &Config) -> Result<()> {
     let db_path = db_path_from_config(config);
     let mut db = load_db(&db_path)?;
 
@@ -1596,7 +1670,7 @@ pub fn cmd_sync(config: &Config) -> Result<()> {
         .collect();
 
     for fp in &missing {
-        if prompt_confirm(&config.msgs.sync_file_missing(fp)) {
+        if yes || prompt_confirm(&config.msgs.sync_file_missing(fp)) {
             db.entries.retain(|e| e.file_path.as_deref() != Some(fp));
             println!("{}", config.msgs.sync_removed(fp));
         }
@@ -1611,7 +1685,7 @@ pub fn cmd_sync(config: &Config) -> Result<()> {
 
     for fp in &untracked {
         println!("{}", config.msgs.sync_new_file(fp));
-        if prompt_confirm(config.msgs.add_to_db_prompt()) {
+        if yes || prompt_confirm(config.msgs.add_to_db_prompt()) {
             let full_path = config.bibox_dir.join(fp);
             let doi = pdf::extract_doi(&full_path).ok().flatten();
 
