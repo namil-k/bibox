@@ -11,6 +11,7 @@ mod git;
 mod i18n;
 mod interactive;
 mod models;
+mod notes;
 mod openlibrary;
 mod pdf;
 mod storage;
