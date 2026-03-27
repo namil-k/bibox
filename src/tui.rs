@@ -29,10 +29,43 @@ enum Mode {
     Message(String),
     Help,
     NoteView,
+    SortMenu,
 }
 
 enum ConfirmAction {
     Delete(String), // bibtex_key
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum SortCriterion {
+    Year,
+    Author,
+    Title,
+    Created,
+}
+
+impl SortCriterion {
+    fn label(&self) -> &'static str {
+        match self {
+            SortCriterion::Year => "Year",
+            SortCriterion::Author => "Author",
+            SortCriterion::Title => "Title",
+            SortCriterion::Created => "Created",
+        }
+    }
+
+    fn default_ascending(&self) -> bool {
+        match self {
+            SortCriterion::Year => false,
+            SortCriterion::Author => true,
+            SortCriterion::Title => true,
+            SortCriterion::Created => false,
+        }
+    }
+
+    fn all() -> [SortCriterion; 4] {
+        [SortCriterion::Year, SortCriterion::Author, SortCriterion::Title, SortCriterion::Created]
+    }
 }
 
 pub struct App {
@@ -48,6 +81,11 @@ pub struct App {
     note_scroll: u16,
     note_citekey: String,
     pending_editor: Option<std::path::PathBuf>,
+    sort_by: SortCriterion,
+    sort_ascending: bool,
+    sort_menu_index: usize,
+    prev_sort_by: SortCriterion,
+    prev_sort_ascending: bool,
 }
 
 impl App {
@@ -84,6 +122,11 @@ impl App {
             note_scroll: 0,
             note_citekey: String::new(),
             pending_editor: None,
+            sort_by: SortCriterion::Created,
+            sort_ascending: false,
+            sort_menu_index: 0,
+            prev_sort_by: SortCriterion::Created,
+            prev_sort_ascending: false,
         })
     }
 
@@ -137,6 +180,72 @@ impl App {
                 self.list_state.select(Some(self.filtered.len() - 1));
             } else {
                 self.list_state.select(Some(cur));
+            }
+        }
+
+        self.apply_sort();
+    }
+
+    fn apply_sort(&mut self) {
+        let entries = &self.entries;
+        let sort_by = self.sort_by;
+        let ascending = self.sort_ascending;
+
+        self.filtered.sort_by(|&a, &b| {
+            let ea = &entries[a];
+            let eb = &entries[b];
+            // None/empty always sort LAST regardless of ascending/descending
+            match sort_by {
+                SortCriterion::Year => {
+                    match (ea.year, eb.year) {
+                        (Some(a), Some(b)) => {
+                            let cmp = a.cmp(&b);
+                            if ascending { cmp } else { cmp.reverse() }
+                        }
+                        (Some(_), None) => std::cmp::Ordering::Less,
+                        (None, Some(_)) => std::cmp::Ordering::Greater,
+                        (None, None) => std::cmp::Ordering::Equal,
+                    }
+                }
+                SortCriterion::Author => {
+                    let a_name = ea.author.first()
+                        .and_then(|a| a.split(',').next())
+                        .unwrap_or("");
+                    let b_name = eb.author.first()
+                        .and_then(|a| a.split(',').next())
+                        .unwrap_or("");
+                    match (a_name.is_empty(), b_name.is_empty()) {
+                        (true, false) => std::cmp::Ordering::Greater,
+                        (false, true) => std::cmp::Ordering::Less,
+                        _ => {
+                            let cmp = a_name.to_lowercase().cmp(&b_name.to_lowercase());
+                            if ascending { cmp } else { cmp.reverse() }
+                        }
+                    }
+                }
+                SortCriterion::Title => {
+                    let a_title = ea.title.as_deref().unwrap_or("");
+                    let b_title = eb.title.as_deref().unwrap_or("");
+                    match (a_title.is_empty(), b_title.is_empty()) {
+                        (true, false) => std::cmp::Ordering::Greater,
+                        (false, true) => std::cmp::Ordering::Less,
+                        _ => {
+                            let cmp = a_title.to_lowercase().cmp(&b_title.to_lowercase());
+                            if ascending { cmp } else { cmp.reverse() }
+                        }
+                    }
+                }
+                SortCriterion::Created => {
+                    let cmp = ea.created_at.cmp(&eb.created_at);
+                    if ascending { cmp } else { cmp.reverse() }
+                }
+            }
+        });
+
+        if !self.filtered.is_empty() {
+            let cur = self.list_state.selected().unwrap_or(0);
+            if cur >= self.filtered.len() {
+                self.list_state.select(Some(0));
             }
         }
     }
@@ -407,6 +516,9 @@ fn draw(f: &mut Frame, app: &mut App) {
         Mode::NoteView => {
             draw_note_popup(f, app, size);
         }
+        Mode::SortMenu => {
+            draw_sort_popup(f, app, size);
+        }
         _ => {}
     }
 }
@@ -607,6 +719,45 @@ fn draw_note_popup(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(popup, popup_area);
 }
 
+fn draw_sort_popup(f: &mut Frame, app: &App, area: Rect) {
+    let popup_area = centered_rect(50, 10, area);
+    f.render_widget(Clear, popup_area);
+
+    let criteria = SortCriterion::all();
+    let mut lines = vec![
+        Line::from(Span::styled("Sort by:", Style::default().fg(Color::Yellow))),
+        Line::from(""),
+    ];
+    for (i, c) in criteria.iter().enumerate() {
+        let selected = *c == app.sort_by;
+        let arrow = if i == app.sort_menu_index { "▶ " } else { "  " };
+        let dir = if selected {
+            if app.sort_ascending { "↑ asc" } else { "↓ desc" }
+        } else {
+            "     "
+        };
+        let style = if selected {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(vec![
+            Span::styled(arrow, Style::default().fg(Color::Yellow)),
+            Span::styled(format!("{:<12}", c.label()), style),
+            Span::styled(dir, Style::default().fg(Color::DarkGray)),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "↑↓ select  Enter apply  Space toggle ↑↓  Esc cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let popup = Paragraph::new(lines)
+        .block(Block::default().borders(Borders::ALL).title(" Sort "));
+    f.render_widget(popup, popup_area);
+}
+
 // ── Event loop ───────────────────────────────────────────────────────────────
 
 fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
@@ -621,6 +772,7 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
         }
         Mode::Help => handle_help(app, key),
         Mode::NoteView => handle_note_view(app, key),
+        Mode::SortMenu => handle_sort_menu(app, key),
     }
 }
 
@@ -706,6 +858,16 @@ fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
             }
         }
 
+        KeyCode::Char('s') => {
+            app.prev_sort_by = app.sort_by;
+            app.prev_sort_ascending = app.sort_ascending;
+            app.sort_menu_index = SortCriterion::all()
+                .iter()
+                .position(|c| *c == app.sort_by)
+                .unwrap_or(0);
+            app.mode = Mode::SortMenu;
+        }
+
         _ => {}
     }
     Ok(false)
@@ -788,6 +950,47 @@ fn handle_note_view(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bo
         }
         KeyCode::Char('N') => {
             return open_note_editor(app);
+        }
+        _ => {}
+    }
+    Ok(false)
+}
+
+fn handle_sort_menu(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
+    let criteria = SortCriterion::all();
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => {
+            if app.sort_menu_index > 0 {
+                app.sort_menu_index -= 1;
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if app.sort_menu_index < criteria.len() - 1 {
+                app.sort_menu_index += 1;
+            }
+        }
+        KeyCode::Char(' ') => {
+            let selected = criteria[app.sort_menu_index];
+            if selected == app.sort_by {
+                app.sort_ascending = !app.sort_ascending;
+            } else {
+                app.sort_by = selected;
+            }
+        }
+        KeyCode::Enter => {
+            let new_criterion = criteria[app.sort_menu_index];
+            if new_criterion != app.sort_by {
+                app.sort_ascending = new_criterion.default_ascending();
+            }
+            app.sort_by = new_criterion;
+            app.apply_sort();
+            app.mode = Mode::Normal;
+        }
+        KeyCode::Esc => {
+            // Revert to pre-menu state
+            app.sort_by = app.prev_sort_by;
+            app.sort_ascending = app.prev_sort_ascending;
+            app.mode = Mode::Normal;
         }
         _ => {}
     }
