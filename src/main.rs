@@ -212,40 +212,6 @@ enum Commands {
         collection: String,
     },
 
-    /// Fetch/update metadata for an existing entry via DOI or manual input
-    Meta {
-        /// Citation key or entry ID
-        key: String,
-
-        /// DOI to look up from Crossref
-        #[arg(long)]
-        doi: Option<String>,
-
-        /// Override title
-        #[arg(long)]
-        title: Option<String>,
-
-        /// Override author(s), semicolon-separated
-        #[arg(long)]
-        author: Option<String>,
-
-        /// Override year
-        #[arg(long)]
-        year: Option<u32>,
-
-        /// Override journal
-        #[arg(long)]
-        journal: Option<String>,
-
-        /// Override publisher
-        #[arg(long)]
-        publisher: Option<String>,
-
-        /// Override booktitle
-        #[arg(long)]
-        booktitle: Option<String>,
-    },
-
     /// Import entries from a .bib file
     Import {
         /// Path to .bib file
@@ -431,7 +397,7 @@ async fn main() -> Result<()> {
                 tags_add,
                 tags_remove,
                 &config,
-            )?;
+            ).await?;
         }
 
         Some(Commands::Delete { key, yes }) => {
@@ -444,22 +410,6 @@ async fn main() -> Result<()> {
 
         Some(Commands::Uncollect { key, collection }) => {
             commands::cmd_uncollect(key, collection, &config)?;
-        }
-
-        Some(Commands::Meta {
-            key,
-            doi,
-            title,
-            author,
-            year,
-            journal,
-            publisher,
-            booktitle,
-        }) => {
-            commands::cmd_meta(
-                key, doi, title, author, year, journal, publisher, booktitle, &config,
-            )
-            .await?;
         }
 
         Some(Commands::Import { file, to }) => {

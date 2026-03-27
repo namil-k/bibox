@@ -586,7 +586,7 @@ pub fn cmd_show(id_or_key: String, config: &Config) -> Result<()> {
 
 // ── edit ─────────────────────────────────────────────────────────────────────
 
-pub fn cmd_edit(
+pub async fn cmd_edit(
     id_or_key: String,
     title: Option<String>,
     author: Option<String>,
@@ -606,55 +606,78 @@ pub fn cmd_edit(
     let db_path = db_path_from_config(config);
     let mut db = load_db(&db_path)?;
 
-    let entry = find_by_key_mut(&mut db, &id_or_key)
-        .with_context(|| config.msgs.entry_not_found(&id_or_key))?;
+    // If --doi provided, fetch from Crossref first (preserve-on-None)
+    if let Some(ref doi_str) = doi {
+        println!("{}", config.msgs.fetching_crossref());
+        match crossref::fetch_metadata(doi_str).await {
+            Ok(meta) => {
+                let entry = find_by_key_mut(&mut db, &id_or_key)
+                    .with_context(|| config.msgs.entry_not_found(&id_or_key))?;
 
-    if let Some(t) = title {
-        entry.title = Some(t);
-    }
-    if let Some(a) = author {
-        entry.author = a.split(';').map(|s| s.trim().to_string()).collect();
-    }
-    if let Some(y) = year {
-        entry.year = Some(y);
-    }
-    if let Some(d) = doi {
-        entry.doi = Some(d);
-    }
-    if let Some(j) = journal {
-        entry.journal = Some(j);
-    }
-    if let Some(p) = publisher {
-        entry.publisher = Some(p);
-    }
-    if let Some(bt) = booktitle {
-        entry.booktitle = Some(bt);
-    }
-    if let Some(v) = volume {
-        entry.volume = Some(v);
-    }
-    if let Some(n) = number {
-        entry.number = Some(n);
-    }
-    if let Some(pg) = pages {
-        entry.pages = Some(pg);
-    }
-    if let Some(n) = note {
-        entry.note = Some(n);
-    }
-    if let Some(ta) = tags_add {
-        for tag in ta.split(',').map(|s| s.trim().to_string()) {
-            if !entry.tags.contains(&tag) {
-                entry.tags.push(tag);
+                // CLI flags override Crossref; Crossref overrides existing; existing preserved if both None
+                entry.title = title.or(meta.title).or(entry.title.take());
+                if let Some(a) = author {
+                    entry.author = a.split(';').map(|s| s.trim().to_string()).collect();
+                } else if !meta.authors.is_empty() {
+                    entry.author = meta.authors;
+                }
+                entry.year = year.or(meta.year).or(entry.year.take());
+                entry.journal = journal.or(meta.journal).or(entry.journal.take());
+                entry.publisher = publisher.or(meta.publisher).or(entry.publisher.take());
+                entry.booktitle = booktitle.or(meta.booktitle).or(entry.booktitle.take());
+                entry.doi = Some(doi_str.clone());
+                entry.volume = volume.or(meta.volume).or(entry.volume.take());
+                entry.number = number.or(meta.number).or(entry.number.take());
+                entry.pages = pages.or(meta.pages).or(entry.pages.take());
+                entry.url = meta.url.or(entry.url.take());
+
+                if let Some(n) = note {
+                    entry.note = Some(n);
+                }
+                if let Some(ta) = tags_add {
+                    for tag in ta.split(',').map(|s| s.trim().to_string()) {
+                        if !entry.tags.contains(&tag) {
+                            entry.tags.push(tag);
+                        }
+                    }
+                }
+                if let Some(tr) = tags_remove {
+                    let remove: Vec<&str> = tr.split(',').map(|s| s.trim()).collect();
+                    entry.tags.retain(|t| !remove.contains(&t.as_str()));
+                }
+            }
+            Err(e) => anyhow::bail!("{}", config.msgs.doi_lookup_failed(&e.to_string())),
+        }
+    } else {
+        // No --doi: plain manual edit (original behavior)
+        let entry = find_by_key_mut(&mut db, &id_or_key)
+            .with_context(|| config.msgs.entry_not_found(&id_or_key))?;
+
+        if let Some(t) = title { entry.title = Some(t); }
+        if let Some(a) = author { entry.author = a.split(';').map(|s| s.trim().to_string()).collect(); }
+        if let Some(y) = year { entry.year = Some(y); }
+        if let Some(d) = doi { entry.doi = Some(d); }
+        if let Some(j) = journal { entry.journal = Some(j); }
+        if let Some(p) = publisher { entry.publisher = Some(p); }
+        if let Some(bt) = booktitle { entry.booktitle = Some(bt); }
+        if let Some(v) = volume { entry.volume = Some(v); }
+        if let Some(n) = number { entry.number = Some(n); }
+        if let Some(pg) = pages { entry.pages = Some(pg); }
+        if let Some(n) = note { entry.note = Some(n); }
+        if let Some(ta) = tags_add {
+            for tag in ta.split(',').map(|s| s.trim().to_string()) {
+                if !entry.tags.contains(&tag) { entry.tags.push(tag); }
             }
         }
-    }
-    if let Some(tr) = tags_remove {
-        let remove: Vec<&str> = tr.split(',').map(|s| s.trim()).collect();
-        entry.tags.retain(|t| !remove.contains(&t.as_str()));
+        if let Some(tr) = tags_remove {
+            let remove: Vec<&str> = tr.split(',').map(|s| s.trim()).collect();
+            entry.tags.retain(|t| !remove.contains(&t.as_str()));
+        }
     }
 
     // Rename file if metadata changed
+    let entry = find_by_key_mut(&mut db, &id_or_key)
+        .with_context(|| config.msgs.entry_not_found(&id_or_key))?;
     if entry.file_path.is_some() {
         let new_filename = format!("{}.pdf", entry_to_filename(entry));
         let old_fp = entry.file_path.as_ref().unwrap().clone();
@@ -773,120 +796,6 @@ pub fn cmd_uncollect(id_or_key: String, collection: String, config: &Config) -> 
     save_db(&db, &db_path)?;
     println!("{}", config.msgs.uncollected(&key, &collection));
 
-    Ok(())
-}
-
-// ── meta ─────────────────────────────────────────────────────────────────────
-
-pub async fn cmd_meta(
-    id_or_key: String,
-    doi: Option<String>,
-    title: Option<String>,
-    author: Option<String>,
-    year: Option<u32>,
-    journal: Option<String>,
-    publisher: Option<String>,
-    booktitle: Option<String>,
-    config: &Config,
-) -> Result<()> {
-    let db_path = db_path_from_config(config);
-    let mut db = load_db(&db_path)?;
-
-    if let Some(ref doi_str) = doi {
-        println!("{}", config.msgs.fetching_crossref());
-        match crossref::fetch_metadata(doi_str).await {
-            Ok(meta) => {
-                let entry = find_by_key_mut(&mut db, &id_or_key)
-                    .with_context(|| config.msgs.entry_not_found(&id_or_key))?;
-
-                entry.title = title.or(meta.title);
-                if let Some(a) = author {
-                    entry.author = a.split(';').map(|s| s.trim().to_string()).collect();
-                } else if !meta.authors.is_empty() {
-                    entry.author = meta.authors;
-                }
-                entry.year = year.or(meta.year);
-                entry.journal = journal.or(meta.journal);
-                entry.publisher = publisher.or(meta.publisher);
-                entry.booktitle = booktitle.or(meta.booktitle);
-                entry.doi = Some(doi_str.clone());
-                entry.volume = meta.volume;
-                entry.number = meta.number;
-                entry.pages = meta.pages;
-                entry.url = meta.url;
-
-                // Rename file if metadata changed
-                if entry.file_path.is_some() {
-                    let new_filename = format!("{}.pdf", entry_to_filename(entry));
-                    let old_fp = entry.file_path.as_ref().unwrap().clone();
-                    if old_fp != new_filename {
-                        let old_path = config.bibox_dir.join(&old_fp);
-                        let new_path = config.bibox_dir.join(&new_filename);
-                        if old_path.exists() {
-                            std::fs::rename(&old_path, &new_path).with_context(|| {
-                                config.msgs.file_rename_failed(&old_path.to_string_lossy())
-                            })?;
-                            entry.file_path = Some(new_filename.clone());
-                            println!("{}", config.msgs.file_renamed(&old_fp, &new_filename));
-                        }
-                    }
-                }
-
-                let key = entry.bibtex_key.clone();
-                println!("{}", config.msgs.meta_updated(&key));
-            }
-            Err(e) => anyhow::bail!("{}", config.msgs.doi_lookup_failed(&e.to_string())),
-        }
-    } else {
-        let entry = find_by_key_mut(&mut db, &id_or_key)
-            .with_context(|| config.msgs.entry_not_found(&id_or_key))?;
-
-        if let Some(t) = title {
-            entry.title = Some(t);
-        }
-        if let Some(a) = author {
-            entry.author = a.split(';').map(|s| s.trim().to_string()).collect();
-        }
-        if let Some(y) = year {
-            entry.year = Some(y);
-        }
-        if let Some(j) = journal {
-            entry.journal = Some(j);
-        }
-        if let Some(p) = publisher {
-            entry.publisher = Some(p);
-        }
-        if let Some(bt) = booktitle {
-            entry.booktitle = Some(bt);
-        }
-
-        // Rename file if metadata changed
-        if entry.file_path.is_some() {
-            let new_filename = format!("{}.pdf", entry_to_filename(entry));
-            let old_fp = entry.file_path.as_ref().unwrap().clone();
-            if old_fp != new_filename {
-                let old_path = config.bibox_dir.join(&old_fp);
-                let new_path = config.bibox_dir.join(&new_filename);
-                if old_path.exists() {
-                    std::fs::rename(&old_path, &new_path).with_context(|| {
-                        config.msgs.file_rename_failed(&old_path.to_string_lossy())
-                    })?;
-                    entry.file_path = Some(new_filename.clone());
-                    println!("{}", config.msgs.file_renamed(&old_fp, &new_filename));
-                }
-            }
-        }
-
-        let key = entry.bibtex_key.clone();
-        println!("{}", config.msgs.meta_manual_updated(&key));
-    }
-
-    // extract the key for git commit message
-    let meta_key = find_by_key(&db, &id_or_key).map(|e| e.bibtex_key.clone()).unwrap_or_else(|| id_or_key.clone());
-    save_db(&db, &db_path)?;
-    if config.git {
-        git::auto_commit(&db_path, &format!("bibox: meta {}", meta_key))?;
-    }
     Ok(())
 }
 
