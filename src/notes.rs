@@ -137,3 +137,122 @@ pub fn render_template(template: &str, entry: &Entry) -> String {
         .replace("{{booktitle}}", entry.booktitle.as_deref().unwrap_or(""))
         .replace("{{publisher}}", entry.publisher.as_deref().unwrap_or(""))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{Entry, EntryType};
+
+    fn make_test_entry() -> Entry {
+        Entry {
+            id: "test-id-123".to_string(),
+            bibtex_key: "kim2024attention".to_string(),
+            entry_type: EntryType::Article,
+            title: Some("Attention Is All You Need".to_string()),
+            author: vec!["Kim, J".to_string(), "Lee, S".to_string()],
+            year: Some(2024),
+            journal: Some("Nature".to_string()),
+            volume: Some("1".to_string()),
+            number: Some("2".to_string()),
+            pages: Some("1--10".to_string()),
+            publisher: Some("Springer".to_string()),
+            editor: None,
+            edition: None,
+            isbn: None,
+            booktitle: Some("NeurIPS 2024".to_string()),
+            doi: Some("10.1234/test".to_string()),
+            url: None,
+            tags: vec![],
+            note: None,
+            collections: vec![],
+            file_path: None,
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn find_section_exists() {
+        let content = "## Summary\nThis is the summary.\n## Methods\nSome methods.\n";
+        let result = find_section(content, "Summary");
+        assert!(result.is_some());
+        let (start, end) = result.unwrap();
+        let section_body = &content[start..end];
+        assert!(section_body.contains("This is the summary."));
+        assert!(!section_body.contains("Some methods."));
+    }
+
+    #[test]
+    fn find_section_case_insensitive() {
+        let content = "## Summary\nBody here.\n## Next\n";
+        assert!(find_section(content, "summary").is_some());
+        assert!(find_section(content, "SUMMARY").is_some());
+        assert!(find_section(content, " Summary ").is_some());
+    }
+
+    #[test]
+    fn find_section_not_found() {
+        let content = "## Summary\nBody here.\n";
+        assert!(find_section(content, "Nonexistent").is_none());
+    }
+
+    #[test]
+    fn find_section_at_eof() {
+        let content = "## Summary\nBody here.";
+        let result = find_section(content, "Summary");
+        assert!(result.is_some());
+        let (start, end) = result.unwrap();
+        assert_eq!(end, content.len());
+        let section_body = &content[start..end];
+        assert!(section_body.contains("Body here."));
+    }
+
+    #[test]
+    fn write_section_replace_existing() {
+        let content = "## Summary\nOld summary.\n## Methods\nKeep this.\n";
+        let result = write_section(content, "Summary", "New summary content.");
+        assert!(result.contains("New summary content."));
+        assert!(result.contains("## Methods"));
+        assert!(result.contains("Keep this."));
+        assert!(!result.contains("Old summary."));
+    }
+
+    #[test]
+    fn write_section_append_new() {
+        let content = "## Summary\nExisting.\n";
+        let result = write_section(content, "New Section", "Brand new content.");
+        assert!(result.contains("## New Section"));
+        assert!(result.contains("Brand new content."));
+        assert!(result.contains("## Summary"));
+        assert!(result.contains("Existing."));
+    }
+
+    #[test]
+    fn render_template_substitutes_vars() {
+        let entry = make_test_entry();
+        let template = "# {{title}}\ncitekey: {{citekey}}\ndoi: {{doi}}\nyear: {{year}}\nauthor: {{author}}\njournal: {{journal}}\nbooktitle: {{booktitle}}\npublisher: {{publisher}}\n";
+        let rendered = render_template(template, &entry);
+        assert!(rendered.contains("Attention Is All You Need"));
+        assert!(rendered.contains("kim2024attention"));
+        assert!(rendered.contains("10.1234/test"));
+        assert!(rendered.contains("2024"));
+        assert!(rendered.contains("Kim, J, Lee, S"));
+        assert!(rendered.contains("Nature"));
+        assert!(rendered.contains("NeurIPS 2024"));
+        assert!(rendered.contains("Springer"));
+    }
+
+    #[test]
+    fn render_template_missing_values_empty() {
+        let mut entry = make_test_entry();
+        entry.title = None;
+        entry.doi = None;
+        entry.year = None;
+        entry.author = vec![];
+        entry.journal = None;
+        entry.booktitle = None;
+        entry.publisher = None;
+        let template = "title={{title}} doi={{doi}} year={{year}} author={{author}}";
+        let rendered = render_template(template, &entry);
+        assert_eq!(rendered, "title= doi= year= author=");
+    }
+}
