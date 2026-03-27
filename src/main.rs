@@ -42,15 +42,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Add a new entry from PDF, DOI, ISBN, arXiv ID, URL, or title search.
-    ///
-    /// Examples:
-    ///   bibox add paper.pdf --to ml
-    ///   bibox add --doi 10.1145/3290605.3300907
-    ///   bibox add --arxiv 2301.12345
-    ///   bibox add --isbn 978-0-13-468599-1
-    ///   bibox add --url https://arxiv.org/abs/2301.12345
-    ///   bibox add --search "attention is all you need"
+    /// Add a new entry from PDF, DOI, ISBN, arXiv ID, URL, or title search
+    #[command(after_long_help = "\
+Examples:
+  bibox add paper.pdf --to ml
+  bibox add --doi 10.1145/3290605.3300907
+  bibox add --arxiv 2301.12345
+  bibox add --isbn 978-0-13-468599-1
+  bibox add --url https://arxiv.org/abs/2301.12345
+  bibox add --search \"attention is all you need\"")]
     Add {
         /// PDF file to add
         file: Option<PathBuf>,
@@ -108,13 +108,13 @@ enum Commands {
         booktitle: Option<String>,
     },
 
-    /// List entries, optionally filtered by collection, type, tag, or year.
-    ///
-    /// Examples:
-    ///   bibox list                  # Show all collections with counts
-    ///   bibox list cs               # List entries in 'cs' collection
-    ///   bibox list --type article   # Only articles
-    ///   bibox list --year 2024      # Only 2024 entries
+    /// List entries, optionally filtered by collection, type, tag, or year
+    #[command(after_long_help = "\
+Examples:
+  bibox list                  # Show all collections with counts
+  bibox list cs               # List entries in 'cs' collection
+  bibox list --type article   # Only articles
+  bibox list --year 2024      # Only 2024 entries")]
     List {
         /// Collection name (omit to list all collections)
         collection: Option<String>,
@@ -136,12 +136,12 @@ enum Commands {
         limit: Option<usize>,
     },
 
-    /// Search entries by keyword across all fields. Copies citekey to clipboard on Enter.
-    ///
-    /// Examples:
-    ///   bibox search "transformer"
-    ///   bibox search "kim" --field author
-    ///   bibox search "2024" --collection ml
+    /// Search entries by keyword across all fields. Copies citekey to clipboard on Enter
+    #[command(after_long_help = "\
+Examples:
+  bibox search \"transformer\"
+  bibox search \"kim\" --field author
+  bibox search \"2024\" --collection ml")]
     Search {
         /// Search query
         query: String,
@@ -155,21 +155,19 @@ enum Commands {
         field: Option<String>,
     },
 
-    /// Show full metadata of an entry (title, authors, DOI, tags, collections, file path).
-    ///
-    /// Examples:
-    ///   bibox show kim2025rust
+    /// Show full metadata of an entry (title, authors, DOI, tags, collections, file path)
+    #[command(after_long_help = "Examples:\n  bibox show kim2025rust")]
     Show {
         /// Citation key or entry ID
         key: String,
     },
 
-    /// Edit entry metadata. When --doi is provided, re-fetches from Crossref (preserving existing values).
-    ///
-    /// Examples:
-    ///   bibox edit kim2025rust --title "New Title" --year 2025
-    ///   bibox edit kim2025rust --doi 10.1234/new   # re-fetch metadata
-    ///   bibox edit kim2025rust --tags-add "ml,nlp"
+    /// Edit entry metadata. When --doi is provided, re-fetches from Crossref (preserving existing values)
+    #[command(after_long_help = "\
+Examples:
+  bibox edit kim2025rust --title \"New Title\" --year 2025
+  bibox edit kim2025rust --doi 10.1234/new   # re-fetch metadata
+  bibox edit kim2025rust --tags-add \"ml,nlp\"")]
     Edit {
         /// Citation key or entry ID
         key: String,
@@ -227,11 +225,8 @@ enum Commands {
         tags_remove: Option<String>,
     },
 
-    /// Delete an entry and its associated PDF file.
-    ///
-    /// Examples:
-    ///   bibox delete kim2025rust
-    ///   bibox delete kim2025rust -y   # skip confirmation
+    /// Delete an entry and its associated PDF file
+    #[command(after_long_help = "Examples:\n  bibox delete kim2025rust\n  bibox delete kim2025rust -y   # skip confirmation")]
     Delete {
         /// Citation key or entry ID
         key: String,
@@ -241,10 +236,8 @@ enum Commands {
         yes: bool,
     },
 
-    /// Add an entry to one or more collections.
-    ///
-    /// Examples:
-    ///   bibox collect kim2025rust ml systems
+    /// Add an entry to one or more collections
+    #[command(after_long_help = "Examples:\n  bibox collect kim2025rust ml systems")]
     Collect {
         /// Citation key or entry ID
         key: String,
@@ -254,10 +247,8 @@ enum Commands {
         collections: Vec<String>,
     },
 
-    /// Remove an entry from a collection.
-    ///
-    /// Examples:
-    ///   bibox uncollect kim2025rust ml
+    /// Remove an entry from a collection
+    #[command(after_long_help = "Examples:\n  bibox uncollect kim2025rust ml")]
     Uncollect {
         /// Citation key or entry ID
         key: String,
@@ -266,11 +257,8 @@ enum Commands {
         collection: String,
     },
 
-    /// Import entries from a BibTeX (.bib) file.
-    ///
-    /// Examples:
-    ///   bibox import refs.bib
-    ///   bibox import refs.bib --to ml
+    /// Import entries from a BibTeX (.bib) file
+    #[command(after_long_help = "Examples:\n  bibox import refs.bib\n  bibox import refs.bib --to ml")]
     Import {
         /// Path to .bib file
         file: PathBuf,
@@ -280,16 +268,15 @@ enum Commands {
         to: Option<String>,
     },
 
-    /// Export entries as BibTeX, YAML, RIS, or CSV. Optionally include PDF files.
-    ///
-    /// Examples:
-    ///   bibox export                                  # all entries as BibTeX
-    ///   bibox export kim2025 dijkstra1968             # specific entries
-    ///   bibox export --collection cs --format ris     # collection as RIS
-    ///   bibox export --include-pdf                    # BibTeX + PDFs
-    ///   bibox export --as-pdf --zip                   # PDFs only, zipped
-    ///   bibox export kim2025 --clipboard              # copy to clipboard
-    #[command(alias = "out")]
+    /// Export entries as BibTeX, YAML, RIS, or CSV. Optionally include PDF files
+    #[command(alias = "out", after_long_help = "\
+Examples:
+  bibox export                                  # all entries as BibTeX
+  bibox export kim2025 dijkstra1968             # specific entries
+  bibox export --collection cs --format ris     # collection as RIS
+  bibox export --include-pdf                    # BibTeX + PDFs
+  bibox export --as-pdf --zip                   # PDFs only, zipped
+  bibox export kim2025 --clipboard              # copy to clipboard")]
     Export {
         /// Citation keys to export (omit for collection/all)
         keys: Vec<String>,
@@ -331,10 +318,8 @@ enum Commands {
         format: String,
     },
 
-    /// Open the PDF file for an entry in the system viewer.
-    ///
-    /// Examples:
-    ///   bibox open kim2025rust
+    /// Open the PDF file for an entry in the system viewer
+    #[command(after_long_help = "Examples:\n  bibox open kim2025rust")]
     Open {
         /// Citation key or entry ID
         key: String,
@@ -343,11 +328,11 @@ enum Commands {
     /// Reconcile the bibox directory with the database (detect orphaned PDFs, missing entries).
     Sync,
 
-    /// Initialize a portable bibox home directory. All data (db, pdfs, notes) lives in one folder.
-    ///
-    /// Examples:
-    ///   bibox init ~/bibox              # create home
-    ///   bibox init ~/bibox --migrate    # create + copy existing data
+    /// Initialize a portable bibox home directory. All data (db, pdfs, notes) lives in one folder
+    #[command(after_long_help = "\
+Examples:
+  bibox init ~/bibox              # create home
+  bibox init ~/bibox --migrate    # create + copy existing data")]
     Init {
         /// Path to the home directory (e.g., ~/bibox)
         path: PathBuf,
@@ -357,15 +342,15 @@ enum Commands {
         migrate: bool,
     },
 
-    /// Read, write, or edit per-entry Markdown notes. Supports section-level updates for AI agents.
-    ///
-    /// Examples:
-    ///   bibox note kim2025rust                          # open in $EDITOR
-    ///   bibox note kim2025rust --show                   # print to stdout
-    ///   bibox note kim2025rust --path                   # print file path
-    ///   bibox note kim2025rust --template ai-summary    # init from template
-    ///   echo "text" | bibox note kim2025rust --stdin --section "Summary"  # write section
-    ///   bibox note kim2025rust --from notes.md --section "Results"        # write from file
+    /// Read, write, or edit per-entry Markdown notes. Supports section-level updates for AI agents
+    #[command(after_long_help = "\
+Examples:
+  bibox note kim2025rust                                           # open in $EDITOR
+  bibox note kim2025rust --show                                    # print to stdout
+  bibox note kim2025rust --path                                    # print file path
+  bibox note kim2025rust --template ai-summary                     # init from template
+  echo \"text\" | bibox note kim2025rust --stdin --section \"Summary\"  # write section
+  bibox note kim2025rust --from notes.md --section \"Results\"        # write from file")]
     Note {
         /// Citation key or entry ID
         key: String,

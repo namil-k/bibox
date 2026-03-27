@@ -17,11 +17,15 @@ A terminal-based bibliography manager built in Rust. Add papers by PDF, DOI, ISB
 
 ## Install
 
-```bash
-# From crates.io
-cargo install bibox
+**From crates.io:**
 
-# From source
+```bash
+cargo install bibox
+```
+
+**From source:**
+
+```bash
 git clone https://github.com/namil-k/bibox.git
 cd bibox/bibox
 cargo install --path .
@@ -31,20 +35,39 @@ Build dependencies: OpenSSL (`brew install openssl` on macOS, `sudo apt install 
 
 ## Quick Start
 
+Add a paper by PDF (auto-extracts DOI → fetches metadata):
+
 ```bash
-# Add a paper by PDF (auto-extracts DOI → fetches metadata)
 bibox add paper.pdf
+```
 
-# Add by DOI, arXiv ID, ISBN, or URL
+Add by DOI, arXiv ID, ISBN, or URL:
+
+```bash
 bibox add --doi 10.1145/3290605.3300907
+```
+
+```bash
 bibox add --arxiv 2301.12345
+```
+
+```bash
 bibox add --isbn 978-0-13-468599-1
+```
+
+```bash
 bibox add --url https://arxiv.org/abs/2301.12345
+```
 
-# Search by title on Crossref
+Search by title on Crossref:
+
+```bash
 bibox add --search "attention is all you need"
+```
 
-# Launch TUI
+Launch TUI:
+
+```bash
 bibox
 ```
 
@@ -87,42 +110,95 @@ bibox
 
 ## CLI
 
+**Browse:**
+
 ```bash
 bibox list                          # Show collections
+```
+
+```bash
 bibox list cs                       # List entries in a collection
+```
+
+```bash
 bibox show kim2025rust              # Full entry details
+```
+
+```bash
 bibox search "transformer"          # Interactive search
+```
 
+**Edit:**
+
+```bash
 bibox edit kim2025rust --title "New Title"
+```
+
+```bash
 bibox edit kim2025rust --doi 10.1234/new   # Re-fetch metadata from Crossref
+```
 
+```bash
 bibox collect kim2025rust ml systems       # Add to collections
+```
+
+```bash
 bibox uncollect kim2025rust ml             # Remove from collection
+```
 
+**Export:**
+
+```bash
 bibox export                               # Export all as BibTeX
-bibox export kim2025 dijkstra1968          # Export specific entries
-bibox export --collection cs --format ris  # Export collection as RIS
-bibox export --include-pdf                 # Export BibTeX + PDF files
+```
 
-bibox delete kim2025rust                   # Delete entry and PDF
+```bash
+bibox export kim2025 dijkstra1968          # Export specific entries
+```
+
+```bash
+bibox export --collection cs --format ris  # Export collection as RIS
+```
+
+```bash
+bibox export --include-pdf                 # Export BibTeX + PDF files
+```
+
+**Delete:**
+
+```bash
+bibox delete kim2025rust
 ```
 
 ## Notes (AI Agent Workflow)
 
-Notes are stored as Markdown files, one per entry. Designed for both human editing and AI agent pipelines:
+Notes are stored as Markdown files, one per entry. Designed for both human editing and AI agent pipelines.
+
+Initialize with a template:
 
 ```bash
-# Initialize with a template
 bibox note kim2025rust --template ai-summary
+```
 
-# AI agent writes sections
+AI agent writes sections programmatically:
+
+```bash
 echo "Proposes a novel approach..." | bibox note kim2025rust --stdin --section "Summary"
-echo "CIFAR-10: 95.2% accuracy"    | bibox note kim2025rust --stdin --section "Results"
+```
 
-# Read note back
+```bash
+echo "CIFAR-10: 95.2% accuracy" | bibox note kim2025rust --stdin --section "Results"
+```
+
+Read note back:
+
+```bash
 bibox note kim2025rust --show
+```
 
-# Human edits in $EDITOR
+Human edits in $EDITOR:
+
+```bash
 bibox note kim2025rust
 ```
 
