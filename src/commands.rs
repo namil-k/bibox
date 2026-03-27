@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use chrono::Local;
 use crossterm::event::{self as ct_event, Event, KeyCode, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -1573,30 +1573,117 @@ pub fn cmd_sync(config: &Config) -> Result<()> {
 
 // ── note ─────────────────────────────────────────────────────────────────────
 
-pub fn cmd_note(id_or_key: String, config: &Config) -> Result<()> {
+pub fn cmd_note(
+    id_or_key: String,
+    stdin: bool,
+    from: Option<PathBuf>,
+    section: Option<String>,
+    template: Option<String>,
+    show: bool,
+    path: bool,
+    force: bool,
+    config: &Config,
+) -> Result<()> {
     let db_path = db_path_from_config(config);
     let db = load_db(&db_path)?;
 
     let entry = find_by_key(&db, &id_or_key)
-        .with_context(|| config.msgs.entry_not_found(&id_or_key))?;
+        .with_context(|| config.msgs.entry_not_found(&id_or_key))?
+        .clone();
 
     let notes_dir = &config.notes_dir;
     std::fs::create_dir_all(notes_dir)?;
-
     let note_path = notes_dir.join(format!("{}.md", entry.bibtex_key));
 
+    // ── Validate flag combinations ──
+    if section.is_some() && !stdin && from.is_none() {
+        anyhow::bail!("{}", config.msgs.section_requires_source());
+    }
+
+    // ── Read-only modes ──
+    if path {
+        println!("{}", note_path.display());
+        return Ok(());
+    }
+
+    if show {
+        if !note_path.exists() {
+            anyhow::bail!("{}", config.msgs.note_not_found(&id_or_key));
+        }
+        let content = std::fs::read_to_string(&note_path)?;
+        print!("{}", content);
+        return Ok(());
+    }
+
+    // ── Order of operations: 1) Template  2) Content write  3) Editor ──
+
+    // Step 1: Template
+    if let Some(ref tmpl_name) = template {
+        if note_path.exists() && !force {
+            anyhow::bail!("{}", config.msgs.note_already_exists());
+        }
+        let tmpl = crate::notes::load_template(tmpl_name, &config.templates_dir)?;
+        let rendered = crate::notes::render_template(&tmpl, &entry);
+        std::fs::write(&note_path, &rendered)?;
+        println!("{}", config.msgs.note_template_applied(tmpl_name, &note_path.display().to_string()));
+    }
+
+    // Step 2: Content write (--stdin or --from)
+    let content_source: Option<String> = if stdin {
+        let mut buf = String::new();
+        io::stdin().read_to_string(&mut buf)?;
+        Some(buf)
+    } else if let Some(ref file) = from {
+        Some(std::fs::read_to_string(file).with_context(|| format!("Cannot read: {}", file.display()))?)
+    } else {
+        None
+    };
+
+    if let Some(new_content) = content_source {
+        // Ensure the note file exists (create minimal header if no template was applied)
+        if !note_path.exists() {
+            let header = format!(
+                "# {}\ncitekey: {}\n\n",
+                entry.title.as_deref().unwrap_or("Untitled"),
+                entry.bibtex_key
+            );
+            std::fs::write(&note_path, &header)?;
+        }
+
+        let existing = std::fs::read_to_string(&note_path)?;
+
+        if let Some(ref sec) = section {
+            let updated = crate::notes::write_section(&existing, sec, &new_content);
+            std::fs::write(&note_path, &updated)?;
+            println!("{}", config.msgs.note_written_section(sec, &note_path.display().to_string()));
+        } else {
+            // Append to end
+            let mut result = existing;
+            if !result.ends_with('\n') {
+                result.push('\n');
+            }
+            result.push_str(&new_content);
+            if !new_content.ends_with('\n') {
+                result.push('\n');
+            }
+            std::fs::write(&note_path, &result)?;
+            println!("{}", config.msgs.note_appended(&note_path.display().to_string()));
+        }
+        return Ok(());
+    }
+
+    // Step 3: No --stdin/--from — open editor (original behavior)
     if !note_path.exists() {
         let header = format!(
-            "# {}\n\ncitekey: {}\n",
+            "# {}\ncitekey: {}\n",
             entry.title.as_deref().unwrap_or("Untitled"),
             entry.bibtex_key
         );
         std::fs::write(&note_path, &header)?;
     }
 
-    // Find editor: $EDITOR → nano → vi
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| {
-        if which_editor("nano") { "nano".to_string() } else { "vi".to_string() }
+        if which_exists("nano") { "nano".to_string() } else { "vi".to_string() }
     });
 
     std::process::Command::new(&editor)
@@ -1604,11 +1691,11 @@ pub fn cmd_note(id_or_key: String, config: &Config) -> Result<()> {
         .status()
         .with_context(|| format!("Failed to launch editor '{}'", editor))?;
 
-    println!("Note saved: {}", note_path.display());
+    println!("{}", config.msgs.note_saved(&note_path.display().to_string()));
     Ok(())
 }
 
-fn which_editor(name: &str) -> bool {
+fn which_exists(name: &str) -> bool {
     std::process::Command::new("which")
         .arg(name)
         .output()
@@ -2050,7 +2137,7 @@ pub fn cmd_review(
                     std::fs::write(&note_path, &header)?;
                 }
                 let editor = std::env::var("EDITOR").unwrap_or_else(|_| {
-                    if which_editor("nano") {
+                    if which_exists("nano") {
                         "nano".to_string()
                     } else {
                         "vi".to_string()

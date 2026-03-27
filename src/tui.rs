@@ -657,6 +657,7 @@ pub fn run_tui(config: &Config) -> Result<()> {
         language: config.language.clone(),
         git: config.git,
         notes_dir: config.notes_dir.clone(),
+        templates_dir: config.templates_dir.clone(),
         msgs: crate::i18n::Msgs::new(&config.language),
     };
 
