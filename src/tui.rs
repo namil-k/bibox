@@ -27,6 +27,7 @@ enum Mode {
     Confirm(ConfirmAction),
     Detail,
     Message(String),
+    Help,
 }
 
 enum ConfirmAction {
@@ -376,6 +377,9 @@ fn draw(f: &mut Frame, app: &mut App) {
             let msg = msg.clone();
             draw_message_popup(f, &msg, size);
         }
+        Mode::Help => {
+            draw_help_popup(f, size);
+        }
         _ => {}
     }
 }
@@ -508,6 +512,49 @@ fn draw_message_popup(f: &mut Frame, msg: &str, area: Rect) {
     f.render_widget(text, popup_area);
 }
 
+fn draw_help_popup(f: &mut Frame, area: Rect) {
+    let popup_area = centered_rect(80, 20, area);
+    f.render_widget(Clear, popup_area);
+
+    let help_text = vec![
+        Line::from(Span::styled(
+            "bibox — Keyboard Shortcuts",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Navigation", Style::default().fg(Color::Cyan)),
+        ]),
+        Line::from("  j/↓  Move down          Enter  Show details"),
+        Line::from("  k/↑  Move up            y      Copy citekey"),
+        Line::from("  Tab   Next collection    e      Export .bib"),
+        Line::from("  h/l   Prev/Next tab      o      Open PDF"),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Edit", Style::default().fg(Color::Cyan)),
+        ]),
+        Line::from("  c     Manage collections  d     Delete entry"),
+        Line::from("  t     Edit tags           n     View note"),
+        Line::from("  s     Sort menu           N     Edit note ($EDITOR)"),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Other", Style::default().fg(Color::Cyan)),
+        ]),
+        Line::from("  /     Search              q     Quit"),
+        Line::from("  ?     This help screen"),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Press ? or Esc to close",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+
+    let popup = Paragraph::new(help_text)
+        .block(Block::default().borders(Borders::ALL).title(" Help "))
+        .wrap(ratatui::widgets::Wrap { trim: false });
+    f.render_widget(popup, popup_area);
+}
+
 // ── Event loop ───────────────────────────────────────────────────────────────
 
 fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
@@ -520,6 +567,7 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
             app.mode = Mode::Normal;
             Ok(false)
         }
+        Mode::Help => handle_help(app, key),
     }
 }
 
@@ -582,6 +630,10 @@ fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
             }
         }
 
+        KeyCode::Char('?') => {
+            app.mode = Mode::Help;
+        }
+
         _ => {}
     }
     Ok(false)
@@ -631,6 +683,16 @@ fn handle_confirm(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool
 fn handle_detail(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
     match key.code {
         KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+            app.mode = Mode::Normal;
+        }
+        _ => {}
+    }
+    Ok(false)
+}
+
+fn handle_help(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') => {
             app.mode = Mode::Normal;
         }
         _ => {}
