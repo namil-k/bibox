@@ -135,11 +135,11 @@ impl Msgs {
     pub fn already_exists_with_hint(&self, key: &str) -> String {
         match self.lang {
             Lang::En => format!(
-                "Already in library: [{}]. Use 'bibox meta {}' to update metadata.",
+                "Already in library: [{}]. Use 'bibox edit {} --doi <DOI>' to update metadata.",
                 key, key
             ),
             Lang::Ko => format!(
-                "이미 라이브러리에 있습니다: [{}]. 'bibox meta {}'로 메타데이터를 업데이트하세요.",
+                "이미 라이브러리에 있습니다: [{}]. 'bibox edit {} --doi <DOI>'로 메타데이터를 업데이트하세요.",
                 key, key
             ),
         }
@@ -161,8 +161,8 @@ impl Msgs {
 
     pub fn no_file_or_doi(&self) -> &'static str {
         match self.lang {
-            Lang::En => "File path or --doi required.",
-            Lang::Ko => "파일 경로 또는 --doi 가 필요합니다.",
+            Lang::En => "File path, --doi, --url, or --search required.",
+            Lang::Ko => "파일 경로, --doi, --url, 또는 --search가 필요합니다.",
         }
     }
 
@@ -591,11 +591,11 @@ impl Msgs {
     pub fn sync_entry_added(&self, key: &str) -> String {
         match self.lang {
             Lang::En => format!(
-                "  Added: [{}] (metadata needed: bibox meta {})",
+                "  Added: [{}] (metadata needed: bibox edit {} --doi <DOI>)",
                 key, key
             ),
             Lang::Ko => format!(
-                "  추가됨: [{}] (메타데이터 입력 필요: bibox meta {})",
+                "  추가됨: [{}] (메타데이터 입력 필요: bibox edit {} --doi <DOI>)",
                 key, key
             ),
         }
@@ -660,6 +660,34 @@ impl Msgs {
         match self.lang {
             Lang::En => format!("  Found {} result(s) on arXiv. Select to download:", n),
             Lang::Ko => format!("  arXiv에서 {} 개 검색됨. 선택하여 다운로드:", n),
+        }
+    }
+
+    pub fn searching_crossref_query(&self, query: &str) -> String {
+        match self.lang {
+            Lang::En => format!("Searching Crossref for \"{}\"...", query),
+            Lang::Ko => format!("Crossref에서 \"{}\" 검색 중...", query),
+        }
+    }
+
+    pub fn no_search_results(&self, query: &str) -> String {
+        match self.lang {
+            Lang::En => format!("No results found for '{}'.", query),
+            Lang::Ko => format!("'{}'에 대한 검색 결과가 없습니다.", query),
+        }
+    }
+
+    pub fn url_resolve_failed(&self) -> &'static str {
+        match self.lang {
+            Lang::En => "Could not extract metadata from URL. Try --doi or --search instead.",
+            Lang::Ko => "URL에서 메타데이터를 추출할 수 없습니다. --doi 또는 --search를 사용하세요.",
+        }
+    }
+
+    pub fn url_fetch_failed(&self, reason: &str) -> String {
+        match self.lang {
+            Lang::En => format!("Failed to fetch URL: {}", reason),
+            Lang::Ko => format!("URL 가져오기 실패: {}", reason),
         }
     }
 }
