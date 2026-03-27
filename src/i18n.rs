@@ -676,4 +676,53 @@ impl Msgs {
             Lang::Ko => format!("URL 가져오기 실패: {}", reason),
         }
     }
+
+    pub fn note_saved(&self, path: &str) -> String {
+        match self.lang {
+            Lang::En => format!("Note saved: {}", path),
+            Lang::Ko => format!("노트 저장됨: {}", path),
+        }
+    }
+
+    pub fn note_not_found(&self, key: &str) -> String {
+        match self.lang {
+            Lang::En => format!("No note found for '{}'.", key),
+            Lang::Ko => format!("'{}'에 대한 노트가 없습니다.", key),
+        }
+    }
+
+    pub fn note_already_exists(&self) -> &'static str {
+        match self.lang {
+            Lang::En => "Note already exists. Use --force to overwrite with template.",
+            Lang::Ko => "노트가 이미 존재합니다. --force를 사용하여 템플릿으로 덮어쓰세요.",
+        }
+    }
+
+    pub fn section_requires_source(&self) -> &'static str {
+        match self.lang {
+            Lang::En => "--section requires --stdin or --from.",
+            Lang::Ko => "--section은 --stdin 또는 --from이 필요합니다.",
+        }
+    }
+
+    pub fn note_written_section(&self, section: &str, path: &str) -> String {
+        match self.lang {
+            Lang::En => format!("Section '{}' written to {}", section, path),
+            Lang::Ko => format!("섹션 '{}'이(가) {}에 작성됨", section, path),
+        }
+    }
+
+    pub fn note_appended(&self, path: &str) -> String {
+        match self.lang {
+            Lang::En => format!("Content appended to {}", path),
+            Lang::Ko => format!("내용이 {}에 추가됨", path),
+        }
+    }
+
+    pub fn note_template_applied(&self, template: &str, path: &str) -> String {
+        match self.lang {
+            Lang::En => format!("Template '{}' applied to {}", template, path),
+            Lang::Ko => format!("템플릿 '{}'이(가) {}에 적용됨", template, path),
+        }
+    }
 }

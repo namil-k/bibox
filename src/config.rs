@@ -19,6 +19,8 @@ pub struct Config {
     /// Directory for per-entry note files (default: ~/.local/share/bibox/notes/)
     #[serde(default = "default_notes_dir")]
     pub notes_dir: PathBuf,
+    #[serde(default = "default_templates_dir")]
+    pub templates_dir: PathBuf,
     #[serde(skip)]
     pub msgs: Msgs,
 }
@@ -34,6 +36,7 @@ impl Default for Config {
             language: default_language(),
             git: false,
             notes_dir: default_notes_dir(),
+            templates_dir: default_templates_dir(),
             msgs: Msgs::default(),
         }
     }
@@ -53,6 +56,13 @@ fn default_notes_dir() -> PathBuf {
         })
         .join("bibox")
         .join("notes")
+}
+
+fn default_templates_dir() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("bibox")
+        .join("templates")
 }
 
 fn default_bibox_dir() -> PathBuf {
