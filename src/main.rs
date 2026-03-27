@@ -257,7 +257,8 @@ enum Commands {
     },
 
     /// Export BibTeX or PDFs
-    Out {
+    #[command(alias = "out")]
+    Export {
         /// Export entries from this collection
         #[arg(long)]
         collection: Option<String>,
@@ -465,7 +466,7 @@ async fn main() -> Result<()> {
             commands::cmd_import(file, to, &config)?;
         }
 
-        Some(Commands::Out {
+        Some(Commands::Export {
             collection,
             key,
             r#type,
@@ -476,7 +477,7 @@ async fn main() -> Result<()> {
             zip,
             format,
         }) => {
-            commands::cmd_out(
+            commands::cmd_export(
                 collection, key, output, clipboard, r#type, tag, as_pdf, zip, format, &config,
             )?;
         }

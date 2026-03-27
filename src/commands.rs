@@ -1036,7 +1036,7 @@ pub fn cmd_import(file: PathBuf, to: Option<String>, config: &Config) -> Result<
 
 // ── out ──────────────────────────────────────────────────────────────────────
 
-pub fn cmd_out(
+pub fn cmd_export(
     collection: Option<String>,
     key: Option<String>,
     output: Option<PathBuf>,
