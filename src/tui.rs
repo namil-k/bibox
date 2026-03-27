@@ -9,33 +9,113 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
     Frame, Terminal,
 };
 use std::io;
 
-use crate::bibtex::entries_to_bibtex;
+use crate::bibtex::{entries_to_bibtex, entry_to_filename};
 use crate::config::Config;
 use crate::models::Entry;
-use crate::storage::{load_db, save_db};
+use crate::storage::{find_by_key_mut, load_db, save_db};
 
 // ── State ────────────────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, PartialEq)]
+enum Panel {
+    Collections,
+    Entries,
+    Preview,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum PreviewMode {
+    Info,
+    Note,
+    Pdf,
+}
+
+impl PreviewMode {
+    fn next(self) -> Self {
+        match self {
+            PreviewMode::Info => PreviewMode::Note,
+            PreviewMode::Note => PreviewMode::Pdf,
+            PreviewMode::Pdf => PreviewMode::Info,
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            PreviewMode::Info => "Info",
+            PreviewMode::Note => "Note",
+            PreviewMode::Pdf => "PDF",
+        }
+    }
+}
 
 enum Mode {
     Normal,
     Search,
     Confirm(ConfirmAction),
-    Detail,
     Message(String),
     Help,
-    NoteView,
     SortMenu,
     CollectionPicker,
     TagEditor,
+    Loading(String),
+    ExportMenu,
+    Settings,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ExportScope {
+    Selected,
+    Collection,
+    All,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ExportFormat {
+    BibTeX,
+    Yaml,
+    Ris,
+}
+
+impl ExportFormat {
+    fn label(&self) -> &'static str {
+        match self {
+            ExportFormat::BibTeX => "BibTeX (.bib)",
+            ExportFormat::Yaml => "YAML (.yaml)",
+            ExportFormat::Ris => "RIS (.ris)",
+        }
+    }
+    fn ext(&self) -> &'static str {
+        match self {
+            ExportFormat::BibTeX => "bibtex",
+            ExportFormat::Yaml => "yaml",
+            ExportFormat::Ris => "ris",
+        }
+    }
+}
+
+struct ExportState {
+    scope_options: Vec<(ExportScope, String)>,
+    scope_idx: usize,
+    format_idx: usize,
+    include_pdf: bool,
+    /// 0 = scope section, 1 = format section, 2 = include_pdf toggle
+    section: usize,
 }
 
 enum ConfirmAction {
-    Delete(String), // bibtex_key
+    Delete(String),
+    FetchPdf(String),
+}
+
+struct BgTaskResult {
+    key: String,
+    file_path: String,
+    full_path: String,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -55,7 +135,6 @@ impl SortCriterion {
             SortCriterion::Created => "Created",
         }
     }
-
     fn default_ascending(&self) -> bool {
         match self {
             SortCriterion::Year => false,
@@ -64,7 +143,6 @@ impl SortCriterion {
             SortCriterion::Created => false,
         }
     }
-
     fn all() -> [SortCriterion; 4] {
         [SortCriterion::Year, SortCriterion::Author, SortCriterion::Title, SortCriterion::Created]
     }
@@ -82,20 +160,12 @@ impl ChecklistPicker {
     fn new(title: String, items: Vec<(String, bool)>, new_item_label: String) -> Self {
         Self { title, items, index: 0, new_item_input: None, new_item_label }
     }
-
-    fn move_up(&mut self) {
-        if self.index > 0 { self.index -= 1; }
-    }
-
+    fn move_up(&mut self) { if self.index > 0 { self.index -= 1; } }
     fn move_down(&mut self) {
         let max = self.items.len();
         if self.index < max { self.index += 1; }
     }
-
-    fn is_on_new_item(&self) -> bool {
-        self.index == self.items.len()
-    }
-
+    fn is_on_new_item(&self) -> bool { self.index == self.items.len() }
     fn toggle(&mut self) {
         if self.is_on_new_item() {
             self.new_item_input = Some(String::new());
@@ -103,23 +173,13 @@ impl ChecklistPicker {
             item.1 = !item.1;
         }
     }
-
-    fn in_input_mode(&self) -> bool {
-        self.new_item_input.is_some()
-    }
-
+    fn in_input_mode(&self) -> bool { self.new_item_input.is_some() }
     fn apply_char(&mut self, c: char) {
-        if let Some(ref mut input) = self.new_item_input {
-            input.push(c);
-        }
+        if let Some(ref mut input) = self.new_item_input { input.push(c); }
     }
-
     fn backspace(&mut self) {
-        if let Some(ref mut input) = self.new_item_input {
-            input.pop();
-        }
+        if let Some(ref mut input) = self.new_item_input { input.pop(); }
     }
-
     fn confirm_input(&mut self) {
         if let Some(input) = self.new_item_input.take() {
             let name = input.trim().to_string();
@@ -128,11 +188,7 @@ impl ChecklistPicker {
             }
         }
     }
-
-    fn cancel_input(&mut self) {
-        self.new_item_input = None;
-    }
-
+    fn cancel_input(&mut self) { self.new_item_input = None; }
     fn checked_names(&self) -> Vec<String> {
         self.items.iter().filter(|(_, c)| *c).map(|(n, _)| n.clone()).collect()
     }
@@ -140,23 +196,40 @@ impl ChecklistPicker {
 
 pub struct App {
     entries: Vec<Entry>,
-    filtered: Vec<usize>, // indices into entries
+    filtered: Vec<usize>,
     list_state: ListState,
-    tab_index: usize,     // 0 = All, 1..N = collections
-    collections: Vec<String>,
+    col_list_state: ListState,
+    collections: Vec<String>,  // index 0 = "All", rest = collection names
     search_query: String,
     mode: Mode,
     config: Config,
+    // Panels
+    focus: Panel,
+    preview_mode: PreviewMode,
+    preview_scroll: u16,
+    // Note cache
     note_content: String,
-    note_scroll: u16,
     note_citekey: String,
+    // Background tasks
     pending_editor: Option<std::path::PathBuf>,
+    bg_result: Option<std::sync::mpsc::Receiver<Result<BgTaskResult>>>,
+    spinner_tick: usize,
+    // Sort
     sort_by: SortCriterion,
     sort_ascending: bool,
     sort_menu_index: usize,
     prev_sort_by: SortCriterion,
     prev_sort_ascending: bool,
+    // Picker
     picker: Option<ChecklistPicker>,
+    // Vim key buffer (for gg, {number}j etc.)
+    key_buf: String,
+    // Multi-select
+    selected_keys: std::collections::HashSet<String>,
+    // Export menu state
+    export_state: Option<ExportState>,
+    // Settings state
+    settings_idx: usize,
 }
 
 impl App {
@@ -165,85 +238,78 @@ impl App {
         let db = load_db(&db_path)?;
         let entries = db.entries;
 
-        // Collect unique collections, sorted
         let mut col_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for e in &entries {
-            for c in &e.collections {
-                col_set.insert(c.clone());
-            }
+            for c in &e.collections { col_set.insert(c.clone()); }
         }
         let collections: Vec<String> = col_set.into_iter().collect();
 
         let filtered: Vec<usize> = (0..entries.len()).collect();
         let mut list_state = ListState::default();
-        if !filtered.is_empty() {
-            list_state.select(Some(0));
-        }
+        if !filtered.is_empty() { list_state.select(Some(0)); }
+
+        let mut col_list_state = ListState::default();
+        col_list_state.select(Some(0)); // "All" selected
 
         Ok(Self {
             entries,
             filtered,
             list_state,
-            tab_index: 0,
+            col_list_state,
             collections,
             search_query: String::new(),
             mode: Mode::Normal,
             config,
+            focus: Panel::Entries,
+            preview_mode: PreviewMode::Info,
+            preview_scroll: 0,
             note_content: String::new(),
-            note_scroll: 0,
             note_citekey: String::new(),
             pending_editor: None,
+            bg_result: None,
+            spinner_tick: 0,
             sort_by: SortCriterion::Created,
             sort_ascending: false,
             sort_menu_index: 0,
             prev_sort_by: SortCriterion::Created,
             prev_sort_ascending: false,
             picker: None,
+            key_buf: String::new(),
+            selected_keys: std::collections::HashSet::new(),
+            export_state: None,
+            settings_idx: 0,
         })
     }
 
     fn current_collection(&self) -> Option<&str> {
-        if self.tab_index == 0 {
-            None
-        } else {
-            self.collections.get(self.tab_index - 1).map(|s| s.as_str())
-        }
+        let idx = self.col_list_state.selected().unwrap_or(0);
+        if idx == 0 { None } else { self.collections.get(idx - 1).map(|s| s.as_str()) }
     }
+
+    fn col_count(&self) -> usize { self.collections.len() + 1 }
 
     fn apply_filters(&mut self) {
         let col = self.current_collection().map(|s| s.to_string());
         let query = self.search_query.to_lowercase();
 
-        self.filtered = self
-            .entries
-            .iter()
-            .enumerate()
+        self.filtered = self.entries.iter().enumerate()
             .filter(|(_, e)| {
-                // Collection filter
                 let col_ok = match &col {
                     None => true,
                     Some(c) => e.collections.contains(c),
                 };
-                if !col_ok {
-                    return false;
-                }
-                // Search filter
-                if query.is_empty() {
-                    return true;
-                }
+                if !col_ok { return false; }
+                if query.is_empty() { return true; }
                 let title = e.title.as_deref().unwrap_or("").to_lowercase();
                 let author = e.author.join(" ").to_lowercase();
                 let key = e.bibtex_key.to_lowercase();
                 let tags = e.tags.join(" ").to_lowercase();
-                title.contains(&query)
-                    || author.contains(&query)
-                    || key.contains(&query)
-                    || tags.contains(&query)
+                title.contains(&query) || author.contains(&query)
+                    || key.contains(&query) || tags.contains(&query)
             })
             .map(|(i, _)| i)
             .collect();
 
-        // Adjust selection
         if self.filtered.is_empty() {
             self.list_state.select(None);
         } else {
@@ -254,7 +320,6 @@ impl App {
                 self.list_state.select(Some(cur));
             }
         }
-
         self.apply_sort();
     }
 
@@ -266,50 +331,36 @@ impl App {
         self.filtered.sort_by(|&a, &b| {
             let ea = &entries[a];
             let eb = &entries[b];
-            // None/empty always sort LAST regardless of ascending/descending
             match sort_by {
                 SortCriterion::Year => {
                     match (ea.year, eb.year) {
-                        (Some(a), Some(b)) => {
-                            let cmp = a.cmp(&b);
-                            if ascending { cmp } else { cmp.reverse() }
-                        }
+                        (Some(a), Some(b)) => { let c = a.cmp(&b); if ascending { c } else { c.reverse() } }
                         (Some(_), None) => std::cmp::Ordering::Less,
                         (None, Some(_)) => std::cmp::Ordering::Greater,
                         (None, None) => std::cmp::Ordering::Equal,
                     }
                 }
                 SortCriterion::Author => {
-                    let a_name = ea.author.first()
-                        .and_then(|a| a.split(',').next())
-                        .unwrap_or("");
-                    let b_name = eb.author.first()
-                        .and_then(|a| a.split(',').next())
-                        .unwrap_or("");
-                    match (a_name.is_empty(), b_name.is_empty()) {
+                    let a_n = ea.author.first().and_then(|a| a.split(',').next()).unwrap_or("");
+                    let b_n = eb.author.first().and_then(|a| a.split(',').next()).unwrap_or("");
+                    match (a_n.is_empty(), b_n.is_empty()) {
                         (true, false) => std::cmp::Ordering::Greater,
                         (false, true) => std::cmp::Ordering::Less,
-                        _ => {
-                            let cmp = a_name.to_lowercase().cmp(&b_name.to_lowercase());
-                            if ascending { cmp } else { cmp.reverse() }
-                        }
+                        _ => { let c = a_n.to_lowercase().cmp(&b_n.to_lowercase()); if ascending { c } else { c.reverse() } }
                     }
                 }
                 SortCriterion::Title => {
-                    let a_title = ea.title.as_deref().unwrap_or("");
-                    let b_title = eb.title.as_deref().unwrap_or("");
-                    match (a_title.is_empty(), b_title.is_empty()) {
+                    let a_t = ea.title.as_deref().unwrap_or("");
+                    let b_t = eb.title.as_deref().unwrap_or("");
+                    match (a_t.is_empty(), b_t.is_empty()) {
                         (true, false) => std::cmp::Ordering::Greater,
                         (false, true) => std::cmp::Ordering::Less,
-                        _ => {
-                            let cmp = a_title.to_lowercase().cmp(&b_title.to_lowercase());
-                            if ascending { cmp } else { cmp.reverse() }
-                        }
+                        _ => { let c = a_t.to_lowercase().cmp(&b_t.to_lowercase()); if ascending { c } else { c.reverse() } }
                     }
                 }
                 SortCriterion::Created => {
-                    let cmp = ea.created_at.cmp(&eb.created_at);
-                    if ascending { cmp } else { cmp.reverse() }
+                    let c = ea.created_at.cmp(&eb.created_at);
+                    if ascending { c } else { c.reverse() }
                 }
             }
         });
@@ -333,51 +384,74 @@ impl App {
         self.filtered.get(sel).copied()
     }
 
-    fn move_down(&mut self) {
-        if self.filtered.is_empty() {
-            return;
-        }
+    fn move_entry_down(&mut self) {
+        if self.filtered.is_empty() { return; }
         let next = match self.list_state.selected() {
             Some(i) => (i + 1).min(self.filtered.len() - 1),
             None => 0,
         };
         self.list_state.select(Some(next));
+        self.update_preview();
     }
 
-    fn move_up(&mut self) {
-        if self.filtered.is_empty() {
-            return;
-        }
+    fn move_entry_up(&mut self) {
+        if self.filtered.is_empty() { return; }
         let prev = match self.list_state.selected() {
             Some(i) if i > 0 => i - 1,
             _ => 0,
         };
         self.list_state.select(Some(prev));
+        self.update_preview();
     }
 
-    fn tab_count(&self) -> usize {
-        self.collections.len() + 1
-    }
-
-    fn next_tab(&mut self) {
-        self.tab_index = (self.tab_index + 1) % self.tab_count();
+    fn move_col_down(&mut self) {
+        let n = self.col_count();
+        if n == 0 { return; }
+        let next = match self.col_list_state.selected() {
+            Some(i) => (i + 1).min(n - 1),
+            None => 0,
+        };
+        self.col_list_state.select(Some(next));
         self.list_state.select(Some(0));
         self.apply_filters();
     }
 
-    fn prev_tab(&mut self) {
-        let n = self.tab_count();
-        self.tab_index = (self.tab_index + n - 1) % n;
+    fn move_col_up(&mut self) {
+        let prev = match self.col_list_state.selected() {
+            Some(i) if i > 0 => i - 1,
+            _ => 0,
+        };
+        self.col_list_state.select(Some(prev));
         self.list_state.select(Some(0));
         self.apply_filters();
+    }
+
+    fn update_preview(&mut self) {
+        self.preview_scroll = 0;
+        if self.preview_mode == PreviewMode::Note {
+            self.load_note_for_preview();
+        }
+    }
+
+    fn load_note_for_preview(&mut self) {
+        let citekey = match self.selected_entry() {
+            Some(entry) => entry.bibtex_key.clone(),
+            None => return,
+        };
+        if citekey == self.note_citekey { return; }
+        let note_path = self.config.notes_dir.join(format!("{}.md", citekey));
+        self.note_content = if note_path.exists() {
+            std::fs::read_to_string(&note_path).unwrap_or_else(|_| "Error reading note.".into())
+        } else {
+            "No note yet. Press N to create one.".into()
+        };
+        self.note_citekey = citekey;
     }
 
     fn open_pdf(&self, entry: &Entry) {
         if let Some(fp) = &entry.file_path {
             let full_path = self.config.bibox_dir.join(fp);
-            if !full_path.exists() {
-                return;
-            }
+            if !full_path.exists() { return; }
             let path_str = full_path.to_string_lossy().to_string();
             if let Some(viewer) = &self.config.pdf_viewer {
                 let _ = std::process::Command::new(viewer).arg(&path_str).spawn();
@@ -392,15 +466,12 @@ impl App {
 
     fn export_collection_bib(&self) -> String {
         let col = self.current_collection();
-        let entries: Vec<&Entry> = self
-            .entries
-            .iter()
+        let entries: Vec<&Entry> = self.entries.iter()
             .filter(|e| match col {
                 None => true,
                 Some(c) => e.collections.iter().any(|ec| ec == c),
             })
             .collect();
-
         let bib = entries_to_bibtex(&entries);
         let col_name = col.unwrap_or("all");
         let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
@@ -409,74 +480,47 @@ impl App {
         filename
     }
 
-    fn load_note(&mut self) {
-        let citekey = match self.selected_entry() {
-            Some(entry) => entry.bibtex_key.clone(),
-            None => return,
-        };
-        let note_path = self.config.notes_dir.join(format!("{}.md", citekey));
-        self.note_content = if note_path.exists() {
-            std::fs::read_to_string(&note_path).unwrap_or_else(|_| "Error reading note.".into())
-        } else {
-            "No note yet. Press N to create one.".into()
-        };
-        self.note_citekey = citekey;
-        self.note_scroll = 0;
-    }
-
     fn delete_selected(&mut self) -> Result<()> {
         if let Some(idx) = self.selected_entry_idx() {
             let entry = &self.entries[idx];
-
-            // Delete PDF if present
             if let Some(fp) = &entry.file_path {
                 let path = self.config.bibox_dir.join(fp);
-                if path.exists() {
-                    let _ = std::fs::remove_file(&path);
-                }
+                if path.exists() { let _ = std::fs::remove_file(&path); }
             }
-
             let key = entry.bibtex_key.clone();
             self.entries.retain(|e| e.bibtex_key != key);
-
-            // Save DB
             let db_path = crate::config::db_path();
             let mut db = load_db(&db_path)?;
             db.entries = self.entries.clone();
             save_db(&db, &db_path)?;
-
-            // Re-collect collections
-            let mut col_set: std::collections::BTreeSet<String> =
-                std::collections::BTreeSet::new();
-            for e in &self.entries {
-                for c in &e.collections {
-                    col_set.insert(c.clone());
-                }
-            }
-            self.collections = col_set.into_iter().collect();
-            if self.tab_index > self.tab_count().saturating_sub(1) {
-                self.tab_index = 0;
-            }
-
+            self.rebuild_collections();
             self.apply_filters();
         }
         Ok(())
+    }
+
+    fn rebuild_collections(&mut self) {
+        let mut col_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for e in &self.entries {
+            for c in &e.collections { col_set.insert(c.clone()); }
+        }
+        self.collections = col_set.into_iter().collect();
+        let sel = self.col_list_state.selected().unwrap_or(0);
+        if sel >= self.col_count() {
+            self.col_list_state.select(Some(0));
+        }
     }
 
     fn open_collection_picker(&mut self) {
         if let Some(entry) = self.selected_entry() {
             let entry_cols: std::collections::HashSet<&String> = entry.collections.iter().collect();
             let all_cols: std::collections::BTreeSet<String> = self.entries.iter()
-                .flat_map(|e| e.collections.iter().cloned())
-                .collect();
+                .flat_map(|e| e.collections.iter().cloned()).collect();
             let items: Vec<(String, bool)> = all_cols.into_iter()
-                .map(|c| { let checked = entry_cols.contains(&c); (c, checked) })
-                .collect();
+                .map(|c| { let checked = entry_cols.contains(&c); (c, checked) }).collect();
             let key = entry.bibtex_key.clone();
             self.picker = Some(ChecklistPicker::new(
-                format!("Collections for [{}]:", key),
-                items,
-                "+ New collection...".into(),
+                format!("Collections for [{}]:", key), items, "+ New collection...".into(),
             ));
             self.mode = Mode::CollectionPicker;
         }
@@ -486,16 +530,12 @@ impl App {
         if let Some(entry) = self.selected_entry() {
             let entry_tags: std::collections::HashSet<&String> = entry.tags.iter().collect();
             let all_tags: std::collections::BTreeSet<String> = self.entries.iter()
-                .flat_map(|e| e.tags.iter().cloned())
-                .collect();
+                .flat_map(|e| e.tags.iter().cloned()).collect();
             let items: Vec<(String, bool)> = all_tags.into_iter()
-                .map(|t| { let checked = entry_tags.contains(&t); (t, checked) })
-                .collect();
+                .map(|t| { let checked = entry_tags.contains(&t); (t, checked) }).collect();
             let key = entry.bibtex_key.clone();
             self.picker = Some(ChecklistPicker::new(
-                format!("Tags for [{}]:", key),
-                items,
-                "+ New tag...".into(),
+                format!("Tags for [{}]:", key), items, "+ New tag...".into(),
             ));
             self.mode = Mode::TagEditor;
         }
@@ -507,22 +547,12 @@ impl App {
             _ => { self.picker = None; return Ok(()); }
         };
         self.picker = None;
-
         self.entries[idx].collections = new_cols;
-
         let db_path = crate::config::db_path();
         let mut db = load_db(&db_path)?;
         db.entries = self.entries.clone();
         save_db(&db, &db_path)?;
-
-        let mut col_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        for e in &self.entries {
-            for c in &e.collections { col_set.insert(c.clone()); }
-        }
-        self.collections = col_set.into_iter().collect();
-        if self.tab_index > self.tab_count().saturating_sub(1) {
-            self.tab_index = 0;
-        }
+        self.rebuild_collections();
         self.apply_filters();
         Ok(())
     }
@@ -533,14 +563,11 @@ impl App {
             _ => { self.picker = None; return Ok(()); }
         };
         self.picker = None;
-
         self.entries[idx].tags = new_tags;
-
         let db_path = crate::config::db_path();
         let mut db = load_db(&db_path)?;
         db.entries = self.entries.clone();
         save_db(&db, &db_path)?;
-
         self.apply_filters();
         Ok(())
     }
@@ -551,82 +578,183 @@ impl App {
 fn draw(f: &mut Frame, app: &mut App) {
     let size = f.area();
 
-    // Main layout: title/tabs | list | status bar
-    let chunks = Layout::default()
+    // Main layout: content | status bar
+    let outer = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(3),
-            Constraint::Length(1),
-        ])
+        .constraints([Constraint::Min(3), Constraint::Length(1)])
         .split(size);
 
-    // ── Tabs ──
-    let tab_titles: Vec<Line> = {
-        let mut titles = vec![Line::from("All")];
-        for c in &app.collections {
-            titles.push(Line::from(c.as_str()));
+    // 3-panel horizontal: collections | entries | preview
+    let r = app.config.panel_ratio;
+    let total = r[0] + r[1] + r[2];
+    let pct = |v: u16| -> u16 { (v as u32 * 100 / total as u32) as u16 };
+    let panels = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(pct(r[0])),
+            Constraint::Percentage(pct(r[1])),
+            Constraint::Percentage(pct(r[2])),
+        ])
+        .split(outer[0]);
+
+    draw_collections_panel(f, app, panels[0]);
+    draw_entries_panel(f, app, panels[1]);
+    draw_preview_panel(f, app, panels[2]);
+    draw_status_bar(f, app, outer[1]);
+
+    // Overlays
+    match &app.mode {
+        Mode::Confirm(ConfirmAction::Delete(key)) => {
+            let key = key.clone();
+            draw_confirm_popup(f, &format!("Delete '{}'? (y/n)", key), size);
         }
-        titles
+        Mode::Confirm(ConfirmAction::FetchPdf(key)) => {
+            let key = key.clone();
+            draw_confirm_popup(f, &format!("No PDF for '{}'. Fetch from web? (y/n)", key), size);
+        }
+        Mode::Message(msg) => {
+            let msg = msg.clone();
+            draw_message_popup(f, &msg, size);
+        }
+        Mode::Loading(msg) => {
+            let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            let spinner = frames[app.spinner_tick % frames.len()];
+            let text = format!("{} {}", spinner, msg);
+            draw_message_popup(f, &text, size);
+        }
+        Mode::Help => draw_help_popup(f, size),
+        Mode::SortMenu => draw_sort_popup(f, app, size),
+        Mode::CollectionPicker | Mode::TagEditor => {
+            if let Some(ref picker) = app.picker {
+                draw_checklist_popup(f, picker, size);
+            }
+        }
+        Mode::ExportMenu => {
+            if let Some(ref es) = app.export_state {
+                draw_export_popup(f, es, size);
+            }
+        }
+        Mode::Settings => {
+            draw_settings_popup(f, app, size);
+        }
+        _ => {}
+    }
+}
+
+fn draw_collections_panel(f: &mut Frame, app: &App, area: Rect) {
+    let focused = app.focus == Panel::Collections;
+    let border_style = if focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
     };
-    let tabs = Tabs::new(tab_titles)
-        .block(Block::default().borders(Borders::ALL).title(" bibox "))
-        .select(app.tab_index)
-        .style(Style::default().fg(Color::Gray))
+
+    let mut items: Vec<ListItem> = vec![];
+
+    // "All" item
+    let all_count = app.entries.len();
+    let all_text = format!("All ({})", all_count);
+    items.push(ListItem::new(all_text));
+
+    // Collection items
+    for col in &app.collections {
+        let count = app.entries.iter().filter(|e| e.collections.contains(col)).count();
+        items.push(ListItem::new(format!("{} ({})", col, count)));
+    }
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(" Collections ");
+
+    let list = List::new(items)
+        .block(block)
         .highlight_style(
             Style::default()
-                .fg(Color::Cyan)
+                .fg(Color::Black)
+                .bg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
-        );
-    f.render_widget(tabs, chunks[0]);
+        )
+        .highlight_symbol("> ");
 
-    // ── Entry list ──
-    let items: Vec<ListItem> = app
-        .filtered
-        .iter()
-        .map(|&idx| {
-            let e = &app.entries[idx];
-            let title = e.title.as_deref().unwrap_or("(no title)");
-            let author = e.author_display();
-            let year = e
-                .year
-                .map(|y| y.to_string())
-                .unwrap_or_else(|| "n.d.".to_string());
-            let tags = if e.tags.is_empty() {
-                String::new()
-            } else {
-                e.tags.join(", ")
-            };
-            let pdf_mark = if e.file_path.is_some() { " [pdf]" } else { "" };
+    let mut state = app.col_list_state.clone();
+    f.render_stateful_widget(list, area, &mut state);
+}
 
-            let line1 = Line::from(vec![
-                Span::styled("[", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    e.bibtex_key.as_str(),
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("] ", Style::default().fg(Color::DarkGray)),
-                Span::raw(title),
-                Span::styled(pdf_mark, Style::default().fg(Color::Green)),
-            ]);
+fn draw_entries_panel(f: &mut Frame, app: &mut App, area: Rect) {
+    let focused = app.focus == Panel::Entries;
+    let border_style = if focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
 
-            let meta = if tags.is_empty() {
-                format!("{} | {} | {}", e.entry_type, author, year)
-            } else {
-                format!("{} | {} | {} | {}", e.entry_type, author, year, tags)
-            };
-            let line2 = Line::from(Span::styled(
-                meta,
-                Style::default().fg(Color::DarkGray),
-            ));
+    use crate::config::LineNumbers;
+    let selected_idx = app.list_state.selected().unwrap_or(0);
 
-            ListItem::new(Text::from(vec![line1, line2]))
-        })
-        .collect();
+    let items: Vec<ListItem> = app.filtered.iter().enumerate().map(|(i, &idx)| {
+        let e = &app.entries[idx];
+        let title = e.title.as_deref().unwrap_or("(no title)");
+        let author = e.author_display();
+        let year = e.year.map(|y| y.to_string()).unwrap_or_else(|| "n.d.".to_string());
+        let pdf_mark = if e.file_path.is_some() { " ◆" } else { "" };
 
-    let block = Block::default().borders(Borders::ALL);
+        let line_num = match app.config.line_numbers {
+            LineNumbers::Absolute => format!("{:>3} ", i + 1),
+            LineNumbers::Relative => {
+                if i == selected_idx {
+                    format!("{:>3} ", i + 1)
+                } else {
+                    let diff = (i as isize - selected_idx as isize).unsigned_abs();
+                    format!("{:>3} ", diff)
+                }
+            }
+            LineNumbers::None => String::new(),
+        };
+        let num_style = if i == selected_idx {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+
+        let pad = " ".repeat(line_num.len());
+        let is_selected = app.selected_keys.contains(&e.bibtex_key);
+        let sel_mark = if is_selected { "✓ " } else { "  " };
+        let sel_style = if is_selected { Style::default().fg(Color::Green) } else { Style::default() };
+
+        let line1 = Line::from(vec![
+            Span::styled(line_num, num_style),
+            Span::styled(sel_mark, sel_style),
+            Span::styled(e.bibtex_key.clone(), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(pdf_mark.to_string(), Style::default().fg(Color::Green)),
+        ]);
+        let line2 = Line::from(Span::raw(format!("{}  {}", pad, title)));
+        let line3 = Line::from(Span::styled(
+            format!("{}  {} · {}", pad, author, year),
+            Style::default().fg(Color::DarkGray),
+        ));
+
+        let mut item = ListItem::new(Text::from(vec![line1, line2, line3]));
+        if is_selected {
+            item = item.style(Style::default().bg(Color::Rgb(30, 50, 30)));
+        }
+        item
+    }).collect();
+
+    let sel_count = app.selected_keys.len();
+    let title = if !app.search_query.is_empty() {
+        format!(" Search: {} ({}) ", app.search_query, app.filtered.len())
+    } else if sel_count > 0 {
+        format!(" Entries ({}) — {} selected ", app.filtered.len(), sel_count)
+    } else {
+        format!(" Entries ({}) ", app.filtered.len())
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(title);
+
     let list = List::new(items)
         .block(block)
         .highlight_style(
@@ -635,51 +763,210 @@ fn draw(f: &mut Frame, app: &mut App) {
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("> ");
-    f.render_stateful_widget(list, chunks[1], &mut app.list_state);
 
-    // ── Status bar ──
-    let status = match &app.mode {
-        Mode::Search => {
-            format!("/ {} (Esc to clear)", app.search_query)
+    f.render_stateful_widget(list, area, &mut app.list_state);
+}
+
+fn draw_preview_panel(f: &mut Frame, app: &mut App, area: Rect) {
+    let focused = app.focus == Panel::Preview;
+    let border_style = if focused {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+
+    // Tab bar for preview modes
+    let modes = [PreviewMode::Info, PreviewMode::Note, PreviewMode::Pdf];
+    let tab_spans: Vec<Span> = modes.iter().map(|m| {
+        if *m == app.preview_mode {
+            Span::styled(
+                format!(" {} ", m.label()),
+                Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled(format!(" {} ", m.label()), Style::default().fg(Color::DarkGray))
         }
+    }).collect();
+
+    let mut title_spans = vec![Span::raw(" ")];
+    for (i, s) in tab_spans.into_iter().enumerate() {
+        title_spans.push(s);
+        if i < modes.len() - 1 {
+            title_spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
+        }
+    }
+    title_spans.push(Span::raw(" "));
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(Line::from(title_spans));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    match app.preview_mode {
+        PreviewMode::Info => draw_preview_info(f, app, inner),
+        PreviewMode::Note => draw_preview_note(f, app, inner),
+        PreviewMode::Pdf => draw_preview_pdf(f, app, inner),
+    }
+}
+
+fn draw_preview_info(f: &mut Frame, app: &App, area: Rect) {
+    let entry = match app.selected_entry() {
+        Some(e) => e,
+        None => {
+            f.render_widget(Paragraph::new("No entry selected.").style(Style::default().fg(Color::DarkGray)), area);
+            return;
+        }
+    };
+
+    let mut lines: Vec<Line<'_>> = vec![];
+
+    if let Some(t) = &entry.title {
+        lines.push(Line::from(Span::styled(t.as_str(), Style::default().add_modifier(Modifier::BOLD))));
+        lines.push(Line::from(""));
+    }
+
+    macro_rules! field {
+        ($label:expr, $value:expr) => {
+            lines.push(Line::from(vec![
+                Span::styled(format!("{:<12}", $label), Style::default().fg(Color::Cyan)),
+                Span::raw($value.to_string()),
+            ]));
+        };
+    }
+
+    field!("Key:", entry.bibtex_key.as_str());
+    field!("Type:", entry.entry_type.to_string());
+    if !entry.author.is_empty() { field!("Author:", entry.author.join("; ")); }
+    if let Some(y) = entry.year { field!("Year:", y.to_string()); }
+    if let Some(j) = &entry.journal { field!("Journal:", j.as_str()); }
+    if let Some(bt) = &entry.booktitle { field!("Booktitle:", bt.as_str()); }
+    if let Some(p) = &entry.publisher { field!("Publisher:", p.as_str()); }
+    if let Some(doi) = &entry.doi { field!("DOI:", doi.as_str()); }
+    if let Some(url) = &entry.url { field!("URL:", url.as_str()); }
+    if !entry.tags.is_empty() { field!("Tags:", entry.tags.join(", ")); }
+    if !entry.collections.is_empty() { field!("Collections:", entry.collections.join(", ")); }
+    if let Some(fp) = &entry.file_path {
+        field!("File:", fp.as_str());
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:<12}", "File:"), Style::default().fg(Color::Cyan)),
+            Span::styled("No PDF", Style::default().fg(Color::DarkGray)),
+        ]));
+    }
+
+    let p = Paragraph::new(lines)
+        .scroll((app.preview_scroll, 0))
+        .wrap(ratatui::widgets::Wrap { trim: true });
+    f.render_widget(p, area);
+}
+
+fn draw_preview_note(f: &mut Frame, app: &mut App, area: Rect) {
+    // Load note if needed
+    if let Some(entry) = app.selected_entry() {
+        let key = entry.bibtex_key.clone();
+        if key != app.note_citekey {
+            let note_path = app.config.notes_dir.join(format!("{}.md", key));
+            app.note_content = if note_path.exists() {
+                std::fs::read_to_string(&note_path).unwrap_or_else(|_| "Error reading note.".into())
+            } else {
+                "No note yet. Press N to create one.".into()
+            };
+            app.note_citekey = key;
+        }
+    } else {
+        f.render_widget(
+            Paragraph::new("No entry selected.").style(Style::default().fg(Color::DarkGray)),
+            area,
+        );
+        return;
+    }
+
+    let lines: Vec<Line> = app.note_content.lines()
+        .map(|l| {
+            if l.starts_with("# ") {
+                Line::from(Span::styled(l, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)))
+            } else if l.starts_with("## ") {
+                Line::from(Span::styled(l, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)))
+            } else {
+                Line::from(l.to_string())
+            }
+        })
+        .collect();
+
+    let p = Paragraph::new(lines)
+        .scroll((app.preview_scroll, 0))
+        .wrap(ratatui::widgets::Wrap { trim: true });
+    f.render_widget(p, area);
+}
+
+fn draw_preview_pdf(f: &mut Frame, app: &App, area: Rect) {
+    let entry = match app.selected_entry() {
+        Some(e) => e,
+        None => {
+            f.render_widget(Paragraph::new("No entry selected.").style(Style::default().fg(Color::DarkGray)), area);
+            return;
+        }
+    };
+
+    if entry.file_path.is_none() {
+        f.render_widget(
+            Paragraph::new("No PDF attached.\nPress o to fetch or open.").style(Style::default().fg(Color::DarkGray)),
+            area,
+        );
+        return;
+    }
+
+    // PDF preview placeholder — Kitty protocol rendering to be implemented
+    let fp = entry.file_path.as_ref().unwrap();
+    let full_path = app.config.bibox_dir.join(fp);
+
+    // Try pdftotext fallback for now
+    let text = std::process::Command::new("pdftotext")
+        .args(["-l", "1", "-layout", &full_path.to_string_lossy(), "-"])
+        .output()
+        .ok()
+        .and_then(|o| if o.status.success() { String::from_utf8(o.stdout).ok() } else { None });
+
+    match text {
+        Some(content) => {
+            let lines: Vec<Line> = content.lines()
+                .map(|l| Line::from(l.to_string()))
+                .collect();
+            let p = Paragraph::new(lines)
+                .scroll((app.preview_scroll, 0))
+                .wrap(ratatui::widgets::Wrap { trim: false });
+            f.render_widget(p, area);
+        }
+        None => {
+            f.render_widget(
+                Paragraph::new(format!("PDF: {}\n\nInstall pdftotext for text preview:\n  brew install poppler", fp))
+                    .style(Style::default().fg(Color::DarkGray)),
+                area,
+            );
+        }
+    }
+}
+
+fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
+    let status = match &app.mode {
+        Mode::Search => format!("/ {} (Esc to clear)", app.search_query),
         _ => {
-            "/ search  s sort  e export  o open  d delete  c collect  t tag  n note  ? help  q quit".to_string()
+            let panel_hint = match app.focus {
+                Panel::Collections => "j/k navigate  l→entries",
+                Panel::Entries => "h←collections  l→preview  j/k navigate",
+                Panel::Preview => "h←entries  Tab switch mode  j/k scroll",
+            };
+            format!(
+                "{}  │  / search  s sort  o open  e export  d delete  c collect  t tag  N note  , settings  ? help  q quit",
+                panel_hint
+            )
         }
     };
     let status_widget = Paragraph::new(status).style(Style::default().fg(Color::DarkGray));
-    f.render_widget(status_widget, chunks[2]);
-
-    // ── Overlays ──
-    match &app.mode {
-        Mode::Detail => {
-            if let Some(entry) = app.selected_entry() {
-                draw_detail_popup(f, entry, size);
-            }
-        }
-        Mode::Confirm(ConfirmAction::Delete(key)) => {
-            let key = key.clone();
-            draw_confirm_popup(f, &format!("Delete '{}'? (y/n)", key), size);
-        }
-        Mode::Message(msg) => {
-            let msg = msg.clone();
-            draw_message_popup(f, &msg, size);
-        }
-        Mode::Help => {
-            draw_help_popup(f, size);
-        }
-        Mode::NoteView => {
-            draw_note_popup(f, app, size);
-        }
-        Mode::SortMenu => {
-            draw_sort_popup(f, app, size);
-        }
-        Mode::CollectionPicker | Mode::TagEditor => {
-            if let Some(ref picker) = app.picker {
-                draw_checklist_popup(f, picker, size);
-            }
-        }
-        _ => {}
-    }
+    f.render_widget(status_widget, area);
 }
 
 fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
@@ -691,7 +978,6 @@ fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
             Constraint::Min(0),
         ])
         .split(r);
-
     Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -700,96 +986,6 @@ fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
-}
-
-fn draw_detail_popup(f: &mut Frame, entry: &Entry, area: Rect) {
-    let popup_area = centered_rect(80, 20, area);
-    f.render_widget(Clear, popup_area);
-
-    let mut lines = vec![];
-    lines.push(Line::from(vec![
-        Span::styled("Key: ", Style::default().fg(Color::Cyan)),
-        Span::raw(&entry.bibtex_key),
-    ]));
-    if let Some(t) = &entry.title {
-        lines.push(Line::from(vec![
-            Span::styled("Title: ", Style::default().fg(Color::Cyan)),
-            Span::raw(t.as_str()),
-        ]));
-    }
-    if !entry.author.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled("Author: ", Style::default().fg(Color::Cyan)),
-            Span::raw(entry.author.join("; ")),
-        ]));
-    }
-    if let Some(y) = entry.year {
-        lines.push(Line::from(vec![
-            Span::styled("Year: ", Style::default().fg(Color::Cyan)),
-            Span::raw(y.to_string()),
-        ]));
-    }
-    lines.push(Line::from(vec![
-        Span::styled("Type: ", Style::default().fg(Color::Cyan)),
-        Span::raw(entry.entry_type.to_string()),
-    ]));
-    if let Some(j) = &entry.journal {
-        lines.push(Line::from(vec![
-            Span::styled("Journal: ", Style::default().fg(Color::Cyan)),
-            Span::raw(j.as_str()),
-        ]));
-    }
-    if let Some(p) = &entry.publisher {
-        lines.push(Line::from(vec![
-            Span::styled("Publisher: ", Style::default().fg(Color::Cyan)),
-            Span::raw(p.as_str()),
-        ]));
-    }
-    if let Some(bt) = &entry.booktitle {
-        lines.push(Line::from(vec![
-            Span::styled("Booktitle: ", Style::default().fg(Color::Cyan)),
-            Span::raw(bt.as_str()),
-        ]));
-    }
-    if let Some(doi) = &entry.doi {
-        lines.push(Line::from(vec![
-            Span::styled("DOI: ", Style::default().fg(Color::Cyan)),
-            Span::raw(doi.as_str()),
-        ]));
-    }
-    if !entry.tags.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled("Tags: ", Style::default().fg(Color::Cyan)),
-            Span::raw(entry.tags.join(", ")),
-        ]));
-    }
-    if !entry.collections.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled("Collections: ", Style::default().fg(Color::Cyan)),
-            Span::raw(entry.collections.join(", ")),
-        ]));
-    }
-    if let Some(fp) = &entry.file_path {
-        lines.push(Line::from(vec![
-            Span::styled("File: ", Style::default().fg(Color::Cyan)),
-            Span::raw(fp.as_str()),
-        ]));
-    }
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "Press Esc or Enter to close",
-        Style::default().fg(Color::DarkGray),
-    )));
-
-    let text = Text::from(lines);
-    let popup = Paragraph::new(text)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Entry Detail "),
-        )
-        .wrap(ratatui::widgets::Wrap { trim: true });
-    f.render_widget(popup, popup_area);
 }
 
 fn draw_confirm_popup(f: &mut Frame, msg: &str, area: Rect) {
@@ -811,40 +1007,38 @@ fn draw_message_popup(f: &mut Frame, msg: &str, area: Rect) {
 }
 
 fn draw_help_popup(f: &mut Frame, area: Rect) {
-    let popup_area = centered_rect(80, 20, area);
+    let popup_area = centered_rect(80, 28, area);
     f.render_widget(Clear, popup_area);
 
     let help_text = vec![
-        Line::from(Span::styled(
-            "bibox — Keyboard Shortcuts",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-        )),
+        Line::from(Span::styled("bibox — Keyboard Shortcuts", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("Navigation", Style::default().fg(Color::Cyan)),
-        ]),
-        Line::from("  j/↓  Move down          Enter  Show details"),
-        Line::from("  k/↑  Move up            y      Copy citekey"),
-        Line::from("  Tab   Next collection    e      Export .bib"),
-        Line::from("  h/l   Prev/Next tab      o      Open PDF"),
+        Line::from(Span::styled("Navigation", Style::default().fg(Color::Cyan))),
+        Line::from("  h/←   Focus left panel    l/→   Focus right panel"),
+        Line::from("  j/↓   Move down           k/↑   Move up"),
+        Line::from("  gg    Jump to top          G     Jump to bottom"),
+        Line::from("  H/M/L Screen top/mid/bot   {n}j  Move n lines"),
+        Line::from("  C-d   Half page down       C-u   Half page up"),
+        Line::from("  Tab   Switch preview mode (Info / Note / PDF)"),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("Edit", Style::default().fg(Color::Cyan)),
-        ]),
-        Line::from("  c     Manage collections  d     Delete entry"),
-        Line::from("  t     Edit tags           n     View note"),
-        Line::from("  s     Sort menu           N     Edit note ($EDITOR)"),
+        Line::from(Span::styled("Selection", Style::default().fg(Color::Cyan))),
+        Line::from("  Space Toggle select         V     Select/deselect all"),
+        Line::from("  Esc   Clear selection"),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("Other", Style::default().fg(Color::Cyan)),
-        ]),
-        Line::from("  /     Search              q     Quit"),
-        Line::from("  ?     This help screen"),
+        Line::from(Span::styled("Actions", Style::default().fg(Color::Cyan))),
+        Line::from("  y     Copy citekey          o     Open PDF / fetch"),
+        Line::from("  e     Export menu            d     Delete entry"),
+        Line::from("  N     Edit note ($EDITOR)"),
         Line::from(""),
-        Line::from(Span::styled(
-            "Press ? or Esc to close",
-            Style::default().fg(Color::DarkGray),
-        )),
+        Line::from(Span::styled("Edit", Style::default().fg(Color::Cyan))),
+        Line::from("  c     Manage collections    t     Edit tags"),
+        Line::from("  s     Sort menu"),
+        Line::from(""),
+        Line::from(Span::styled("Other", Style::default().fg(Color::Cyan))),
+        Line::from("  /     Search                q     Quit"),
+        Line::from("  ,     Settings              ?     This help"),
+        Line::from(""),
+        Line::from(Span::styled("Press ? or Esc to close", Style::default().fg(Color::DarkGray))),
     ];
 
     let popup = Paragraph::new(help_text)
@@ -853,35 +1047,9 @@ fn draw_help_popup(f: &mut Frame, area: Rect) {
     f.render_widget(popup, popup_area);
 }
 
-fn draw_note_popup(f: &mut Frame, app: &App, area: Rect) {
-    let popup_area = centered_rect(80, 20, area);
-    f.render_widget(Clear, popup_area);
-
-    let lines: Vec<Line> = app
-        .note_content
-        .lines()
-        .skip(app.note_scroll as usize)
-        .map(|l| Line::from(l.to_string()))
-        .collect();
-
-    let mut text_lines = lines;
-    text_lines.push(Line::from(""));
-    text_lines.push(Line::from(Span::styled(
-        "↑↓ scroll  N edit in $EDITOR  Esc close",
-        Style::default().fg(Color::DarkGray),
-    )));
-
-    let title = format!(" Note: {} ", app.note_citekey);
-    let popup = Paragraph::new(text_lines)
-        .block(Block::default().borders(Borders::ALL).title(title))
-        .wrap(ratatui::widgets::Wrap { trim: false });
-    f.render_widget(popup, popup_area);
-}
-
 fn draw_sort_popup(f: &mut Frame, app: &App, area: Rect) {
     let popup_area = centered_rect(50, 10, area);
     f.render_widget(Clear, popup_area);
-
     let criteria = SortCriterion::all();
     let mut lines = vec![
         Line::from(Span::styled("Sort by:", Style::default().fg(Color::Yellow))),
@@ -890,16 +1058,8 @@ fn draw_sort_popup(f: &mut Frame, app: &App, area: Rect) {
     for (i, c) in criteria.iter().enumerate() {
         let selected = *c == app.sort_by;
         let arrow = if i == app.sort_menu_index { "▶ " } else { "  " };
-        let dir = if selected {
-            if app.sort_ascending { "↑ asc" } else { "↓ desc" }
-        } else {
-            "     "
-        };
-        let style = if selected {
-            Style::default().fg(Color::Cyan)
-        } else {
-            Style::default()
-        };
+        let dir = if selected { if app.sort_ascending { "↑ asc" } else { "↓ desc" } } else { "     " };
+        let style = if selected { Style::default().fg(Color::Cyan) } else { Style::default() };
         lines.push(Line::from(vec![
             Span::styled(arrow, Style::default().fg(Color::Yellow)),
             Span::styled(format!("{:<12}", c.label()), style),
@@ -907,13 +1067,8 @@ fn draw_sort_popup(f: &mut Frame, app: &App, area: Rect) {
         ]));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "↑↓ select  Enter apply  Space toggle ↑↓  Esc cancel",
-        Style::default().fg(Color::DarkGray),
-    )));
-
-    let popup = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title(" Sort "));
+    lines.push(Line::from(Span::styled("↑↓ select  Enter apply  Space toggle ↑↓  Esc cancel", Style::default().fg(Color::DarkGray))));
+    let popup = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Sort "));
     f.render_widget(popup, popup_area);
 }
 
@@ -927,22 +1082,16 @@ fn draw_checklist_popup(f: &mut Frame, picker: &ChecklistPicker, area: Rect) {
         Line::from(Span::styled(&picker.title, Style::default().fg(Color::Yellow))),
         Line::from(""),
     ];
-
     for (i, (name, checked)) in picker.items.iter().enumerate() {
         let arrow = if i == picker.index { "▶ " } else { "  " };
         let check = if *checked { "[x]" } else { "[ ]" };
-        let check_style = if *checked {
-            Style::default().fg(Color::Green)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        };
+        let check_style = if *checked { Style::default().fg(Color::Green) } else { Style::default().fg(Color::DarkGray) };
         lines.push(Line::from(vec![
             Span::styled(arrow, Style::default().fg(Color::Yellow)),
             Span::styled(format!("{} ", check), check_style),
             Span::raw(name.as_str()),
         ]));
     }
-
     lines.push(Line::from(Span::styled("  ─────────────────", Style::default().fg(Color::DarkGray))));
     let new_arrow = if picker.is_on_new_item() { "▶ " } else { "  " };
     if let Some(ref input) = picker.new_item_input {
@@ -956,17 +1105,99 @@ fn draw_checklist_popup(f: &mut Frame, picker: &ChecklistPicker, area: Rect) {
             Span::styled(&picker.new_item_label, Style::default().fg(Color::Cyan)),
         ]));
     }
-
     lines.push(Line::from(""));
-    let footer = if picker.in_input_mode() {
-        "Enter confirm  Esc cancel"
-    } else {
-        "↑↓ navigate  Space toggle  Enter done  Esc cancel"
-    };
+    let footer = if picker.in_input_mode() { "Enter confirm  Esc cancel" } else { "↑↓ navigate  Space toggle  Enter done  Esc cancel" };
     lines.push(Line::from(Span::styled(footer, Style::default().fg(Color::DarkGray))));
+    let popup = Paragraph::new(lines).block(Block::default().borders(Borders::ALL));
+    f.render_widget(popup, popup_area);
+}
 
-    let popup = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL));
+fn draw_export_popup(f: &mut Frame, es: &ExportState, area: Rect) {
+    let height = (es.scope_options.len() + 10) as u16;
+    let popup_area = centered_rect(60, height.min(18), area);
+    f.render_widget(Clear, popup_area);
+
+    let formats = [ExportFormat::BibTeX, ExportFormat::Yaml, ExportFormat::Ris];
+    let mut lines = vec![
+        Line::from(Span::styled("Scope:", Style::default().fg(Color::Yellow))),
+    ];
+    for (i, (_, label)) in es.scope_options.iter().enumerate() {
+        let arrow = if es.section == 0 && i == es.scope_idx { "▶ " } else { "  " };
+        let style = if i == es.scope_idx { Style::default().fg(Color::Cyan) } else { Style::default() };
+        lines.push(Line::from(vec![
+            Span::styled(arrow, Style::default().fg(Color::Yellow)),
+            Span::styled(label.as_str(), style),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled("Format:", Style::default().fg(Color::Yellow))));
+    for (i, fmt) in formats.iter().enumerate() {
+        let arrow = if es.section == 1 && i == es.format_idx { "▶ " } else { "  " };
+        let style = if i == es.format_idx { Style::default().fg(Color::Cyan) } else { Style::default() };
+        lines.push(Line::from(vec![
+            Span::styled(arrow, Style::default().fg(Color::Yellow)),
+            Span::styled(fmt.label(), style),
+        ]));
+    }
+    lines.push(Line::from(""));
+    let pdf_arrow = if es.section == 2 { "▶ " } else { "  " };
+    let pdf_check = if es.include_pdf { "[x]" } else { "[ ]" };
+    let pdf_style = if es.include_pdf { Style::default().fg(Color::Green) } else { Style::default().fg(Color::DarkGray) };
+    lines.push(Line::from(vec![
+        Span::styled(pdf_arrow, Style::default().fg(Color::Yellow)),
+        Span::styled(pdf_check, pdf_style),
+        Span::raw(" Include PDFs"),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "↑↓ navigate  Tab section  Space toggle  Enter export  Esc cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let popup = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Export "));
+    f.render_widget(popup, popup_area);
+}
+
+fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
+    use crate::config::LineNumbers;
+    let popup_area = centered_rect(70, 16, area);
+    f.render_widget(Clear, popup_area);
+
+    let ln_label = match app.config.line_numbers {
+        LineNumbers::Absolute => "absolute",
+        LineNumbers::Relative => "relative",
+        LineNumbers::None => "none",
+    };
+    let ratio = app.config.panel_ratio;
+    let bib_dir = app.config.bib_export_dir.display().to_string();
+    let exp_dir = app.config.export_dir.display().to_string();
+
+    let settings = [
+        format!("Line numbers     [{}]", ln_label),
+        format!("Panel ratio      [{}, {}, {}]", ratio[0], ratio[1], ratio[2]),
+        format!("Bib export dir   [{}]", bib_dir),
+        format!("Export dir       [{}]", exp_dir),
+    ];
+
+    let mut lines = vec![
+        Line::from(Span::styled("Settings", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
+        Line::from(""),
+    ];
+    for (i, s) in settings.iter().enumerate() {
+        let arrow = if i == app.settings_idx { "▶ " } else { "  " };
+        let style = if i == app.settings_idx { Style::default().fg(Color::Cyan) } else { Style::default() };
+        lines.push(Line::from(vec![
+            Span::styled(arrow, Style::default().fg(Color::Yellow)),
+            Span::styled(s.as_str(), style),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "↑↓ navigate  ←→ change value  Enter save  Esc cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let popup = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Settings "));
     f.render_widget(popup, popup_area);
 }
 
@@ -977,126 +1208,278 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
         Mode::Normal => handle_normal(app, key),
         Mode::Search => handle_search(app, key),
         Mode::Confirm(_) => handle_confirm(app, key),
-        Mode::Detail => handle_detail(app, key),
-        Mode::Message(_) => {
-            app.mode = Mode::Normal;
+        Mode::Message(_) => { app.mode = Mode::Normal; Ok(false) }
+        Mode::Loading(_) => {
+            if key.code == KeyCode::Esc { app.bg_result = None; app.mode = Mode::Normal; }
             Ok(false)
         }
         Mode::Help => handle_help(app, key),
-        Mode::NoteView => handle_note_view(app, key),
         Mode::SortMenu => handle_sort_menu(app, key),
         Mode::CollectionPicker => handle_picker(app, key, false),
         Mode::TagEditor => handle_picker(app, key, true),
+        Mode::ExportMenu => handle_export_menu(app, key),
+        Mode::Settings => handle_settings(app, key),
     }
 }
 
 fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
+    // ── Key buffer for vim motions (digits + g) ──
     match key.code {
-        // Quit
+        KeyCode::Char(c @ '0'..='9') => {
+            // Only buffer digits if we already have digits or it's not '0' at start
+            if !app.key_buf.is_empty() || c != '0' {
+                app.key_buf.push(c);
+                return Ok(false);
+            }
+        }
+        KeyCode::Char('g') => {
+            if app.key_buf == "g" {
+                // gg → go to top
+                match app.focus {
+                    Panel::Collections => { app.col_list_state.select(Some(0)); app.list_state.select(Some(0)); app.apply_filters(); }
+                    Panel::Entries => { app.list_state.select(Some(0)); app.update_preview(); }
+                    Panel::Preview => { app.preview_scroll = 0; }
+                }
+                app.key_buf.clear();
+                return Ok(false);
+            } else if app.key_buf.is_empty() {
+                app.key_buf.push('g');
+                return Ok(false);
+            }
+        }
+        _ => {}
+    }
+
+    // Parse count from buffer
+    let count: usize = app.key_buf.chars().take_while(|c| c.is_ascii_digit())
+        .collect::<String>().parse().unwrap_or(1);
+    app.key_buf.clear();
+
+    match key.code {
         KeyCode::Char('q') => return Ok(true),
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
 
-        // Navigation
-        KeyCode::Char('j') | KeyCode::Down => app.move_down(),
-        KeyCode::Char('k') | KeyCode::Up => app.move_up(),
-
-        // Tab switching
-        KeyCode::Tab | KeyCode::Char('l') => app.next_tab(),
-        KeyCode::BackTab | KeyCode::Char('h') => app.prev_tab(),
-
-        // Search
-        KeyCode::Char('/') => {
-            app.mode = Mode::Search;
+        // Panel navigation
+        KeyCode::Char('h') | KeyCode::Left => {
+            app.focus = match app.focus {
+                Panel::Collections => Panel::Collections,
+                Panel::Entries => Panel::Collections,
+                Panel::Preview => Panel::Entries,
+            };
+        }
+        KeyCode::Char('l') | KeyCode::Right => {
+            app.focus = match app.focus {
+                Panel::Collections => Panel::Entries,
+                Panel::Entries => Panel::Preview,
+                Panel::Preview => Panel::Preview,
+            };
         }
 
-        // Detail popup
-        KeyCode::Enter => {
-            if app.selected_entry().is_some() {
-                app.mode = Mode::Detail;
+        // Vertical movement with count
+        KeyCode::Char('j') | KeyCode::Down => {
+            for _ in 0..count {
+                match app.focus {
+                    Panel::Collections => app.move_col_down(),
+                    Panel::Entries => app.move_entry_down(),
+                    Panel::Preview => { app.preview_scroll += 1; }
+                }
+            }
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            for _ in 0..count {
+                match app.focus {
+                    Panel::Collections => app.move_col_up(),
+                    Panel::Entries => app.move_entry_up(),
+                    Panel::Preview => { app.preview_scroll = app.preview_scroll.saturating_sub(1); }
+                }
             }
         }
 
-        // Copy citekey to clipboard
-        KeyCode::Char('y') => {
+        // G → go to bottom
+        KeyCode::Char('G') => {
+            match app.focus {
+                Panel::Collections => {
+                    let last = app.col_count().saturating_sub(1);
+                    app.col_list_state.select(Some(last));
+                    app.list_state.select(Some(0));
+                    app.apply_filters();
+                }
+                Panel::Entries => {
+                    if !app.filtered.is_empty() {
+                        app.list_state.select(Some(app.filtered.len() - 1));
+                        app.update_preview();
+                    }
+                }
+                Panel::Preview => { app.preview_scroll = u16::MAX; }
+            }
+        }
+
+        // H/M/L — screen-relative jumps (entries panel only)
+        KeyCode::Char('H') if app.focus == Panel::Entries => {
+            // Jump to first visible item (approximate: just go to current - half_page)
+            let visible_height = 10; // approximate
+            let cur = app.list_state.selected().unwrap_or(0);
+            let top = cur.saturating_sub(visible_height);
+            app.list_state.select(Some(top));
+            app.update_preview();
+        }
+        KeyCode::Char('M') if app.focus == Panel::Entries => {
+            // Middle of list
+            if !app.filtered.is_empty() {
+                app.list_state.select(Some(app.filtered.len() / 2));
+                app.update_preview();
+            }
+        }
+        KeyCode::Char('L') if app.focus == Panel::Entries => {
+            if !app.filtered.is_empty() {
+                app.list_state.select(Some(app.filtered.len() - 1));
+                app.update_preview();
+            }
+        }
+
+        // Ctrl+d/u — half page
+        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            match app.focus {
+                Panel::Entries => { for _ in 0..10 { app.move_entry_down(); } }
+                Panel::Preview => { app.preview_scroll += 10; }
+                Panel::Collections => { for _ in 0..5 { app.move_col_down(); } }
+            }
+        }
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            match app.focus {
+                Panel::Entries => { for _ in 0..10 { app.move_entry_up(); } }
+                Panel::Preview => { app.preview_scroll = app.preview_scroll.saturating_sub(10); }
+                Panel::Collections => { for _ in 0..5 { app.move_col_up(); } }
+            }
+        }
+
+        // Space — toggle selection
+        KeyCode::Char(' ') if app.focus == Panel::Entries => {
             if let Some(entry) = app.selected_entry() {
                 let key = entry.bibtex_key.clone();
-                if let Ok(mut ctx) = arboard::Clipboard::new() {
-                    let _ = ctx.set_text(&key);
+                if app.selected_keys.contains(&key) {
+                    app.selected_keys.remove(&key);
+                } else {
+                    app.selected_keys.insert(key);
                 }
-                app.mode = Mode::Message(format!("Copied: {}", key));
+                app.move_entry_down(); // move to next after toggle
             }
         }
 
-        // Open PDF with 'o'
+        // V — select/deselect all visible
+        KeyCode::Char('V') if app.focus == Panel::Entries => {
+            let visible_keys: Vec<String> = app.filtered.iter()
+                .map(|&idx| app.entries[idx].bibtex_key.clone()).collect();
+            let all_selected = visible_keys.iter().all(|k| app.selected_keys.contains(k));
+            if all_selected {
+                for k in &visible_keys { app.selected_keys.remove(k); }
+            } else {
+                for k in visible_keys { app.selected_keys.insert(k); }
+            }
+        }
+
+        // Esc — clear selection
+        KeyCode::Esc => {
+            if !app.selected_keys.is_empty() {
+                app.selected_keys.clear();
+            }
+        }
+
+        // Preview mode switch
+        KeyCode::Tab => {
+            app.preview_mode = app.preview_mode.next();
+            app.preview_scroll = 0;
+            if app.preview_mode == PreviewMode::Note { app.load_note_for_preview(); }
+        }
+
+        // Search
+        KeyCode::Char('/') => { app.mode = Mode::Search; }
+
+        // Copy citekey
+        KeyCode::Char('y') => {
+            if let Some(entry) = app.selected_entry() {
+                let bkey = entry.bibtex_key.clone();
+                if let Ok(mut ctx) = arboard::Clipboard::new() { let _ = ctx.set_text(&bkey); }
+                app.mode = Mode::Message(format!("Copied: {}", bkey));
+            }
+        }
+
+        // Open PDF
         KeyCode::Char('o') => {
             if let Some(entry) = app.selected_entry() {
                 let entry = entry.clone();
-                app.open_pdf(&entry);
+                if entry.file_path.is_some() {
+                    let full_path = app.config.bibox_dir.join(entry.file_path.as_ref().unwrap());
+                    if full_path.exists() { app.open_pdf(&entry); }
+                    else { app.mode = Mode::Message("PDF file missing from disk.".into()); }
+                } else if entry.doi.is_some() || entry.url.is_some() {
+                    let bkey = entry.bibtex_key.clone();
+                    app.mode = Mode::Confirm(ConfirmAction::FetchPdf(bkey));
+                } else { app.mode = Mode::Message("No PDF attached.".into()); }
             }
         }
 
-        // Export .bib for current collection
+        // Export menu
         KeyCode::Char('e') => {
-            let path = app.export_collection_bib();
-            app.mode = Mode::Message(format!("Exported: {}", path));
+            let mut scope_options = vec![];
+            if !app.selected_keys.is_empty() {
+                scope_options.push((ExportScope::Selected, format!("{} selected entries", app.selected_keys.len())));
+            }
+            if let Some(col) = app.current_collection() {
+                let count = app.filtered.len();
+                scope_options.push((ExportScope::Collection, format!("{} collection ({})", col, count)));
+            }
+            scope_options.push((ExportScope::All, format!("All entries ({})", app.entries.len())));
+            app.export_state = Some(ExportState {
+                scope_options,
+                scope_idx: 0,
+                format_idx: 0,
+                include_pdf: false,
+                section: 0,
+            });
+            app.mode = Mode::ExportMenu;
         }
 
-        // Delete with confirm
+        // Delete
         KeyCode::Char('d') => {
             if let Some(entry) = app.selected_entry() {
-                let key = entry.bibtex_key.clone();
-                app.mode = Mode::Confirm(ConfirmAction::Delete(key));
+                let bkey = entry.bibtex_key.clone();
+                app.mode = Mode::Confirm(ConfirmAction::Delete(bkey));
             }
         }
 
-        KeyCode::Char('?') => {
-            app.mode = Mode::Help;
-        }
-
-        // View note
-        KeyCode::Char('n') => {
-            if app.selected_entry().is_some() {
-                app.load_note();
-                app.mode = Mode::NoteView;
-            } else {
-                app.mode = Mode::Message("No entry selected.".into());
-            }
-        }
+        KeyCode::Char('?') => { app.mode = Mode::Help; }
 
         // Edit note in $EDITOR
         KeyCode::Char('N') => {
-            if app.selected_entry().is_some() {
-                return open_note_editor(app);
-            } else {
-                app.mode = Mode::Message("No entry selected.".into());
-            }
+            if app.selected_entry().is_some() { return open_note_editor(app); }
+            else { app.mode = Mode::Message("No entry selected.".into()); }
         }
 
         KeyCode::Char('s') => {
             app.prev_sort_by = app.sort_by;
             app.prev_sort_ascending = app.sort_ascending;
-            app.sort_menu_index = SortCriterion::all()
-                .iter()
-                .position(|c| *c == app.sort_by)
-                .unwrap_or(0);
+            app.sort_menu_index = SortCriterion::all().iter().position(|c| *c == app.sort_by).unwrap_or(0);
             app.mode = Mode::SortMenu;
         }
 
         KeyCode::Char('c') => {
-            if app.selected_entry().is_some() {
-                app.open_collection_picker();
-            } else {
-                app.mode = Mode::Message("No entry selected.".into());
-            }
+            if app.selected_entry().is_some() { app.open_collection_picker(); }
+            else { app.mode = Mode::Message("No entry selected.".into()); }
         }
 
         KeyCode::Char('t') => {
-            if app.selected_entry().is_some() {
-                app.open_tag_editor();
-            } else {
-                app.mode = Mode::Message("No entry selected.".into());
-            }
+            if app.selected_entry().is_some() { app.open_tag_editor(); }
+            else { app.mode = Mode::Message("No entry selected.".into()); }
         }
+
+        // Settings
+        KeyCode::Char(',') => {
+            app.settings_idx = 0;
+            app.mode = Mode::Settings;
+        }
+
+        KeyCode::Enter => {}
 
         _ => {}
     }
@@ -1105,23 +1488,10 @@ fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
 
 fn handle_search(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
     match key.code {
-        KeyCode::Esc => {
-            app.search_query.clear();
-            app.apply_filters();
-            app.mode = Mode::Normal;
-        }
-        KeyCode::Backspace => {
-            app.search_query.pop();
-            app.apply_filters();
-        }
-        KeyCode::Char(c) => {
-            app.search_query.push(c);
-            app.apply_filters();
-        }
-        KeyCode::Enter => {
-            // Stay in search but enter normal navigation
-            app.mode = Mode::Normal;
-        }
+        KeyCode::Esc => { app.search_query.clear(); app.apply_filters(); app.mode = Mode::Normal; }
+        KeyCode::Backspace => { app.search_query.pop(); app.apply_filters(); }
+        KeyCode::Char(c) => { app.search_query.push(c); app.apply_filters(); }
+        KeyCode::Enter => { app.mode = Mode::Normal; }
         _ => {}
     }
     Ok(false)
@@ -1131,24 +1501,32 @@ fn handle_confirm(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool
     match key.code {
         KeyCode::Char('y') => {
             let action = std::mem::replace(&mut app.mode, Mode::Normal);
-            if let Mode::Confirm(ConfirmAction::Delete(_)) = action {
-                app.delete_selected()?;
-                app.mode = Mode::Message("Entry deleted.".to_string());
+            match action {
+                Mode::Confirm(ConfirmAction::Delete(_)) => {
+                    app.delete_selected()?;
+                    app.mode = Mode::Message("Entry deleted.".to_string());
+                }
+                Mode::Confirm(ConfirmAction::FetchPdf(key)) => {
+                    let entry = app.entries.iter().find(|e| e.bibtex_key == key).cloned();
+                    if let Some(entry) = entry {
+                        let bibox_dir = app.config.bibox_dir.clone();
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        let key_clone = key.clone();
+                        std::thread::spawn(move || {
+                            let result = run_fetch_pdf(&entry, &bibox_dir);
+                            let _ = tx.send(result.map(|(filename, full_path)| BgTaskResult {
+                                key: key_clone, file_path: filename, full_path,
+                            }));
+                        });
+                        app.bg_result = Some(rx);
+                        app.spinner_tick = 0;
+                        app.mode = Mode::Loading("Fetching PDF...".into());
+                    }
+                }
+                _ => {}
             }
         }
-        KeyCode::Char('n') | KeyCode::Esc => {
-            app.mode = Mode::Normal;
-        }
-        _ => {}
-    }
-    Ok(false)
-}
-
-fn handle_detail(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
-    match key.code {
-        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
-            app.mode = Mode::Normal;
-        }
+        KeyCode::Char('n') | KeyCode::Esc => { app.mode = Mode::Normal; }
         _ => {}
     }
     Ok(false)
@@ -1156,31 +1534,7 @@ fn handle_detail(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
 
 fn handle_help(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
     match key.code {
-        KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') => {
-            app.mode = Mode::Normal;
-        }
-        _ => {}
-    }
-    Ok(false)
-}
-
-fn handle_note_view(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
-    match key.code {
-        KeyCode::Esc | KeyCode::Char('q') => {
-            app.mode = Mode::Normal;
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            let total_lines = app.note_content.lines().count() as u16;
-            if app.note_scroll < total_lines.saturating_sub(1) {
-                app.note_scroll += 1;
-            }
-        }
-        KeyCode::Up | KeyCode::Char('k') => {
-            app.note_scroll = app.note_scroll.saturating_sub(1);
-        }
-        KeyCode::Char('N') => {
-            return open_note_editor(app);
-        }
+        KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') => { app.mode = Mode::Normal; }
         _ => {}
     }
     Ok(false)
@@ -1189,35 +1543,21 @@ fn handle_note_view(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bo
 fn handle_sort_menu(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
     let criteria = SortCriterion::all();
     match key.code {
-        KeyCode::Up | KeyCode::Char('k') => {
-            if app.sort_menu_index > 0 {
-                app.sort_menu_index -= 1;
-            }
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            if app.sort_menu_index < criteria.len() - 1 {
-                app.sort_menu_index += 1;
-            }
-        }
+        KeyCode::Up | KeyCode::Char('k') => { if app.sort_menu_index > 0 { app.sort_menu_index -= 1; } }
+        KeyCode::Down | KeyCode::Char('j') => { if app.sort_menu_index < criteria.len() - 1 { app.sort_menu_index += 1; } }
         KeyCode::Char(' ') => {
             let selected = criteria[app.sort_menu_index];
-            if selected == app.sort_by {
-                app.sort_ascending = !app.sort_ascending;
-            } else {
-                app.sort_by = selected;
-            }
+            if selected == app.sort_by { app.sort_ascending = !app.sort_ascending; }
+            else { app.sort_by = selected; }
         }
         KeyCode::Enter => {
             let new_criterion = criteria[app.sort_menu_index];
-            if new_criterion != app.sort_by {
-                app.sort_ascending = new_criterion.default_ascending();
-            }
+            if new_criterion != app.sort_by { app.sort_ascending = new_criterion.default_ascending(); }
             app.sort_by = new_criterion;
             app.apply_sort();
             app.mode = Mode::Normal;
         }
         KeyCode::Esc => {
-            // Revert to pre-menu state
             app.sort_by = app.prev_sort_by;
             app.sort_ascending = app.prev_sort_ascending;
             app.mode = Mode::Normal;
@@ -1229,44 +1569,90 @@ fn handle_sort_menu(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bo
 
 fn handle_picker(app: &mut App, key: crossterm::event::KeyEvent, is_tags: bool) -> Result<bool> {
     let in_input = app.picker.as_ref().map(|p| p.in_input_mode()).unwrap_or(false);
-
     if in_input {
         match key.code {
-            KeyCode::Enter => {
-                if let Some(ref mut picker) = app.picker { picker.confirm_input(); }
-            }
-            KeyCode::Esc => {
-                if let Some(ref mut picker) = app.picker { picker.cancel_input(); }
-            }
-            KeyCode::Backspace => {
-                if let Some(ref mut picker) = app.picker { picker.backspace(); }
-            }
-            KeyCode::Char(c) => {
-                if let Some(ref mut picker) = app.picker { picker.apply_char(c); }
-            }
+            KeyCode::Enter => { if let Some(ref mut p) = app.picker { p.confirm_input(); } }
+            KeyCode::Esc => { if let Some(ref mut p) = app.picker { p.cancel_input(); } }
+            KeyCode::Backspace => { if let Some(ref mut p) = app.picker { p.backspace(); } }
+            KeyCode::Char(c) => { if let Some(ref mut p) = app.picker { p.apply_char(c); } }
             _ => {}
         }
     } else {
         match key.code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                if let Some(ref mut picker) = app.picker { picker.move_up(); }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if let Some(ref mut picker) = app.picker { picker.move_down(); }
-            }
-            KeyCode::Char(' ') => {
-                if let Some(ref mut picker) = app.picker { picker.toggle(); }
-            }
+            KeyCode::Up | KeyCode::Char('k') => { if let Some(ref mut p) = app.picker { p.move_up(); } }
+            KeyCode::Down | KeyCode::Char('j') => { if let Some(ref mut p) = app.picker { p.move_down(); } }
+            KeyCode::Char(' ') => { if let Some(ref mut p) = app.picker { p.toggle(); } }
             KeyCode::Enter => {
-                if is_tags {
-                    app.apply_picker_tags()?;
-                } else {
-                    app.apply_picker_collections()?;
-                }
+                if is_tags { app.apply_picker_tags()?; } else { app.apply_picker_collections()?; }
                 app.mode = Mode::Normal;
             }
+            KeyCode::Esc => { app.picker = None; app.mode = Mode::Normal; }
+            _ => {}
+        }
+    }
+    Ok(false)
+}
+
+fn handle_export_menu(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
+    let formats = [ExportFormat::BibTeX, ExportFormat::Yaml, ExportFormat::Ris];
+    if let Some(ref mut es) = app.export_state {
+        match key.code {
+            KeyCode::Tab => {
+                es.section = (es.section + 1) % 3;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                match es.section {
+                    0 => { if es.scope_idx > 0 { es.scope_idx -= 1; } }
+                    1 => { if es.format_idx > 0 { es.format_idx -= 1; } }
+                    _ => {}
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                match es.section {
+                    0 => { if es.scope_idx < es.scope_options.len() - 1 { es.scope_idx += 1; } }
+                    1 => { if es.format_idx < formats.len() - 1 { es.format_idx += 1; } }
+                    _ => {}
+                }
+            }
+            KeyCode::Char(' ') => {
+                if es.section == 2 { es.include_pdf = !es.include_pdf; }
+            }
+            KeyCode::Enter => {
+                let scope = es.scope_options[es.scope_idx].0;
+                let format = formats[es.format_idx];
+                let include_pdf = es.include_pdf;
+                let col = app.current_collection().map(|s| s.to_string());
+
+                // Collect entries based on scope
+                let keys: Vec<String> = match scope {
+                    ExportScope::Selected => app.selected_keys.iter().cloned().collect(),
+                    ExportScope::Collection => {
+                        app.filtered.iter().map(|&i| app.entries[i].bibtex_key.clone()).collect()
+                    }
+                    ExportScope::All => app.entries.iter().map(|e| e.bibtex_key.clone()).collect(),
+                };
+
+                let col_name = match scope {
+                    ExportScope::Selected => "selected".to_string(),
+                    ExportScope::Collection => col.unwrap_or_else(|| "all".to_string()),
+                    ExportScope::All => "all".to_string(),
+                };
+
+                app.export_state = None;
+                app.mode = Mode::Normal;
+
+                // Run export via cmd_export
+                let result = crate::commands::cmd_export(
+                    keys, None, None, false, None, None, false, include_pdf, false,
+                    format.ext().to_string(), &app.config,
+                );
+                match result {
+                    Ok(()) => { app.mode = Mode::Message("Export complete.".into()); }
+                    Err(e) => { app.mode = Mode::Message(format!("Export failed: {}", e)); }
+                }
+            }
             KeyCode::Esc => {
-                app.picker = None;
+                app.export_state = None;
                 app.mode = Mode::Normal;
             }
             _ => {}
@@ -1275,25 +1661,120 @@ fn handle_picker(app: &mut App, key: crossterm::event::KeyEvent, is_tags: bool) 
     Ok(false)
 }
 
-fn open_note_editor(app: &mut App) -> Result<bool> {
-    let entry = match app.selected_entry() {
-        Some(e) => e.clone(),
-        None => return Ok(false),
-    };
+fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
+    use crate::config::LineNumbers;
+    let num_settings = 4;
 
+    let download_dir = dirs::download_dir()
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")));
+    let home_dir = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    let cwd = std::path::PathBuf::from(".");
+
+    let dir_presets: Vec<std::path::PathBuf> = vec![
+        cwd.clone(),
+        download_dir.clone(),
+        home_dir.join("Documents"),
+        home_dir.join("Desktop"),
+    ];
+
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => {
+            if app.settings_idx > 0 { app.settings_idx -= 1; }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if app.settings_idx < num_settings - 1 { app.settings_idx += 1; }
+        }
+        KeyCode::Right | KeyCode::Char('l') => {
+            match app.settings_idx {
+                0 => {
+                    app.config.line_numbers = match app.config.line_numbers {
+                        LineNumbers::Absolute => LineNumbers::Relative,
+                        LineNumbers::Relative => LineNumbers::None,
+                        LineNumbers::None => LineNumbers::Absolute,
+                    };
+                }
+                1 => {
+                    app.config.panel_ratio = match app.config.panel_ratio {
+                        [2, 4, 4] => [1, 5, 4],
+                        [1, 5, 4] => [2, 3, 5],
+                        [2, 3, 5] => [1, 4, 5],
+                        [1, 4, 5] => [3, 4, 3],
+                        _ => [2, 4, 4],
+                    };
+                }
+                2 => { // bib_export_dir: cycle presets
+                    let cur = &app.config.bib_export_dir;
+                    let pos = dir_presets.iter().position(|d| d == cur).unwrap_or(0);
+                    app.config.bib_export_dir = dir_presets[(pos + 1) % dir_presets.len()].clone();
+                }
+                3 => { // export_dir: cycle presets
+                    let cur = &app.config.export_dir;
+                    let pos = dir_presets.iter().position(|d| d == cur).unwrap_or(0);
+                    app.config.export_dir = dir_presets[(pos + 1) % dir_presets.len()].clone();
+                }
+                _ => {}
+            }
+        }
+        KeyCode::Left | KeyCode::Char('h') => {
+            match app.settings_idx {
+                0 => {
+                    app.config.line_numbers = match app.config.line_numbers {
+                        LineNumbers::Absolute => LineNumbers::None,
+                        LineNumbers::Relative => LineNumbers::Absolute,
+                        LineNumbers::None => LineNumbers::Relative,
+                    };
+                }
+                1 => {
+                    app.config.panel_ratio = match app.config.panel_ratio {
+                        [2, 4, 4] => [3, 4, 3],
+                        [3, 4, 3] => [1, 4, 5],
+                        [1, 4, 5] => [2, 3, 5],
+                        [2, 3, 5] => [1, 5, 4],
+                        _ => [2, 4, 4],
+                    };
+                }
+                2 => {
+                    let cur = &app.config.bib_export_dir;
+                    let pos = dir_presets.iter().position(|d| d == cur).unwrap_or(0);
+                    let prev = if pos == 0 { dir_presets.len() - 1 } else { pos - 1 };
+                    app.config.bib_export_dir = dir_presets[prev].clone();
+                }
+                3 => {
+                    let cur = &app.config.export_dir;
+                    let pos = dir_presets.iter().position(|d| d == cur).unwrap_or(0);
+                    let prev = if pos == 0 { dir_presets.len() - 1 } else { pos - 1 };
+                    app.config.export_dir = dir_presets[prev].clone();
+                }
+                _ => {}
+            }
+        }
+        KeyCode::Enter => {
+            let _ = crate::config::save_config(&app.config);
+            app.mode = Mode::Message("Settings saved.".into());
+        }
+        KeyCode::Esc => {
+            if let Ok(cfg) = crate::config::load_config() {
+                app.config.line_numbers = cfg.line_numbers;
+                app.config.panel_ratio = cfg.panel_ratio;
+                app.config.bib_export_dir = cfg.bib_export_dir;
+                app.config.export_dir = cfg.export_dir;
+            }
+            app.mode = Mode::Normal;
+        }
+        _ => {}
+    }
+    Ok(false)
+}
+
+fn open_note_editor(app: &mut App) -> Result<bool> {
+    let entry = match app.selected_entry() { Some(e) => e.clone(), None => return Ok(false) };
     let notes_dir = &app.config.notes_dir;
     std::fs::create_dir_all(notes_dir)?;
     let note_path = notes_dir.join(format!("{}.md", entry.bibtex_key));
-
     if !note_path.exists() {
-        let header = format!(
-            "# {}\ncitekey: {}\n\n",
-            entry.title.as_deref().unwrap_or("Untitled"),
-            entry.bibtex_key
-        );
+        let header = format!("# {}\ncitekey: {}\n\n", entry.title.as_deref().unwrap_or("Untitled"), entry.bibtex_key);
         std::fs::write(&note_path, &header)?;
     }
-
     app.pending_editor = Some(note_path);
     app.mode = Mode::Normal;
     Ok(false)
@@ -1302,7 +1783,6 @@ fn open_note_editor(app: &mut App) -> Result<bool> {
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 pub fn run_tui(config: &Config) -> Result<()> {
-    // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -1319,6 +1799,10 @@ pub fn run_tui(config: &Config) -> Result<()> {
         git: config.git,
         notes_dir: config.notes_dir.clone(),
         templates_dir: config.templates_dir.clone(),
+        line_numbers: config.line_numbers.clone(),
+        panel_ratio: config.panel_ratio,
+        bib_export_dir: config.bib_export_dir.clone(),
+        export_dir: config.export_dir.clone(),
         msgs: crate::i18n::Msgs::new(&config.language),
     };
 
@@ -1327,15 +1811,9 @@ pub fn run_tui(config: &Config) -> Result<()> {
 
     let result = run_loop(&mut terminal, &mut app);
 
-    // Restore terminal
     disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.show_cursor()?;
-
     result
 }
 
@@ -1348,35 +1826,85 @@ fn run_loop(
 
         if event::poll(std::time::Duration::from_millis(200))? {
             if let Event::Key(key) = event::read()? {
-                if handle_key(app, key)? {
-                    break;
-                }
+                if handle_key(app, key)? { break; }
             }
         }
 
-        // Handle pending editor launch (suspend TUI, open editor, resume)
+        // Handle pending editor
         if let Some(note_path) = app.pending_editor.take() {
             let editor = std::env::var("EDITOR").unwrap_or_else(|_| {
                 if std::process::Command::new("which").arg("nano").output()
                     .map(|o| o.status.success()).unwrap_or(false)
                 { "nano".to_string() } else { "vi".to_string() }
             });
-
             disable_raw_mode()?;
             execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
-
-            let status = std::process::Command::new(&editor)
-                .arg(&note_path)
-                .status();
-
+            let status = std::process::Command::new(&editor).arg(&note_path).status();
             enable_raw_mode()?;
             execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
             terminal.clear()?;
-
             if let Err(e) = status {
                 app.mode = Mode::Message(format!("Editor failed: {}", e));
+            }
+            // Reload note if in note preview mode
+            app.note_citekey.clear();
+        }
+
+        // Poll background task
+        if let Some(ref rx) = app.bg_result {
+            match rx.try_recv() {
+                Ok(Ok(result)) => {
+                    let db_path = crate::config::db_path();
+                    if let Ok(mut db) = load_db(&db_path) {
+                        if let Some(db_entry) = find_by_key_mut(&mut db, &result.key) {
+                            db_entry.file_path = Some(result.file_path.clone());
+                        }
+                        let _ = save_db(&db, &db_path);
+                    }
+                    if let Some(mem_entry) = app.entries.iter_mut().find(|e| e.bibtex_key == result.key) {
+                        mem_entry.file_path = Some(result.file_path);
+                    }
+                    app.bg_result = None;
+                    app.mode = Mode::Message(format!("PDF saved: {}", result.full_path));
+                }
+                Ok(Err(e)) => { app.bg_result = None; app.mode = Mode::Message(format!("Fetch failed: {}", e)); }
+                Err(std::sync::mpsc::TryRecvError::Empty) => { app.spinner_tick += 1; }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    app.bg_result = None;
+                    app.mode = Mode::Message("Fetch failed: thread disconnected.".into());
+                }
             }
         }
     }
     Ok(())
+}
+
+/// Fetch PDF via Unpaywall (DOI) or direct URL. Runs on background thread.
+fn run_fetch_pdf(entry: &Entry, bibox_dir: &std::path::Path) -> Result<(String, String)> {
+    let rt = tokio::runtime::Runtime::new()?;
+    let tmp = std::env::temp_dir().join("bibox_download.pdf");
+
+    rt.block_on(async {
+        if let Some(ref doi) = entry.doi {
+            match crate::unpaywall::find_open_access(doi).await {
+                Ok(Some(oa)) => { crate::unpaywall::download_pdf(&oa.pdf_url, &tmp).await?; }
+                Ok(None) => {
+                    if let Some(ref url) = entry.url {
+                        crate::unpaywall::download_pdf(url, &tmp).await?;
+                    } else { anyhow::bail!("No open-access PDF found."); }
+                }
+                Err(e) => return Err(e),
+            }
+        } else if let Some(ref url) = entry.url {
+            crate::unpaywall::download_pdf(url, &tmp).await?;
+        } else { anyhow::bail!("No DOI or URL to fetch from."); }
+        Ok(())
+    })?;
+
+    std::fs::create_dir_all(bibox_dir)?;
+    let filename = entry_to_filename(entry);
+    let dest = bibox_dir.join(&filename);
+    std::fs::copy(&tmp, &dest)?;
+    let _ = std::fs::remove_file(&tmp);
+    Ok((filename, dest.to_string_lossy().to_string()))
 }

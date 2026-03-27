@@ -67,7 +67,9 @@ pub async fn find_open_access(doi: &str) -> Result<Option<OaResult>> {
 
 /// Download a PDF from a URL and save it to the given path.
 pub async fn download_pdf(url: &str, dest: &std::path::Path) -> Result<()> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .user_agent("bibox/0.1 (https://github.com/namil-k/bibox; mailto:bibox@example.com)")
+        .build()?;
     let resp = client
         .get(url)
         .send()

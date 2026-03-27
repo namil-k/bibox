@@ -1042,13 +1042,14 @@ pub fn cmd_import(file: PathBuf, to: Option<String>, config: &Config) -> Result<
 // ── out ──────────────────────────────────────────────────────────────────────
 
 pub fn cmd_export(
+    keys: Vec<String>,
     collection: Option<String>,
-    key: Option<String>,
     output: Option<PathBuf>,
     clipboard: bool,
     entry_type: Option<String>,
     tag: Option<String>,
     as_pdf: bool,
+    include_pdf: bool,
     zip: bool,
     format: String,
     config: &Config,
@@ -1058,80 +1059,27 @@ pub fn cmd_export(
 
     let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
 
-    if as_pdf {
-        // --as-pdf only makes sense for bibtex format; proceed regardless
-        let entries = if let Some(ref k) = key {
-            vec![find_by_key(&db, k)
-                .with_context(|| config.msgs.entry_not_found(k))?]
-        } else {
-            filter_entries(
-                &db,
-                collection.as_deref(),
-                entry_type.as_deref(),
-                tag.as_deref(),
-                None,
-            )
-        };
-
-        let col_name = collection.as_deref().unwrap_or("bibox");
-        let folder_name = format!("{}_{}", col_name, &timestamp[..8]);
-
-        let dest_parent = output.unwrap_or_else(|| {
-            dirs::download_dir()
-                .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
-        });
-        let dest_dir = dest_parent.join(&folder_name);
-        std::fs::create_dir_all(&dest_dir)?;
-
-        let mut copied = 0;
-        for entry in &entries {
-            if let Some(fp) = &entry.file_path {
-                let src = config.bibox_dir.join(fp);
-                if src.exists() {
-                    let dst = dest_dir.join(fp);
-                    std::fs::copy(&src, &dst)?;
-                    copied += 1;
-                }
-            }
-        }
-
-        if zip {
-            let zip_path = dest_parent.join(format!("{}.zip", folder_name));
-            create_zip(&dest_dir, &zip_path)?;
-            std::fs::remove_dir_all(&dest_dir)?;
-            println!(
-                "{}",
-                config
-                    .msgs
-                    .zip_created(&zip_path.to_string_lossy(), copied)
-            );
-        } else {
-            println!(
-                "{}",
-                config
-                    .msgs
-                    .folder_created(&dest_dir.to_string_lossy(), copied)
-            );
-        }
-
-        return Ok(());
-    }
-
-    // Collect entries for text-based export
-    let entries: Vec<&Entry> = if let Some(ref k) = key {
-        vec![find_by_key(&db, k)
-            .with_context(|| config.msgs.entry_not_found(k))?]
+    // ── Resolve entries ──
+    let entries: Vec<&Entry> = if !keys.is_empty() {
+        keys.iter()
+            .map(|k| find_by_key(&db, k).with_context(|| config.msgs.entry_not_found(k)))
+            .collect::<Result<Vec<_>>>()?
     } else if collection.is_some() || entry_type.is_some() || tag.is_some() {
-        filter_entries(
-            &db,
-            collection.as_deref(),
-            entry_type.as_deref(),
-            tag.as_deref(),
-            None,
-        )
+        filter_entries(&db, collection.as_deref(), entry_type.as_deref(), tag.as_deref(), None)
     } else {
         db.entries.iter().collect()
     };
+
+    let col_name = if !keys.is_empty() {
+        if keys.len() == 1 { keys[0].as_str() } else { "selected" }
+    } else {
+        collection.as_deref().unwrap_or("references")
+    };
+
+    // ── PDF-only export (--as-pdf) ──
+    if as_pdf {
+        return export_pdfs(&entries, col_name, &timestamp, output, zip, config);
+    }
 
     let fmt = format.to_lowercase();
 
@@ -1147,46 +1095,38 @@ pub fn cmd_export(
         return Ok(());
     }
 
-    let col_name = key
-        .as_deref()
-        .or(collection.as_deref())
-        .unwrap_or("references");
-
     match fmt.as_str() {
         "bibtex" => {
             let bibtex = entries_to_bibtex(&entries);
             let filename = format!("{}_{}.bib", col_name, timestamp);
-            let out_path = output.unwrap_or_else(|| PathBuf::from(&filename));
+            let out_path = output.as_ref().cloned().unwrap_or_else(|| config.bib_export_dir.join(&filename));
             std::fs::write(&out_path, &bibtex)?;
+            let abs_path = out_path.canonicalize().unwrap_or(out_path);
             println!(
                 "{}",
                 config
                     .msgs
-                    .bibtex_saved(&out_path.to_string_lossy(), entries.len())
+                    .bibtex_saved(&abs_path.to_string_lossy(), entries.len())
             );
         }
         "yaml" => {
             let yaml = entries_to_yaml(&entries);
-            if let Some(path) = output {
-                std::fs::write(&path, &yaml)?;
-                println!("Exported {} entries to {}", entries.len(), path.display());
-            } else {
-                print!("{}", yaml);
-            }
+            let filename = format!("{}_{}.yaml", col_name, timestamp);
+            let out_path = output.as_ref().cloned().unwrap_or_else(|| config.export_dir.join(&filename));
+            std::fs::write(&out_path, &yaml)?;
+            println!("Exported {} entries to {}", entries.len(), out_path.display());
         }
         "ris" => {
             let ris = entries_to_ris(&entries);
-            if let Some(path) = output {
-                std::fs::write(&path, &ris)?;
-                println!("Exported {} entries to {}", entries.len(), path.display());
-            } else {
-                print!("{}", ris);
-            }
+            let filename = format!("{}_{}.ris", col_name, timestamp);
+            let out_path = output.as_ref().cloned().unwrap_or_else(|| config.export_dir.join(&filename));
+            std::fs::write(&out_path, &ris)?;
+            println!("Exported {} entries to {}", entries.len(), out_path.display());
         }
         "csv" => {
             let csv = entries_to_csv(&entries);
-            if let Some(path) = output {
-                std::fs::write(&path, &csv)?;
+            if let Some(path) = output.as_ref() {
+                std::fs::write(path, &csv)?;
                 println!("Exported {} entries to {}", entries.len(), path.display());
             } else {
                 print!("{}", csv);
@@ -1200,6 +1140,65 @@ pub fn cmd_export(
         }
     }
 
+    // ── --include-pdf: also copy PDFs alongside the bibliography file ──
+    if include_pdf {
+        let dest_parent = output.as_ref()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .unwrap_or_else(|| config.export_dir.clone());
+        let folder_name = format!("{}_pdfs_{}", col_name, &timestamp[..8]);
+        let dest_dir = dest_parent.join(&folder_name);
+        std::fs::create_dir_all(&dest_dir)?;
+
+        let mut copied = 0;
+        for entry in &entries {
+            if let Some(fp) = &entry.file_path {
+                let src = config.bibox_dir.join(fp);
+                if src.exists() {
+                    let dst = dest_dir.join(fp);
+                    std::fs::copy(&src, &dst)?;
+                    copied += 1;
+                }
+            }
+        }
+        println!("{}", config.msgs.folder_created(&dest_dir.to_string_lossy(), copied));
+    }
+
+    Ok(())
+}
+
+fn export_pdfs(
+    entries: &[&Entry],
+    col_name: &str,
+    timestamp: &str,
+    output: Option<PathBuf>,
+    zip: bool,
+    config: &Config,
+) -> Result<()> {
+    let folder_name = format!("{}_{}", col_name, &timestamp[..8]);
+    let dest_parent = output.unwrap_or_else(|| config.export_dir.clone());
+    let dest_dir = dest_parent.join(&folder_name);
+    std::fs::create_dir_all(&dest_dir)?;
+
+    let mut copied = 0;
+    for entry in entries {
+        if let Some(fp) = &entry.file_path {
+            let src = config.bibox_dir.join(fp);
+            if src.exists() {
+                let dst = dest_dir.join(fp);
+                std::fs::copy(&src, &dst)?;
+                copied += 1;
+            }
+        }
+    }
+
+    if zip {
+        let zip_path = dest_parent.join(format!("{}.zip", folder_name));
+        create_zip(&dest_dir, &zip_path)?;
+        std::fs::remove_dir_all(&dest_dir)?;
+        println!("{}", config.msgs.zip_created(&zip_path.to_string_lossy(), copied));
+    } else {
+        println!("{}", config.msgs.folder_created(&dest_dir.to_string_lossy(), copied));
+    }
     Ok(())
 }
 

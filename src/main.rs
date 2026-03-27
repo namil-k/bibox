@@ -234,13 +234,12 @@ enum Commands {
     /// Export BibTeX or PDFs
     #[command(alias = "out")]
     Export {
+        /// Citation keys to export (omit for collection/all)
+        keys: Vec<String>,
+
         /// Export entries from this collection
         #[arg(long)]
         collection: Option<String>,
-
-        /// Export a single entry by citation key
-        #[arg(long)]
-        key: Option<String>,
 
         /// Filter by entry type
         #[arg(long, value_name = "TYPE")]
@@ -262,8 +261,12 @@ enum Commands {
         #[arg(long)]
         as_pdf: bool,
 
-        /// Compress --as-pdf output into a ZIP archive
-        #[arg(long, requires = "as_pdf")]
+        /// Also export PDF files alongside the bibliography
+        #[arg(long)]
+        include_pdf: bool,
+
+        /// Compress output into a ZIP archive
+        #[arg(long)]
         zip: bool,
 
         /// Output format: bibtex (default), yaml, ris, csv
@@ -456,18 +459,19 @@ async fn main() -> Result<()> {
         }
 
         Some(Commands::Export {
+            keys,
             collection,
-            key,
             r#type,
             tag,
             output,
             clipboard,
             as_pdf,
+            include_pdf,
             zip,
             format,
         }) => {
             commands::cmd_export(
-                collection, key, output, clipboard, r#type, tag, as_pdf, zip, format, &config,
+                keys, collection, output, clipboard, r#type, tag, as_pdf, include_pdf, zip, format, &config,
             )?;
         }
 

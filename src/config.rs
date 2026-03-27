@@ -4,6 +4,18 @@ use std::path::PathBuf;
 
 use crate::i18n::Msgs;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum LineNumbers {
+    Absolute,
+    Relative,
+    None,
+}
+
+impl Default for LineNumbers {
+    fn default() -> Self { LineNumbers::Absolute }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     pub bibox_dir: PathBuf,
@@ -21,6 +33,18 @@ pub struct Config {
     pub notes_dir: PathBuf,
     #[serde(default = "default_templates_dir")]
     pub templates_dir: PathBuf,
+    /// Line number display in TUI: absolute, relative, none
+    #[serde(default)]
+    pub line_numbers: LineNumbers,
+    /// Panel width ratio [left, center, right] — values are proportional
+    #[serde(default = "default_panel_ratio")]
+    pub panel_ratio: [u16; 3],
+    /// Export directory for .bib files (default: current directory)
+    #[serde(default = "default_bib_export_dir")]
+    pub bib_export_dir: PathBuf,
+    /// Export directory for other formats (yaml, ris, pdf) (default: ~/Downloads)
+    #[serde(default = "default_export_dir")]
+    pub export_dir: PathBuf,
     #[serde(skip)]
     pub msgs: Msgs,
 }
@@ -37,6 +61,10 @@ impl Default for Config {
             git: false,
             notes_dir: default_notes_dir(),
             templates_dir: default_templates_dir(),
+            line_numbers: LineNumbers::default(),
+            panel_ratio: default_panel_ratio(),
+            bib_export_dir: default_bib_export_dir(),
+            export_dir: default_export_dir(),
             msgs: Msgs::default(),
         }
     }
@@ -63,6 +91,19 @@ fn default_templates_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join("bibox")
         .join("templates")
+}
+
+fn default_panel_ratio() -> [u16; 3] {
+    [2, 4, 4]
+}
+
+fn default_bib_export_dir() -> PathBuf {
+    PathBuf::from(".")
+}
+
+fn default_export_dir() -> PathBuf {
+    dirs::download_dir()
+        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
 }
 
 fn default_bibox_dir() -> PathBuf {
