@@ -1,5 +1,8 @@
 # bibox
 
+[![Crates.io](https://img.shields.io/crates/v/bibox)](https://crates.io/crates/bibox)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 A terminal-based bibliography manager built in Rust. Add papers by PDF, DOI, ISBN, arXiv ID, or URL — metadata is fetched automatically. Manage your library through a three-panel TUI or a scriptable CLI designed for AI agent workflows.
 
 ## Features
