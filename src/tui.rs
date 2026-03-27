@@ -28,6 +28,7 @@ enum Mode {
     Detail,
     Message(String),
     Help,
+    NoteView,
 }
 
 enum ConfirmAction {
@@ -43,6 +44,10 @@ pub struct App {
     search_query: String,
     mode: Mode,
     config: Config,
+    note_content: String,
+    note_scroll: u16,
+    note_citekey: String,
+    pending_editor: Option<std::path::PathBuf>,
 }
 
 impl App {
@@ -75,6 +80,10 @@ impl App {
             search_query: String::new(),
             mode: Mode::Normal,
             config,
+            note_content: String::new(),
+            note_scroll: 0,
+            note_citekey: String::new(),
+            pending_editor: None,
         })
     }
 
@@ -217,6 +226,21 @@ impl App {
         let filename = format!("{}_{}.bib", col_name, timestamp);
         let _ = std::fs::write(&filename, &bib);
         filename
+    }
+
+    fn load_note(&mut self) {
+        let citekey = match self.selected_entry() {
+            Some(entry) => entry.bibtex_key.clone(),
+            None => return,
+        };
+        let note_path = self.config.notes_dir.join(format!("{}.md", citekey));
+        self.note_content = if note_path.exists() {
+            std::fs::read_to_string(&note_path).unwrap_or_else(|_| "Error reading note.".into())
+        } else {
+            "No note yet. Press N to create one.".into()
+        };
+        self.note_citekey = citekey;
+        self.note_scroll = 0;
     }
 
     fn delete_selected(&mut self) -> Result<()> {
@@ -379,6 +403,9 @@ fn draw(f: &mut Frame, app: &mut App) {
         }
         Mode::Help => {
             draw_help_popup(f, size);
+        }
+        Mode::NoteView => {
+            draw_note_popup(f, app, size);
         }
         _ => {}
     }
@@ -555,6 +582,31 @@ fn draw_help_popup(f: &mut Frame, area: Rect) {
     f.render_widget(popup, popup_area);
 }
 
+fn draw_note_popup(f: &mut Frame, app: &App, area: Rect) {
+    let popup_area = centered_rect(80, 20, area);
+    f.render_widget(Clear, popup_area);
+
+    let lines: Vec<Line> = app
+        .note_content
+        .lines()
+        .skip(app.note_scroll as usize)
+        .map(|l| Line::from(l.to_string()))
+        .collect();
+
+    let mut text_lines = lines;
+    text_lines.push(Line::from(""));
+    text_lines.push(Line::from(Span::styled(
+        "↑↓ scroll  N edit in $EDITOR  Esc close",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let title = format!(" Note: {} ", app.note_citekey);
+    let popup = Paragraph::new(text_lines)
+        .block(Block::default().borders(Borders::ALL).title(title))
+        .wrap(ratatui::widgets::Wrap { trim: false });
+    f.render_widget(popup, popup_area);
+}
+
 // ── Event loop ───────────────────────────────────────────────────────────────
 
 fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
@@ -568,6 +620,7 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
             Ok(false)
         }
         Mode::Help => handle_help(app, key),
+        Mode::NoteView => handle_note_view(app, key),
     }
 }
 
@@ -632,6 +685,25 @@ fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
 
         KeyCode::Char('?') => {
             app.mode = Mode::Help;
+        }
+
+        // View note
+        KeyCode::Char('n') => {
+            if app.selected_entry().is_some() {
+                app.load_note();
+                app.mode = Mode::NoteView;
+            } else {
+                app.mode = Mode::Message("No entry selected.".into());
+            }
+        }
+
+        // Edit note in $EDITOR
+        KeyCode::Char('N') => {
+            if app.selected_entry().is_some() {
+                return open_note_editor(app);
+            } else {
+                app.mode = Mode::Message("No entry selected.".into());
+            }
         }
 
         _ => {}
@@ -700,6 +772,52 @@ fn handle_help(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
     Ok(false)
 }
 
+fn handle_note_view(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.mode = Mode::Normal;
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            let total_lines = app.note_content.lines().count() as u16;
+            if app.note_scroll < total_lines.saturating_sub(1) {
+                app.note_scroll += 1;
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.note_scroll = app.note_scroll.saturating_sub(1);
+        }
+        KeyCode::Char('N') => {
+            return open_note_editor(app);
+        }
+        _ => {}
+    }
+    Ok(false)
+}
+
+fn open_note_editor(app: &mut App) -> Result<bool> {
+    let entry = match app.selected_entry() {
+        Some(e) => e.clone(),
+        None => return Ok(false),
+    };
+
+    let notes_dir = &app.config.notes_dir;
+    std::fs::create_dir_all(notes_dir)?;
+    let note_path = notes_dir.join(format!("{}.md", entry.bibtex_key));
+
+    if !note_path.exists() {
+        let header = format!(
+            "# {}\ncitekey: {}\n\n",
+            entry.title.as_deref().unwrap_or("Untitled"),
+            entry.bibtex_key
+        );
+        std::fs::write(&note_path, &header)?;
+    }
+
+    app.pending_editor = Some(note_path);
+    app.mode = Mode::Normal;
+    Ok(false)
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 pub fn run_tui(config: &Config) -> Result<()> {
@@ -740,8 +858,8 @@ pub fn run_tui(config: &Config) -> Result<()> {
     result
 }
 
-fn run_loop<B: ratatui::backend::Backend>(
-    terminal: &mut Terminal<B>,
+fn run_loop(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
 ) -> Result<()> {
     loop {
@@ -752,6 +870,30 @@ fn run_loop<B: ratatui::backend::Backend>(
                 if handle_key(app, key)? {
                     break;
                 }
+            }
+        }
+
+        // Handle pending editor launch (suspend TUI, open editor, resume)
+        if let Some(note_path) = app.pending_editor.take() {
+            let editor = std::env::var("EDITOR").unwrap_or_else(|_| {
+                if std::process::Command::new("which").arg("nano").output()
+                    .map(|o| o.status.success()).unwrap_or(false)
+                { "nano".to_string() } else { "vi".to_string() }
+            });
+
+            disable_raw_mode()?;
+            execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)?;
+
+            let status = std::process::Command::new(&editor)
+                .arg(&note_path)
+                .status();
+
+            enable_raw_mode()?;
+            execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)?;
+            terminal.clear()?;
+
+            if let Err(e) = status {
+                app.mode = Mode::Message(format!("Editor failed: {}", e));
             }
         }
     }
