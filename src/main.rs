@@ -16,6 +16,7 @@ mod pdf;
 mod storage;
 mod tui;
 mod unpaywall;
+mod url_resolver;
 
 use config::load_config;
 
