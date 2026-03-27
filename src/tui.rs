@@ -30,6 +30,8 @@ enum Mode {
     Help,
     NoteView,
     SortMenu,
+    CollectionPicker,
+    TagEditor,
 }
 
 enum ConfirmAction {
@@ -68,6 +70,74 @@ impl SortCriterion {
     }
 }
 
+struct ChecklistPicker {
+    title: String,
+    items: Vec<(String, bool)>,
+    index: usize,
+    new_item_input: Option<String>,
+    new_item_label: String,
+}
+
+impl ChecklistPicker {
+    fn new(title: String, items: Vec<(String, bool)>, new_item_label: String) -> Self {
+        Self { title, items, index: 0, new_item_input: None, new_item_label }
+    }
+
+    fn move_up(&mut self) {
+        if self.index > 0 { self.index -= 1; }
+    }
+
+    fn move_down(&mut self) {
+        let max = self.items.len();
+        if self.index < max { self.index += 1; }
+    }
+
+    fn is_on_new_item(&self) -> bool {
+        self.index == self.items.len()
+    }
+
+    fn toggle(&mut self) {
+        if self.is_on_new_item() {
+            self.new_item_input = Some(String::new());
+        } else if let Some(item) = self.items.get_mut(self.index) {
+            item.1 = !item.1;
+        }
+    }
+
+    fn in_input_mode(&self) -> bool {
+        self.new_item_input.is_some()
+    }
+
+    fn apply_char(&mut self, c: char) {
+        if let Some(ref mut input) = self.new_item_input {
+            input.push(c);
+        }
+    }
+
+    fn backspace(&mut self) {
+        if let Some(ref mut input) = self.new_item_input {
+            input.pop();
+        }
+    }
+
+    fn confirm_input(&mut self) {
+        if let Some(input) = self.new_item_input.take() {
+            let name = input.trim().to_string();
+            if !name.is_empty() && !self.items.iter().any(|(n, _)| n == &name) {
+                self.items.push((name, true));
+            }
+        }
+    }
+
+    fn cancel_input(&mut self) {
+        self.new_item_input = None;
+    }
+
+    fn checked_names(&self) -> Vec<String> {
+        self.items.iter().filter(|(_, c)| *c).map(|(n, _)| n.clone()).collect()
+    }
+}
+
 pub struct App {
     entries: Vec<Entry>,
     filtered: Vec<usize>, // indices into entries
@@ -86,6 +156,7 @@ pub struct App {
     sort_menu_index: usize,
     prev_sort_by: SortCriterion,
     prev_sort_ascending: bool,
+    picker: Option<ChecklistPicker>,
 }
 
 impl App {
@@ -127,6 +198,7 @@ impl App {
             sort_menu_index: 0,
             prev_sort_by: SortCriterion::Created,
             prev_sort_ascending: false,
+            picker: None,
         })
     }
 
@@ -390,6 +462,88 @@ impl App {
         }
         Ok(())
     }
+
+    fn open_collection_picker(&mut self) {
+        if let Some(entry) = self.selected_entry() {
+            let entry_cols: std::collections::HashSet<&String> = entry.collections.iter().collect();
+            let all_cols: std::collections::BTreeSet<String> = self.entries.iter()
+                .flat_map(|e| e.collections.iter().cloned())
+                .collect();
+            let items: Vec<(String, bool)> = all_cols.into_iter()
+                .map(|c| { let checked = entry_cols.contains(&c); (c, checked) })
+                .collect();
+            let key = entry.bibtex_key.clone();
+            self.picker = Some(ChecklistPicker::new(
+                format!("Collections for [{}]:", key),
+                items,
+                "+ New collection...".into(),
+            ));
+            self.mode = Mode::CollectionPicker;
+        }
+    }
+
+    fn open_tag_editor(&mut self) {
+        if let Some(entry) = self.selected_entry() {
+            let entry_tags: std::collections::HashSet<&String> = entry.tags.iter().collect();
+            let all_tags: std::collections::BTreeSet<String> = self.entries.iter()
+                .flat_map(|e| e.tags.iter().cloned())
+                .collect();
+            let items: Vec<(String, bool)> = all_tags.into_iter()
+                .map(|t| { let checked = entry_tags.contains(&t); (t, checked) })
+                .collect();
+            let key = entry.bibtex_key.clone();
+            self.picker = Some(ChecklistPicker::new(
+                format!("Tags for [{}]:", key),
+                items,
+                "+ New tag...".into(),
+            ));
+            self.mode = Mode::TagEditor;
+        }
+    }
+
+    fn apply_picker_collections(&mut self) -> Result<()> {
+        let (new_cols, idx) = match (&self.picker, self.selected_entry_idx()) {
+            (Some(picker), Some(idx)) => (picker.checked_names(), idx),
+            _ => { self.picker = None; return Ok(()); }
+        };
+        self.picker = None;
+
+        self.entries[idx].collections = new_cols;
+
+        let db_path = crate::config::db_path();
+        let mut db = load_db(&db_path)?;
+        db.entries = self.entries.clone();
+        save_db(&db, &db_path)?;
+
+        let mut col_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for e in &self.entries {
+            for c in &e.collections { col_set.insert(c.clone()); }
+        }
+        self.collections = col_set.into_iter().collect();
+        if self.tab_index > self.tab_count().saturating_sub(1) {
+            self.tab_index = 0;
+        }
+        self.apply_filters();
+        Ok(())
+    }
+
+    fn apply_picker_tags(&mut self) -> Result<()> {
+        let (new_tags, idx) = match (&self.picker, self.selected_entry_idx()) {
+            (Some(picker), Some(idx)) => (picker.checked_names(), idx),
+            _ => { self.picker = None; return Ok(()); }
+        };
+        self.picker = None;
+
+        self.entries[idx].tags = new_tags;
+
+        let db_path = crate::config::db_path();
+        let mut db = load_db(&db_path)?;
+        db.entries = self.entries.clone();
+        save_db(&db, &db_path)?;
+
+        self.apply_filters();
+        Ok(())
+    }
 }
 
 // ── Drawing ──────────────────────────────────────────────────────────────────
@@ -518,6 +672,11 @@ fn draw(f: &mut Frame, app: &mut App) {
         }
         Mode::SortMenu => {
             draw_sort_popup(f, app, size);
+        }
+        Mode::CollectionPicker | Mode::TagEditor => {
+            if let Some(ref picker) = app.picker {
+                draw_checklist_popup(f, picker, size);
+            }
         }
         _ => {}
     }
@@ -758,6 +917,59 @@ fn draw_sort_popup(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(popup, popup_area);
 }
 
+fn draw_checklist_popup(f: &mut Frame, picker: &ChecklistPicker, area: Rect) {
+    let item_count = picker.items.len() + 3;
+    let height = (item_count as u16 + 4).min(20);
+    let popup_area = centered_rect(60, height, area);
+    f.render_widget(Clear, popup_area);
+
+    let mut lines = vec![
+        Line::from(Span::styled(&picker.title, Style::default().fg(Color::Yellow))),
+        Line::from(""),
+    ];
+
+    for (i, (name, checked)) in picker.items.iter().enumerate() {
+        let arrow = if i == picker.index { "▶ " } else { "  " };
+        let check = if *checked { "[x]" } else { "[ ]" };
+        let check_style = if *checked {
+            Style::default().fg(Color::Green)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(arrow, Style::default().fg(Color::Yellow)),
+            Span::styled(format!("{} ", check), check_style),
+            Span::raw(name.as_str()),
+        ]));
+    }
+
+    lines.push(Line::from(Span::styled("  ─────────────────", Style::default().fg(Color::DarkGray))));
+    let new_arrow = if picker.is_on_new_item() { "▶ " } else { "  " };
+    if let Some(ref input) = picker.new_item_input {
+        lines.push(Line::from(vec![
+            Span::styled(new_arrow, Style::default().fg(Color::Yellow)),
+            Span::styled(format!("{}▏", input), Style::default().fg(Color::Cyan)),
+        ]));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled(new_arrow, Style::default().fg(Color::Yellow)),
+            Span::styled(&picker.new_item_label, Style::default().fg(Color::Cyan)),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    let footer = if picker.in_input_mode() {
+        "Enter confirm  Esc cancel"
+    } else {
+        "↑↓ navigate  Space toggle  Enter done  Esc cancel"
+    };
+    lines.push(Line::from(Span::styled(footer, Style::default().fg(Color::DarkGray))));
+
+    let popup = Paragraph::new(lines)
+        .block(Block::default().borders(Borders::ALL));
+    f.render_widget(popup, popup_area);
+}
+
 // ── Event loop ───────────────────────────────────────────────────────────────
 
 fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
@@ -773,6 +985,8 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
         Mode::Help => handle_help(app, key),
         Mode::NoteView => handle_note_view(app, key),
         Mode::SortMenu => handle_sort_menu(app, key),
+        Mode::CollectionPicker => handle_picker(app, key, false),
+        Mode::TagEditor => handle_picker(app, key, true),
     }
 }
 
@@ -866,6 +1080,22 @@ fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
                 .position(|c| *c == app.sort_by)
                 .unwrap_or(0);
             app.mode = Mode::SortMenu;
+        }
+
+        KeyCode::Char('c') => {
+            if app.selected_entry().is_some() {
+                app.open_collection_picker();
+            } else {
+                app.mode = Mode::Message("No entry selected.".into());
+            }
+        }
+
+        KeyCode::Char('t') => {
+            if app.selected_entry().is_some() {
+                app.open_tag_editor();
+            } else {
+                app.mode = Mode::Message("No entry selected.".into());
+            }
         }
 
         _ => {}
@@ -993,6 +1223,54 @@ fn handle_sort_menu(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bo
             app.mode = Mode::Normal;
         }
         _ => {}
+    }
+    Ok(false)
+}
+
+fn handle_picker(app: &mut App, key: crossterm::event::KeyEvent, is_tags: bool) -> Result<bool> {
+    let in_input = app.picker.as_ref().map(|p| p.in_input_mode()).unwrap_or(false);
+
+    if in_input {
+        match key.code {
+            KeyCode::Enter => {
+                if let Some(ref mut picker) = app.picker { picker.confirm_input(); }
+            }
+            KeyCode::Esc => {
+                if let Some(ref mut picker) = app.picker { picker.cancel_input(); }
+            }
+            KeyCode::Backspace => {
+                if let Some(ref mut picker) = app.picker { picker.backspace(); }
+            }
+            KeyCode::Char(c) => {
+                if let Some(ref mut picker) = app.picker { picker.apply_char(c); }
+            }
+            _ => {}
+        }
+    } else {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(ref mut picker) = app.picker { picker.move_up(); }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(ref mut picker) = app.picker { picker.move_down(); }
+            }
+            KeyCode::Char(' ') => {
+                if let Some(ref mut picker) = app.picker { picker.toggle(); }
+            }
+            KeyCode::Enter => {
+                if is_tags {
+                    app.apply_picker_tags()?;
+                } else {
+                    app.apply_picker_collections()?;
+                }
+                app.mode = Mode::Normal;
+            }
+            KeyCode::Esc => {
+                app.picker = None;
+                app.mode = Mode::Normal;
+            }
+            _ => {}
+        }
     }
     Ok(false)
 }
