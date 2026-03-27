@@ -1,6 +1,6 @@
 # bibox
 
-A terminal-based bibliography manager built in Rust. Add papers by PDF, DOI, ISBN, arXiv ID, or URL — metadata is fetched automatically. Manage your library through a yazi-inspired three-panel TUI or a scriptable CLI designed for AI agent workflows.
+A terminal-based bibliography manager built in Rust. Add papers by PDF, DOI, ISBN, arXiv ID, or URL — metadata is fetched automatically. Manage your library through a three-panel TUI or a scriptable CLI designed for AI agent workflows.
 
 ## Features
 
@@ -15,6 +15,12 @@ A terminal-based bibliography manager built in Rust. Add papers by PDF, DOI, ISB
 ## Install
 
 ```bash
+# From crates.io
+cargo install bibox
+
+# From source
+git clone https://github.com/namil-k/bibox.git
+cd bibox/bibox
 cargo install --path .
 ```
 
