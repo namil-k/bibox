@@ -80,6 +80,8 @@ pub async fn cmd_add(
     to: Option<String>,
     doi_arg: Option<String>,
     isbn_arg: Option<String>,
+    url_arg: Option<String>,
+    search_arg: Option<String>,
     key_arg: Option<String>,
     title_arg: Option<String>,
     author_arg: Option<String>,
@@ -94,6 +96,100 @@ pub async fn cmd_add(
     let mut db = load_db(&db_path)?;
 
     std::fs::create_dir_all(&config.bibox_dir)?;
+
+    // ── Mutable copies for --search/--url resolution ──
+    let mut doi_arg = doi_arg;
+
+    // ── --search: Crossref title search → interactive select → DOI ──
+    if let Some(ref query) = search_arg {
+        println!("{}", config.msgs.searching_crossref_query(query));
+        let results = crate::crossref::search_by_title(query, 5).await?;
+        if results.is_empty() {
+            anyhow::bail!("{}", config.msgs.no_search_results(query));
+        }
+        let items: Vec<crate::interactive::SelectItem> = results
+            .iter()
+            .map(|r| crate::interactive::SelectItem {
+                key: r.doi.clone(),
+                display: r.display(60, 20),
+            })
+            .collect();
+        match crate::interactive::interactive_select(&items)? {
+            Some(doi) => { doi_arg = Some(doi); }
+            None => return Ok(()), // user cancelled
+        }
+    }
+
+    // ── --url: resolve URL to DOI or metadata ──
+    if let Some(ref url) = url_arg {
+        match crate::url_resolver::resolve_url(url).await? {
+            crate::url_resolver::ResolvedUrl::Doi(doi) => {
+                doi_arg = Some(doi);
+            }
+            crate::url_resolver::ResolvedUrl::ArxivId(id) => {
+                let arxiv_url = format!("https://arxiv.org/abs/{}", id);
+                match crate::url_resolver::fetch_and_parse_meta(&arxiv_url).await? {
+                    crate::url_resolver::ResolvedUrl::Doi(doi) => {
+                        doi_arg = Some(doi);
+                    }
+                    _ => {
+                        anyhow::bail!("{}", config.msgs.url_resolve_failed());
+                    }
+                }
+            }
+            crate::url_resolver::ResolvedUrl::Metadata(meta) => {
+                // Direct metadata — create entry without Crossref
+                let title = title_arg.unwrap_or_else(|| meta.title.unwrap_or_else(|| "Untitled".to_string()));
+                let authors = if let Some(a) = author_arg {
+                    a.split(';').map(|s| s.trim().to_string()).collect()
+                } else {
+                    meta.authors
+                };
+                let year = year_arg.or(meta.year);
+                let journal = journal_arg.or(meta.journal);
+
+                let base_key = generate_bibtex_key(&authors, year, &title);
+                let bibtex_key = key_arg.unwrap_or_else(|| generate_unique_key(&db, &base_key));
+                let collection = to.or_else(|| config.default_collection.clone());
+
+                let entry = Entry {
+                    id: Uuid::new_v4().to_string(),
+                    bibtex_key: bibtex_key.clone(),
+                    entry_type: entry_type_arg
+                        .as_deref()
+                        .and_then(|t| t.parse().ok())
+                        .unwrap_or(EntryType::Misc),
+                    title: Some(title),
+                    author: authors,
+                    year,
+                    journal,
+                    volume: None,
+                    number: None,
+                    pages: None,
+                    publisher: publisher_arg,
+                    editor: None,
+                    edition: None,
+                    isbn: None,
+                    booktitle: booktitle_arg,
+                    doi: meta.doi,
+                    url: Some(meta.url),
+                    tags: vec![],
+                    note: None,
+                    collections: collection.map(|c| vec![c]).unwrap_or_default(),
+                    file_path: None,
+                    created_at: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                };
+
+                println!("{}", config.msgs.added(&bibtex_key, entry.title.as_deref().unwrap_or("?")));
+                db.entries.push(entry);
+                save_db(&db, &db_path)?;
+                if config.git {
+                    git::auto_commit(&db_path, &format!("bibox: add {}", bibtex_key))?;
+                }
+                return Ok(());
+            }
+        }
+    }
 
     // Duplicate DOI check
     if let Some(ref doi) = doi_arg {

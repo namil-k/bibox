@@ -46,6 +46,14 @@ enum Commands {
         #[arg(long)]
         isbn: Option<String>,
 
+        /// URL to resolve (academic paper page)
+        #[arg(long, conflicts_with_all = ["doi", "isbn", "file", "search"])]
+        url: Option<String>,
+
+        /// Search Crossref by title and select interactively
+        #[arg(long, conflicts_with_all = ["doi", "isbn", "file", "url"])]
+        search: Option<String>,
+
         /// Assign to a collection
         #[arg(long)]
         to: Option<String>,
@@ -326,6 +334,8 @@ async fn main() -> Result<()> {
             file,
             doi,
             isbn,
+            url,
+            search,
             to,
             key,
             title,
@@ -337,8 +347,8 @@ async fn main() -> Result<()> {
             booktitle,
         }) => {
             commands::cmd_add(
-                file, to, doi, isbn, key, title, author, year, r#type, journal, publisher, booktitle,
-                &config,
+                file, to, doi, isbn, url, search, key, title, author, year, r#type, journal,
+                publisher, booktitle, &config,
             )
             .await?;
         }
