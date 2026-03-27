@@ -280,10 +280,38 @@ enum Commands {
     /// Reconcile the bibox directory with the database
     Sync,
 
-    /// Open or create a per-entry note file in $EDITOR
+    /// Open, create, or write per-entry note files
     Note {
         /// Citation key or entry ID
         key: String,
+
+        /// Read content from stdin (non-interactive)
+        #[arg(long)]
+        stdin: bool,
+
+        /// Read content from a file
+        #[arg(long, conflicts_with = "stdin")]
+        from: Option<PathBuf>,
+
+        /// Target a specific ## section (requires --stdin or --from)
+        #[arg(long)]
+        section: Option<String>,
+
+        /// Initialize note from a template
+        #[arg(long)]
+        template: Option<String>,
+
+        /// Print note content to stdout
+        #[arg(long, conflicts_with_all = ["stdin", "from", "template"])]
+        show: bool,
+
+        /// Print note file path to stdout
+        #[arg(long, conflicts_with_all = ["stdin", "from", "template", "show"])]
+        path: bool,
+
+        /// Allow --template to overwrite existing note
+        #[arg(long)]
+        force: bool,
     },
 
     /// Bulk-update fields across multiple entries
@@ -451,8 +479,8 @@ async fn main() -> Result<()> {
             commands::cmd_sync(&config)?;
         }
 
-        Some(Commands::Note { key }) => {
-            commands::cmd_note(key, &config)?;
+        Some(Commands::Note { key, stdin, from, section, template, show, path, force }) => {
+            commands::cmd_note(key, stdin, from, section, template, show, path, force, &config)?;
         }
 
         Some(Commands::Modify {
