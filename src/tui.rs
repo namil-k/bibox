@@ -234,7 +234,7 @@ pub struct App {
 
 impl App {
     pub fn new(config: Config) -> Result<Self> {
-        let db_path = crate::config::db_path();
+        let db_path = crate::config::resolve_db_path(&config);
         let db = load_db(&db_path)?;
         let entries = db.entries;
 
@@ -489,7 +489,7 @@ impl App {
             }
             let key = entry.bibtex_key.clone();
             self.entries.retain(|e| e.bibtex_key != key);
-            let db_path = crate::config::db_path();
+            let db_path = crate::config::resolve_db_path(&self.config);
             let mut db = load_db(&db_path)?;
             db.entries = self.entries.clone();
             save_db(&db, &db_path)?;
@@ -548,7 +548,7 @@ impl App {
         };
         self.picker = None;
         self.entries[idx].collections = new_cols;
-        let db_path = crate::config::db_path();
+        let db_path = crate::config::resolve_db_path(&self.config);
         let mut db = load_db(&db_path)?;
         db.entries = self.entries.clone();
         save_db(&db, &db_path)?;
@@ -564,7 +564,7 @@ impl App {
         };
         self.picker = None;
         self.entries[idx].tags = new_tags;
-        let db_path = crate::config::db_path();
+        let db_path = crate::config::resolve_db_path(&self.config);
         let mut db = load_db(&db_path)?;
         db.entries = self.entries.clone();
         save_db(&db, &db_path)?;
@@ -1158,9 +1158,64 @@ fn draw_export_popup(f: &mut Frame, es: &ExportState, area: Rect) {
     f.render_widget(popup, popup_area);
 }
 
+fn get_git_status(home: &std::path::Path) -> String {
+    // Check if it's a git repo
+    let is_git = std::process::Command::new("git")
+        .args(["-C", &home.to_string_lossy(), "rev-parse", "--is-inside-work-tree"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !is_git { return "not a git repo".into(); }
+
+    // Check for remote
+    let remote = std::process::Command::new("git")
+        .args(["-C", &home.to_string_lossy(), "remote"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default();
+    if remote.trim().is_empty() { return "no remote".into(); }
+
+    // Check for uncommitted changes
+    let status = std::process::Command::new("git")
+        .args(["-C", &home.to_string_lossy(), "status", "--porcelain"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default();
+    if !status.trim().is_empty() {
+        return format!("{} ● uncommitted changes", remote.trim());
+    }
+
+    // Fetch and check ahead/behind
+    let _ = std::process::Command::new("git")
+        .args(["-C", &home.to_string_lossy(), "fetch", "--quiet"])
+        .output();
+    let behind = std::process::Command::new("git")
+        .args(["-C", &home.to_string_lossy(), "rev-list", "--count", "HEAD..@{upstream}"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+
+    let branch = std::process::Command::new("git")
+        .args(["-C", &home.to_string_lossy(), "branch", "--show-current"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_else(|| "master".into());
+
+    if behind > 0 {
+        format!("{}/{} ⚠ {} behind", remote.trim(), branch.trim(), behind)
+    } else {
+        format!("{}/{} ✓ up to date", remote.trim(), branch.trim())
+    }
+}
+
 fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
     use crate::config::LineNumbers;
-    let popup_area = centered_rect(70, 16, area);
+    let popup_area = centered_rect(70, 20, area);
     f.render_widget(Clear, popup_area);
 
     let ln_label = match app.config.line_numbers {
@@ -1172,28 +1227,57 @@ fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
     let bib_dir = app.config.bib_export_dir.display().to_string();
     let exp_dir = app.config.export_dir.display().to_string();
 
-    let settings = [
-        format!("Line numbers     [{}]", ln_label),
-        format!("Panel ratio      [{}, {}, {}]", ratio[0], ratio[1], ratio[2]),
-        format!("Bib export dir   [{}]", bib_dir),
-        format!("Export dir       [{}]", exp_dir),
+    let home_label = match &app.config.home {
+        Some(h) => h.display().to_string(),
+        None => "(not set — use `bibox init <path>`)".into(),
+    };
+
+    let git_label = match &app.config.home {
+        Some(h) => get_git_status(&crate::config::expand_tilde(h)),
+        None => "—".into(),
+    };
+
+    let mut items: Vec<(String, bool)> = vec![
+        (format!("Line numbers     [{}]", ln_label), true),
+        (format!("Panel ratio      [{}, {}, {}]", ratio[0], ratio[1], ratio[2]), true),
+        (format!("Bib export dir   [{}]", bib_dir), true),
+        (format!("Export dir       [{}]", exp_dir), true),
     ];
+    // separator + read-only items
+    let readonly_start = items.len();
+    items.push((format!("Home             {}", home_label), false));
+    items.push((format!("Git              {}", git_label), false));
 
     let mut lines = vec![
         Line::from(Span::styled("Settings", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
         Line::from(""),
     ];
-    for (i, s) in settings.iter().enumerate() {
+    for (i, (label, editable)) in items.iter().enumerate() {
+        if i == readonly_start {
+            lines.push(Line::from(Span::styled("  ─────────────────────────────", Style::default().fg(Color::DarkGray))));
+        }
         let arrow = if i == app.settings_idx { "▶ " } else { "  " };
-        let style = if i == app.settings_idx { Style::default().fg(Color::Cyan) } else { Style::default() };
+        let style = if !editable {
+            Style::default().fg(Color::DarkGray)
+        } else if i == app.settings_idx {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default()
+        };
         lines.push(Line::from(vec![
             Span::styled(arrow, Style::default().fg(Color::Yellow)),
-            Span::styled(s.as_str(), style),
+            Span::styled(label.as_str(), style),
         ]));
     }
+
+    // Show git sync hint when on Git row
+    if app.settings_idx == readonly_start + 1 && app.config.home.is_some() {
+        lines.push(Line::from(Span::styled("           [Enter: sync (pull → commit → push)]", Style::default().fg(Color::Cyan))));
+    }
+
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "↑↓ navigate  ←→ change value  Enter save  Esc cancel",
+        "↑↓ navigate  ←→ change value  Enter save/sync  Esc cancel",
         Style::default().fg(Color::DarkGray),
     )));
 
@@ -1663,7 +1747,7 @@ fn handle_export_menu(app: &mut App, key: crossterm::event::KeyEvent) -> Result<
 
 fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
     use crate::config::LineNumbers;
-    let num_settings = 4;
+    let num_settings: usize = 6; // 0-3 editable, 4 home (ro), 5 git (ro+sync)
 
     let download_dir = dirs::download_dir()
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")));
@@ -1702,17 +1786,17 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
                         _ => [2, 4, 4],
                     };
                 }
-                2 => { // bib_export_dir: cycle presets
+                2 => {
                     let cur = &app.config.bib_export_dir;
                     let pos = dir_presets.iter().position(|d| d == cur).unwrap_or(0);
                     app.config.bib_export_dir = dir_presets[(pos + 1) % dir_presets.len()].clone();
                 }
-                3 => { // export_dir: cycle presets
+                3 => {
                     let cur = &app.config.export_dir;
                     let pos = dir_presets.iter().position(|d| d == cur).unwrap_or(0);
                     app.config.export_dir = dir_presets[(pos + 1) % dir_presets.len()].clone();
                 }
-                _ => {}
+                _ => {} // 4,5 are read-only
             }
         }
         KeyCode::Left | KeyCode::Char('h') => {
@@ -1749,8 +1833,56 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
             }
         }
         KeyCode::Enter => {
-            let _ = crate::config::save_config(&app.config);
-            app.mode = Mode::Message("Settings saved.".into());
+            if app.settings_idx == 5 {
+                // Git sync: pull → add → commit → push
+                if let Some(ref home) = app.config.home {
+                    let home = crate::config::expand_tilde(home);
+                    let home_str = home.to_string_lossy().to_string();
+                    let result = (|| -> Result<String> {
+                        // pull
+                        let pull = std::process::Command::new("git")
+                            .args(["-C", &home_str, "pull", "--rebase"])
+                            .output()?;
+                        if !pull.status.success() {
+                            let err = String::from_utf8_lossy(&pull.stderr);
+                            anyhow::bail!("git pull failed: {}", err.trim());
+                        }
+                        // add
+                        let _ = std::process::Command::new("git")
+                            .args(["-C", &home_str, "add", "."])
+                            .output()?;
+                        // check if anything to commit
+                        let diff = std::process::Command::new("git")
+                            .args(["-C", &home_str, "diff", "--cached", "--quiet"])
+                            .output()?;
+                        if !diff.status.success() {
+                            // there are staged changes
+                            let _ = std::process::Command::new("git")
+                                .args(["-C", &home_str, "commit", "-m", "bibox sync"])
+                                .output()?;
+                        }
+                        // push
+                        let push = std::process::Command::new("git")
+                            .args(["-C", &home_str, "push"])
+                            .output()?;
+                        if !push.status.success() {
+                            let err = String::from_utf8_lossy(&push.stderr);
+                            anyhow::bail!("git push failed: {}", err.trim());
+                        }
+                        Ok("Sync complete.".into())
+                    })();
+                    match result {
+                        Ok(msg) => { app.mode = Mode::Message(msg); }
+                        Err(e) => { app.mode = Mode::Message(format!("Sync failed: {}", e)); }
+                    }
+                } else {
+                    app.mode = Mode::Message("No home set. Run `bibox init <path>` first.".into());
+                }
+            } else {
+                // Save config
+                let _ = crate::config::save_config(&app.config);
+                app.mode = Mode::Message("Settings saved.".into());
+            }
         }
         KeyCode::Esc => {
             if let Ok(cfg) = crate::config::load_config() {
@@ -1790,6 +1922,7 @@ pub fn run_tui(config: &Config) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let config_clone = Config {
+        home: config.home.clone(),
         bibox_dir: config.bibox_dir.clone(),
         pdf_viewer: config.pdf_viewer.clone(),
         default_collection: config.default_collection.clone(),
@@ -1854,7 +1987,7 @@ fn run_loop(
         if let Some(ref rx) = app.bg_result {
             match rx.try_recv() {
                 Ok(Ok(result)) => {
-                    let db_path = crate::config::db_path();
+                    let db_path = crate::config::resolve_db_path(&app.config);
                     if let Ok(mut db) = load_db(&db_path) {
                         if let Some(db_entry) = find_by_key_mut(&mut db, &result.key) {
                             db_entry.file_path = Some(result.file_path.clone());

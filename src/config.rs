@@ -18,6 +18,9 @@ impl Default for LineNumbers {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
+    /// Portable home directory (set by `bibox init`). When set, db/pdfs/notes live here.
+    #[serde(default)]
+    pub home: Option<PathBuf>,
     pub bibox_dir: PathBuf,
     pub pdf_viewer: Option<String>,
     pub default_collection: Option<String>,
@@ -52,6 +55,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
+            home: None,
             bibox_dir: default_bibox_dir(),
             pdf_viewer: None,
             default_collection: None,
@@ -135,7 +139,35 @@ pub fn load_config() -> Result<Config> {
         toml::from_str(&content)?
     };
     config.msgs = Msgs::new(&config.language);
+
+    // When home is set, derive paths from it
+    if let Some(ref home) = config.home {
+        let home = expand_tilde(home);
+        config.bibox_dir = home.join("pdfs");
+        config.notes_dir = home.join("notes");
+    }
+
     Ok(config)
+}
+
+/// Resolve db_path based on config home (must be called after load_config)
+pub fn resolve_db_path(config: &Config) -> PathBuf {
+    if let Some(ref home) = config.home {
+        expand_tilde(home).join("db.json")
+    } else {
+        db_path()
+    }
+}
+
+pub fn expand_tilde(path: &std::path::Path) -> PathBuf {
+    if let Ok(s) = path.to_str().ok_or(()) {
+        if s.starts_with("~/") {
+            if let Some(home) = dirs::home_dir() {
+                return home.join(&s[2..]);
+            }
+        }
+    }
+    path.to_path_buf()
 }
 
 pub fn save_config(config: &Config) -> Result<()> {

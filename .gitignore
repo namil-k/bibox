@@ -24,3 +24,5 @@ target
 #.idea/
 
 PLAN.md
+SESSION_LOG.md
+.DS_Store

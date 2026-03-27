@@ -21,8 +21,8 @@ use crate::arxiv;
 use crate::unpaywall;
 use crate::openlibrary;
 
-fn db_path_from_config(_config: &Config) -> PathBuf {
-    crate::config::db_path()
+fn db_path_from_config(config: &Config) -> PathBuf {
+    crate::config::resolve_db_path(config)
 }
 
 fn prompt_confirm(msg: &str) -> bool {
@@ -1451,6 +1451,96 @@ pub fn cmd_open(id_or_key: String, config: &Config) -> Result<()> {
 }
 
 // ── sync ─────────────────────────────────────────────────────────────────────
+
+pub fn cmd_init(path: PathBuf, migrate: bool, config: &Config) -> Result<()> {
+    let home = if path.to_string_lossy().starts_with("~/") {
+        dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(&path.to_string_lossy()[2..])
+    } else {
+        std::fs::canonicalize(&path).unwrap_or(path.clone())
+    };
+
+    // Create directory structure
+    std::fs::create_dir_all(home.join("pdfs"))?;
+    std::fs::create_dir_all(home.join("notes"))?;
+
+    // Create db.json if not exists
+    let db_file = home.join("db.json");
+    if !db_file.exists() {
+        std::fs::write(&db_file, "{\"entries\":[]}")?;
+    }
+
+    // Migrate existing data if requested
+    if migrate {
+        let old_db_path = crate::config::db_path();
+        if old_db_path.exists() && !db_file.exists() {
+            println!("Migrating database...");
+            std::fs::copy(&old_db_path, &db_file)?;
+        } else if old_db_path.exists() {
+            // Merge: load old, load new, combine
+            let old_db = load_db(&old_db_path)?;
+            let mut new_db = load_db(&db_file)?;
+            let existing_keys: std::collections::HashSet<String> =
+                new_db.entries.iter().map(|e| e.bibtex_key.clone()).collect();
+            for entry in old_db.entries {
+                if !existing_keys.contains(&entry.bibtex_key) {
+                    new_db.entries.push(entry);
+                }
+            }
+            save_db(&new_db, &db_file)?;
+            println!("Merged {} entries into new home.", new_db.entries.len());
+        }
+
+        // Copy PDFs
+        if config.bibox_dir.exists() {
+            let dest_pdfs = home.join("pdfs");
+            let mut copied = 0;
+            for entry in std::fs::read_dir(&config.bibox_dir)? {
+                let entry = entry?;
+                let path = entry.path();
+                if path.extension().map(|e| e == "pdf").unwrap_or(false) {
+                    let dest = dest_pdfs.join(entry.file_name());
+                    if !dest.exists() {
+                        std::fs::copy(&path, &dest)?;
+                        copied += 1;
+                    }
+                }
+            }
+            if copied > 0 { println!("Copied {} PDFs.", copied); }
+        }
+
+        // Copy notes
+        if config.notes_dir.exists() {
+            let dest_notes = home.join("notes");
+            let mut copied = 0;
+            for entry in std::fs::read_dir(&config.notes_dir)? {
+                let entry = entry?;
+                let dest = dest_notes.join(entry.file_name());
+                if !dest.exists() {
+                    std::fs::copy(entry.path(), &dest)?;
+                    copied += 1;
+                }
+            }
+            if copied > 0 { println!("Copied {} notes.", copied); }
+        }
+    }
+
+    // Update config.toml with home path
+    let mut new_config = crate::config::load_config()?;
+    new_config.home = Some(home.clone());
+    crate::config::save_config(&new_config)?;
+
+    println!("Initialized bibox home: {}", home.display());
+    println!("  pdfs/    — PDF files");
+    println!("  notes/   — Markdown notes");
+    println!("  db.json  — Database");
+    println!();
+    println!("To sync with GitHub:");
+    println!("  cd {} && git init && git add . && git commit -m 'init bibox'", home.display());
+
+    Ok(())
+}
 
 pub fn cmd_sync(config: &Config) -> Result<()> {
     let db_path = db_path_from_config(config);

@@ -283,6 +283,16 @@ enum Commands {
     /// Reconcile the bibox directory with the database
     Sync,
 
+    /// Initialize a portable bibox home directory
+    Init {
+        /// Path to the home directory (e.g., ~/bibox)
+        path: PathBuf,
+
+        /// Migrate existing data from Library to the new home
+        #[arg(long)]
+        migrate: bool,
+    },
+
     /// Open, create, or write per-entry note files
     Note {
         /// Citation key or entry ID
@@ -481,6 +491,10 @@ async fn main() -> Result<()> {
 
         Some(Commands::Sync) => {
             commands::cmd_sync(&config)?;
+        }
+
+        Some(Commands::Init { path, migrate }) => {
+            commands::cmd_init(path, migrate, &config)?;
         }
 
         Some(Commands::Note { key, stdin, from, section, template, show, path, force }) => {
