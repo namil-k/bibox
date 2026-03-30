@@ -83,6 +83,7 @@ pub async fn cmd_add(
     arxiv_arg: Option<String>,
     url_arg: Option<String>,
     search_arg: Option<String>,
+    index_arg: Option<usize>,
     key_arg: Option<String>,
     title_arg: Option<String>,
     author_arg: Option<String>,
@@ -91,6 +92,7 @@ pub async fn cmd_add(
     journal_arg: Option<String>,
     publisher_arg: Option<String>,
     booktitle_arg: Option<String>,
+    json: bool,
     config: &Config,
 ) -> Result<()> {
     let db_path = db_path_from_config(config);
@@ -148,16 +150,25 @@ pub async fn cmd_add(
         if results.is_empty() {
             anyhow::bail!("{}", config.msgs.no_search_results(query));
         }
-        let items: Vec<crate::interactive::SelectItem> = results
-            .iter()
-            .map(|r| crate::interactive::SelectItem {
-                key: r.doi.clone(),
-                display: r.display(60, 20),
-            })
-            .collect();
-        match crate::interactive::interactive_select(&items)? {
-            Some(doi) => { doi_arg = Some(doi); }
-            None => return Ok(()), // user cancelled
+        if let Some(idx) = index_arg {
+            // Non-interactive: auto-select by index
+            if idx >= results.len() {
+                anyhow::bail!("Index {} out of range (0-{})", idx, results.len() - 1);
+            }
+            doi_arg = Some(results[idx].doi.clone());
+        } else {
+            // Interactive select
+            let items: Vec<crate::interactive::SelectItem> = results
+                .iter()
+                .map(|r| crate::interactive::SelectItem {
+                    key: r.doi.clone(),
+                    display: r.display(60, 20),
+                })
+                .collect();
+            match crate::interactive::interactive_select(&items)? {
+                Some(doi) => { doi_arg = Some(doi); }
+                None => return Ok(()), // user cancelled
+            }
         }
     }
 
@@ -221,7 +232,11 @@ pub async fn cmd_add(
                     created_at: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
                 };
 
-                println!("{}", config.msgs.added(&bibtex_key, entry.title.as_deref().unwrap_or("?")));
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&entry)?);
+                } else {
+                    println!("{}", config.msgs.added(&bibtex_key, entry.title.as_deref().unwrap_or("?")));
+                }
                 db.entries.push(entry);
                 save_db(&db, &db_path)?;
                 if config.git {
@@ -264,7 +279,11 @@ pub async fn cmd_add(
             if let Some(y) = year_arg { entry.year = Some(y); }
             if let Some(p) = publisher_arg { entry.publisher = Some(p); }
 
-            println!("Added: {} — {}", entry.bibtex_key, entry.title.as_deref().unwrap_or("?"));
+            if json {
+                println!("{}", serde_json::to_string_pretty(&entry)?);
+            } else {
+                println!("Added: {} — {}", entry.bibtex_key, entry.title.as_deref().unwrap_or("?"));
+            }
             let key_clone = entry.bibtex_key.clone();
             db.entries.push(entry);
             save_db(&db, &db_path)?;
@@ -506,12 +525,16 @@ pub async fn cmd_add(
         created_at: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
     };
 
-    println!(
-        "{}",
-        config
-            .msgs
-            .added(&entry.bibtex_key, entry.title.as_deref().unwrap_or("?"))
-    );
+    if json {
+        println!("{}", serde_json::to_string_pretty(&entry)?);
+    } else {
+        println!(
+            "{}",
+            config
+                .msgs
+                .added(&entry.bibtex_key, entry.title.as_deref().unwrap_or("?"))
+        );
+    }
     let add_key = entry.bibtex_key.clone();
     db.entries.push(entry);
     save_db(&db, &db_path)?;
@@ -1526,7 +1549,7 @@ pub fn cmd_open(id_or_key: String, config: &Config) -> Result<()> {
 
 // ── sync ─────────────────────────────────────────────────────────────────────
 
-pub fn cmd_init(path: PathBuf, migrate: bool, config: &Config) -> Result<()> {
+pub fn cmd_init(path: PathBuf, migrate: bool, json: bool, config: &Config) -> Result<()> {
     let home = if path.to_string_lossy().starts_with("~/") {
         dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
@@ -1605,18 +1628,30 @@ pub fn cmd_init(path: PathBuf, migrate: bool, config: &Config) -> Result<()> {
     new_config.home = Some(home.clone());
     crate::config::save_config(&new_config)?;
 
-    println!("Initialized bibox home: {}", home.display());
-    println!("  pdfs/    — PDF files");
-    println!("  notes/   — Markdown notes");
-    println!("  db.json  — Database");
-    println!();
-    println!("To sync with GitHub:");
-    println!("  cd {} && git init && git add . && git commit -m 'init bibox'", home.display());
+    if json {
+        let result = serde_json::json!({
+            "home": home.to_string_lossy(),
+            "db": home.join("db.json").to_string_lossy().to_string(),
+            "pdfs": home.join("pdfs").to_string_lossy().to_string(),
+            "notes": home.join("notes").to_string_lossy().to_string(),
+            "status": "created",
+            "migrated": migrate,
+        });
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!("Initialized bibox home: {}", home.display());
+        println!("  pdfs/    — PDF files");
+        println!("  notes/   — Markdown notes");
+        println!("  db.json  — Database");
+        println!();
+        println!("To sync with GitHub:");
+        println!("  cd {} && git init && git add . && git commit -m 'init bibox'", home.display());
+    }
 
     Ok(())
 }
 
-pub fn cmd_sync(yes: bool, config: &Config) -> Result<()> {
+pub fn cmd_sync(yes: bool, json: bool, config: &Config) -> Result<()> {
     let db_path = db_path_from_config(config);
     let mut db = load_db(&db_path)?;
 
@@ -1729,7 +1764,18 @@ pub fn cmd_sync(yes: bool, config: &Config) -> Result<()> {
     }
 
     save_db(&db, &db_path)?;
-    println!("{}", config.msgs.sync_complete());
+    if json {
+        let result = serde_json::json!({
+            "status": "complete",
+            "renamed": renamed_count,
+            "removed": missing.len(),
+            "added": untracked.len(),
+            "total_entries": db.entries.len(),
+        });
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!("{}", config.msgs.sync_complete());
+    }
 
     Ok(())
 }
@@ -1745,6 +1791,7 @@ pub fn cmd_note(
     show: bool,
     path: bool,
     force: bool,
+    json: bool,
     config: &Config,
 ) -> Result<()> {
     let db_path = db_path_from_config(config);
@@ -1765,7 +1812,16 @@ pub fn cmd_note(
 
     // ── Read-only modes ──
     if path {
-        println!("{}", note_path.display());
+        if json {
+            let result = serde_json::json!({
+                "path": note_path.to_string_lossy(),
+                "exists": note_path.exists(),
+                "citekey": entry.bibtex_key,
+            });
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        } else {
+            println!("{}", note_path.display());
+        }
         return Ok(());
     }
 
@@ -1774,7 +1830,16 @@ pub fn cmd_note(
             anyhow::bail!("{}", config.msgs.note_not_found(&id_or_key));
         }
         let content = std::fs::read_to_string(&note_path)?;
-        print!("{}", content);
+        if json {
+            let result = serde_json::json!({
+                "citekey": entry.bibtex_key,
+                "path": note_path.to_string_lossy(),
+                "content": content,
+            });
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        } else {
+            print!("{}", content);
+        }
         return Ok(());
     }
 
@@ -2534,5 +2599,419 @@ fn create_zip(src_dir: &Path, zip_path: &Path) -> Result<()> {
     }
 
     zip.finish()?;
+    Ok(())
+}
+
+// ── Template commands ───────────────────────────────────────────────────────
+
+pub fn cmd_template_list(json: bool, config: &Config) -> Result<()> {
+    let templates = crate::notes::list_templates(&config.templates_dir);
+    if json {
+        let items: Vec<serde_json::Value> = templates.iter().map(|(name, is_custom, is_override)| {
+            serde_json::json!({
+                "name": name,
+                "custom": is_custom,
+                "overridden": is_override,
+            })
+        }).collect();
+        let result = serde_json::json!({
+            "templates": items,
+            "templates_dir": config.templates_dir.to_string_lossy(),
+        });
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        if templates.is_empty() {
+            println!("No templates available.");
+            return Ok(());
+        }
+        for (name, is_custom, is_override) in &templates {
+            let tag = if *is_override {
+                " (built-in, overridden by custom)"
+            } else if *is_custom {
+                " (custom)"
+            } else {
+                " (built-in)"
+            };
+            println!("  {}{}", name, tag);
+        }
+        println!("\nTemplates dir: {}", config.templates_dir.display());
+    }
+    Ok(())
+}
+
+pub fn cmd_template_show(name: &str, json: bool, config: &Config) -> Result<()> {
+    let content = crate::notes::load_template(name, &config.templates_dir)?;
+    if json {
+        let result = serde_json::json!({
+            "name": name,
+            "content": content,
+        });
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        print!("{}", content);
+    }
+    Ok(())
+}
+
+pub fn cmd_template_create(name: &str, stdin: bool, config: &Config) -> Result<()> {
+    std::fs::create_dir_all(&config.templates_dir)?;
+    let path = config.templates_dir.join(format!("{}.md", name));
+    if path.exists() {
+        anyhow::bail!("Template '{}' already exists at {}. Use `bibox template edit {}` instead.", name, path.display(), name);
+    }
+
+    let content = if stdin {
+        let mut buf = String::new();
+        io::stdin().read_to_string(&mut buf)?;
+        buf
+    } else {
+        // Open editor with empty file
+        std::fs::write(&path, "")?;
+        let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+        std::process::Command::new(&editor)
+            .arg(&path)
+            .status()
+            .with_context(|| format!("Failed to launch editor '{}'", editor))?;
+        std::fs::read_to_string(&path)?
+    };
+
+    if content.trim().is_empty() {
+        let _ = std::fs::remove_file(&path);
+        anyhow::bail!("Empty template — not saved.");
+    }
+
+    if !stdin {
+        // Already written by editor
+    } else {
+        std::fs::write(&path, &content)?;
+    }
+    println!("Template '{}' created at {}", name, path.display());
+    Ok(())
+}
+
+pub fn cmd_template_edit(name: &str, config: &Config) -> Result<()> {
+    std::fs::create_dir_all(&config.templates_dir)?;
+    let path = config.templates_dir.join(format!("{}.md", name));
+
+    // If it's a built-in and no custom override exists, export it first
+    if !path.exists() {
+        if let Some(content) = crate::notes::builtin_template(name) {
+            std::fs::write(&path, content)?;
+            println!("Exported built-in '{}' to {} for editing.", name, path.display());
+        } else {
+            anyhow::bail!("Template '{}' not found.", name);
+        }
+    }
+
+    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+    std::process::Command::new(&editor)
+        .arg(&path)
+        .status()
+        .with_context(|| format!("Failed to launch editor '{}'", editor))?;
+    println!("Template '{}' saved.", name);
+    Ok(())
+}
+
+pub fn cmd_template_delete(name: &str, config: &Config) -> Result<()> {
+    if crate::notes::BUILTIN_NAMES.contains(&name) {
+        let path = config.templates_dir.join(format!("{}.md", name));
+        if path.exists() {
+            std::fs::remove_file(&path)?;
+            println!("Custom override for '{}' deleted. Built-in version restored.", name);
+        } else {
+            anyhow::bail!("Cannot delete built-in template '{}'. It has no custom override.", name);
+        }
+    } else {
+        let path = config.templates_dir.join(format!("{}.md", name));
+        if !path.exists() {
+            anyhow::bail!("Template '{}' not found.", name);
+        }
+        std::fs::remove_file(&path)?;
+        println!("Template '{}' deleted.", name);
+    }
+    Ok(())
+}
+
+pub fn cmd_template_export(name: &str, config: &Config) -> Result<()> {
+    let content = match crate::notes::builtin_template(name) {
+        Some(c) => c,
+        None => anyhow::bail!("'{}' is not a built-in template. Available: {}", name, crate::notes::BUILTIN_NAMES.join(", ")),
+    };
+    std::fs::create_dir_all(&config.templates_dir)?;
+    let path = config.templates_dir.join(format!("{}.md", name));
+    if path.exists() {
+        anyhow::bail!("Custom '{}' already exists at {}. Edit it directly with `bibox template edit {}`.", name, path.display(), name);
+    }
+    std::fs::write(&path, content)?;
+    println!("Exported '{}' to {}", name, path.display());
+    Ok(())
+}
+
+// ── agent-guide ─────────────────────────────────────────────────────────────
+
+const AGENT_GUIDE: &str = r##"# bibox — AI Agent Guide
+
+bibox is a terminal-based bibliography manager. All commands support `--json` for machine-readable output.
+
+## Setup
+
+```bash
+# Install
+cargo install --path .
+
+# Initialize a portable home (db, pdfs, notes in one folder)
+bibox init <path> --json   # e.g. ~/bibox, ~/papers, etc.
+
+# Show all resolved paths (home, db, pdfs, notes, config)
+bibox config --json
+
+# Connect to GitHub for sync
+cd <bibox-home> && git init && git remote add origin <url> && git push -u origin master
+```
+
+## Adding Papers
+
+```bash
+# By DOI
+bibox add --doi 10.1145/3290605.3300907 --json
+
+# By arXiv ID
+bibox add --arxiv 2301.12345 --json
+
+# By ISBN
+bibox add --isbn 978-0-13-468599-1 --json
+
+# By URL (academic paper pages — extracts DOI automatically)
+bibox add --url https://arxiv.org/abs/2301.12345 --json
+
+# Search by title (non-interactive: --index selects 0-based result)
+bibox add --search "attention is all you need" --index 0 --json
+
+# Add to a collection
+bibox add --doi 10.xxx --to ml --json
+```
+
+## Querying
+
+```bash
+# List all collections with counts
+bibox list --json
+
+# List entries in a collection
+bibox list ml --json
+
+# Search by keyword
+bibox search "transformer" --json
+bibox search "kim" --field author --json
+
+# Show single entry metadata
+bibox show kim2025rust --json
+```
+
+## Notes (AI-agent-friendly Markdown notes)
+
+Notes are stored as `<citekey>.md` files. Section-level updates allow incremental writing.
+
+```bash
+# Initialize note from template
+bibox note <key> --template ai-summary
+
+# Write to a specific section (replaces if exists, appends if new)
+echo "content" | bibox note <key> --stdin --section "Summary"
+echo "content" | bibox note <key> --stdin --section "Key Contributions"
+echo "content" | bibox note <key> --stdin --section "Methodology"
+
+# Append without targeting a section
+echo "extra notes" | bibox note <key> --stdin
+
+# Read note content
+bibox note <key> --show --json
+
+# Get note file path
+bibox note <key> --path --json
+```
+
+### Available template variables
+`{{title}}`, `{{citekey}}`, `{{doi}}`, `{{year}}`, `{{author}}`, `{{journal}}`, `{{booktitle}}`, `{{publisher}}`
+
+## Templates
+
+```bash
+# List available templates
+bibox template list --json
+
+# Show template content
+bibox template show ai-summary --json
+
+# Create custom template
+echo "# {{title}}
+citekey: {{citekey}}
+## Review Score
+## Strengths
+## Weaknesses
+" | bibox template create my-review --stdin
+
+# Delete custom template
+bibox template delete my-review
+```
+
+## Editing Metadata
+
+```bash
+# Edit specific fields
+bibox edit <key> --title "New Title" --year 2025 --journal "Nature"
+
+# Re-fetch metadata from Crossref by DOI (preserves existing values)
+bibox edit <key> --doi 10.1234/new
+
+# Add/remove tags
+bibox edit <key> --tags-add "transformer,nlp"
+bibox edit <key> --tags-remove "draft"
+
+# Bulk-update multiple entries
+bibox modify year=2025 --filter "collection:ml" --yes
+bibox modify journal="Nature" --filter "tag:review" --yes
+```
+
+## Deleting Entries
+
+```bash
+# Delete with confirmation
+bibox delete <key>
+
+# Non-interactive delete (for agents)
+bibox delete <key> -y
+```
+
+## Collections & Tags
+
+```bash
+# Add to collection
+bibox collect <key> ml systems
+
+# Remove from collection
+bibox uncollect <key> ml
+```
+
+## Importing
+
+```bash
+# Import from BibTeX file
+bibox import refs.bib
+
+# Import into a collection
+bibox import refs.bib --to ml
+```
+
+## Export
+
+```bash
+# Export as BibTeX (default)
+bibox export <key1> <key2>
+
+# Export collection as RIS
+bibox export --collection cs --format ris
+
+# Export with PDFs
+bibox export --collection ml --include-pdf --zip
+```
+
+## Sync
+
+```bash
+# Non-interactive sync (for agents)
+bibox sync --yes --json
+```
+
+## Typical AI Agent Workflow
+
+```bash
+# 1. Search and add a paper
+bibox add --search "attention is all you need" --index 0 --to ml --json
+
+# 2. Get the citekey from JSON output, then create note
+bibox note vaswani2017attention --template ai-summary
+
+# 3. Read the paper and fill sections
+echo "The paper proposes..." | bibox note vaswani2017attention --stdin --section "Summary"
+echo "1. Multi-head attention..." | bibox note vaswani2017attention --stdin --section "Key Contributions"
+echo "Encoder-decoder with..." | bibox note vaswani2017attention --stdin --section "Methodology"
+echo "BLEU 28.4 on EN-DE..." | bibox note vaswani2017attention --stdin --section "Results"
+echo "Quadratic complexity..." | bibox note vaswani2017attention --stdin --section "Limitations"
+
+# 4. Verify
+bibox note vaswani2017attention --show
+
+# 5. Push to git
+# Push to git (use the home path from `bibox init`)
+cd <bibox-home> && git add . && git commit -m "add vaswani2017attention" && git push
+```
+
+## Key Flags for Agents
+
+| Flag | Purpose |
+|------|---------|
+| `--json` | Machine-readable JSON output (available on most commands) |
+| `--index N` | Auto-select Nth search result (0-based, with `--search`) |
+| `--stdin` | Read content from stdin (notes, templates) |
+| `--section "Name"` | Target a specific `## Heading` in a note |
+| `--yes` / `-y` | Skip confirmation prompts |
+| `--template <name>` | Initialize note from template |
+
+## Tips
+
+- Run `bibox config --json` to get all paths (home, db, pdfs, notes, config.toml location).
+- The home path is the git-syncable directory. Get it from `bibox config --json` → `home` field.
+- All `--json` output goes to stdout. Errors go to stderr.
+- When a command fails, the exit code is non-zero.
+"##;
+
+pub fn cmd_config(json: bool, config: &Config) -> Result<()> {
+    let config_path = crate::config::config_path();
+    let db_path = crate::config::resolve_db_path(config);
+
+    if json {
+        let result = serde_json::json!({
+            "config_path": config_path.to_string_lossy(),
+            "home": config.home.as_ref().map(|h| h.to_string_lossy().to_string()),
+            "db_path": db_path.to_string_lossy(),
+            "bibox_dir": config.bibox_dir.to_string_lossy(),
+            "notes_dir": config.notes_dir.to_string_lossy(),
+            "templates_dir": config.templates_dir.to_string_lossy(),
+            "language": config.language,
+            "git": config.git,
+            "line_numbers": format!("{:?}", config.line_numbers).to_lowercase(),
+            "panel_ratio": config.panel_ratio,
+            "bib_export_dir": config.bib_export_dir.to_string_lossy(),
+            "export_dir": config.export_dir.to_string_lossy(),
+        });
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        println!("Config:       {}", config_path.display());
+        println!("Home:         {}", config.home.as_ref().map(|h| h.to_string_lossy().to_string()).unwrap_or_else(|| "(not set)".into()));
+        println!("Database:     {}", db_path.display());
+        println!("PDFs:         {}", config.bibox_dir.display());
+        println!("Notes:        {}", config.notes_dir.display());
+        println!("Templates:    {}", config.templates_dir.display());
+        println!("Language:     {}", config.language);
+        println!("Git:          {}", config.git);
+        println!("Line numbers: {:?}", config.line_numbers);
+        println!("Panel ratio:  {:?}", config.panel_ratio);
+        println!("Bib export:   {}", config.bib_export_dir.display());
+        println!("Export:       {}", config.export_dir.display());
+    }
+    Ok(())
+}
+
+pub fn cmd_agent_guide(json: bool) -> Result<()> {
+    if json {
+        let result = serde_json::json!({
+            "guide": AGENT_GUIDE,
+            "version": env!("CARGO_PKG_VERSION"),
+        });
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        print!("{}", AGENT_GUIDE);
+    }
     Ok(())
 }

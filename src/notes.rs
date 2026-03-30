@@ -92,12 +92,52 @@ citekey: {{citekey}}
 ## Connection to My Work
 "#;
 
-fn builtin_template(name: &str) -> Option<&'static str> {
+pub const BUILTIN_NAMES: &[&str] = &["ai-summary", "reading-notes"];
+
+pub fn builtin_template(name: &str) -> Option<&'static str> {
     match name {
         "ai-summary" => Some(TEMPLATE_AI_SUMMARY),
         "reading-notes" => Some(TEMPLATE_READING_NOTES),
         _ => None,
     }
+}
+
+/// List all available templates: built-in + custom from templates_dir.
+/// Returns (name, is_custom, is_override) tuples.
+pub fn list_templates(templates_dir: &std::path::Path) -> Vec<(String, bool, bool)> {
+    let mut result: Vec<(String, bool, bool)> = Vec::new();
+    let mut custom_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // Scan custom dir
+    if templates_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(templates_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().map(|e| e == "md").unwrap_or(false) {
+                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                        custom_names.insert(stem.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    // Built-ins first
+    for &name in BUILTIN_NAMES {
+        let overridden = custom_names.contains(name);
+        result.push((name.to_string(), false, overridden));
+    }
+
+    // Custom templates (excluding overrides already listed)
+    let mut custom_only: Vec<String> = custom_names.into_iter()
+        .filter(|n| !BUILTIN_NAMES.contains(&n.as_str()))
+        .collect();
+    custom_only.sort();
+    for name in custom_only {
+        result.push((name, true, false));
+    }
+
+    result
 }
 
 pub fn load_template(name: &str, templates_dir: &std::path::Path) -> Result<String> {

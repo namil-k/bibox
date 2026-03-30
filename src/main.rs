@@ -75,6 +75,10 @@ Examples:
         #[arg(long, conflicts_with_all = ["doi", "isbn", "file", "arxiv", "url"])]
         search: Option<String>,
 
+        /// Auto-select search result by index (0-based, for non-interactive/AI use)
+        #[arg(long, requires = "search")]
+        index: Option<usize>,
+
         /// Assign to a collection
         #[arg(long)]
         to: Option<String>,
@@ -110,6 +114,10 @@ Examples:
         /// Booktitle (for inproceedings)
         #[arg(long)]
         booktitle: Option<String>,
+
+        /// Output added entry as JSON (for scripting and AI agents)
+        #[arg(long)]
+        json: bool,
     },
 
     /// List entries, optionally filtered by collection, type, tag, or year
@@ -348,6 +356,10 @@ Examples:
         /// Auto-confirm all prompts (for scripting and AI agents)
         #[arg(long, short = 'y')]
         yes: bool,
+
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Initialize a portable bibox home directory. All data (db, pdfs, notes) lives in one folder
@@ -362,6 +374,10 @@ Examples:
         /// Migrate existing data from Library to the new home
         #[arg(long)]
         migrate: bool,
+
+        /// Output result as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Read, write, or edit per-entry Markdown notes. Supports section-level updates for AI agents
@@ -404,6 +420,10 @@ Examples:
         /// Allow --template to overwrite existing note
         #[arg(long)]
         force: bool,
+
+        /// Output as JSON (for --show and --path)
+        #[arg(long)]
+        json: bool,
     },
 
     /// Bulk-update fields across multiple entries
@@ -439,6 +459,75 @@ Examples:
         #[arg(long)]
         unreviewed: bool,
     },
+
+    /// Show current configuration and all resolved paths
+    Config {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Print a structured guide for AI agents describing all bibox capabilities and workflows
+    #[command(name = "agent-guide")]
+    AgentGuide {
+        /// Output as JSON (structured for machine parsing)
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Manage note templates (list, show, create, edit, delete, export built-ins)
+    Template {
+        #[command(subcommand)]
+        action: TemplateAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum TemplateAction {
+    /// List all available templates (built-in + custom)
+    List {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Print template content to stdout
+    Show {
+        /// Template name (e.g. "ai-summary", "reading-notes", or custom name)
+        name: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Create a new custom template from stdin or $EDITOR
+    Create {
+        /// Template name (used as filename: <name>.md)
+        name: String,
+
+        /// Read template content from stdin
+        #[arg(long)]
+        stdin: bool,
+    },
+
+    /// Edit an existing template in $EDITOR. For built-ins, exports to custom dir first
+    Edit {
+        /// Template name
+        name: String,
+    },
+
+    /// Delete a custom template
+    Delete {
+        /// Template name
+        name: String,
+    },
+
+    /// Export a built-in template to the custom templates directory for modification
+    Export {
+        /// Built-in template name (e.g. "ai-summary", "reading-notes")
+        name: String,
+    },
 }
 
 #[tokio::main]
@@ -458,6 +547,7 @@ async fn main() -> Result<()> {
             arxiv,
             url,
             search,
+            index,
             to,
             key,
             title,
@@ -467,10 +557,11 @@ async fn main() -> Result<()> {
             journal,
             publisher,
             booktitle,
+            json,
         }) => {
             commands::cmd_add(
-                file, to, doi, isbn, arxiv, url, search, key, title, author, year, r#type, journal,
-                publisher, booktitle, &config,
+                file, to, doi, isbn, arxiv, url, search, index, key, title, author, year, r#type, journal,
+                publisher, booktitle, json, &config,
             )
             .await?;
         }
@@ -571,16 +662,16 @@ async fn main() -> Result<()> {
             commands::cmd_open(key, &config)?;
         }
 
-        Some(Commands::Sync { yes }) => {
-            commands::cmd_sync(yes, &config)?;
+        Some(Commands::Sync { yes, json }) => {
+            commands::cmd_sync(yes, json, &config)?;
         }
 
-        Some(Commands::Init { path, migrate }) => {
-            commands::cmd_init(path, migrate, &config)?;
+        Some(Commands::Init { path, migrate, json }) => {
+            commands::cmd_init(path, migrate, json, &config)?;
         }
 
-        Some(Commands::Note { key, stdin, from, section, template, show, path, force }) => {
-            commands::cmd_note(key, stdin, from, section, template, show, path, force, &config)?;
+        Some(Commands::Note { key, stdin, from, section, template, show, path, force, json }) => {
+            commands::cmd_note(key, stdin, from, section, template, show, path, force, json, &config)?;
         }
 
         Some(Commands::Modify {
@@ -598,6 +689,25 @@ async fn main() -> Result<()> {
             unreviewed,
         }) => {
             commands::cmd_review(collection, filter, unreviewed, &config)?;
+        }
+
+        Some(Commands::Config { json }) => {
+            commands::cmd_config(json, &config)?;
+        }
+
+        Some(Commands::AgentGuide { json }) => {
+            commands::cmd_agent_guide(json)?;
+        }
+
+        Some(Commands::Template { action }) => {
+            match action {
+                TemplateAction::List { json } => commands::cmd_template_list(json, &config)?,
+                TemplateAction::Show { name, json } => commands::cmd_template_show(&name, json, &config)?,
+                TemplateAction::Create { name, stdin } => commands::cmd_template_create(&name, stdin, &config)?,
+                TemplateAction::Edit { name } => commands::cmd_template_edit(&name, &config)?,
+                TemplateAction::Delete { name } => commands::cmd_template_delete(&name, &config)?,
+                TemplateAction::Export { name } => commands::cmd_template_export(&name, &config)?,
+            }
         }
     }
 
