@@ -3,17 +3,22 @@
 [![Crates.io](https://img.shields.io/crates/v/bibox)](https://crates.io/crates/bibox)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A terminal-based bibliography manager built in Rust. Add papers by PDF, DOI, ISBN, arXiv ID, or URL — metadata is fetched automatically. Manage your library through a three-panel TUI or a scriptable CLI designed for AI agent workflows.
+**AI agents shouldn't be hand-editing your .bib files.**
+**bibox gives them commands. You get a TUI. Your bibliography stays clean.**
+
+A terminal-based bibliography manager built in Rust. AI agents add papers, write notes, and manage collections through a structured CLI. You browse everything in a three-panel TUI and export BibTeX with one keystroke.
 
 ## Features
 
 - **Smart import** — Drop a PDF and bibox extracts the DOI, fetches metadata from Crossref, and files it automatically
 - **Multiple sources** — Add entries via PDF, DOI, ISBN, arXiv ID, URL, or title search
-- **Three-panel TUI** — Collections, entries, and preview (info/notes/PDF) side by side
+- **Three-panel TUI** — Collections, entries, and preview (info / notes / PDF) side by side
 - **Vim-style navigation** — `hjkl`, `gg`/`G`, `{n}j`, `Ctrl+d/u`, multi-select with `Space`
-- **AI-agent friendly notes** — Markdown notes with `--stdin`, `--section`, and `--template` flags for programmatic access
-- **Portable home** — `bibox init ~/bibox` puts everything in one folder, ready for Git sync
-- **Export** — BibTeX, YAML, RIS, CSV. Include PDFs. Copy to clipboard.
+- **AI-agent-friendly** — Every command supports `--json`. Notes have `--stdin`, `--section`, `--template` for programmatic access
+- **Markdown notes** — Per-entry notes with section-level updates, rendered with syntax highlighting in the TUI
+- **Portable home** — `bibox init` puts everything in one Git-syncable folder
+- **Export** — BibTeX, YAML, RIS, CSV. Include PDFs. Copy to clipboard. Zip it up.
+- **Templates** — Built-in and custom note templates with `{{variable}}` substitution
 
 ## Install
 
@@ -80,7 +85,7 @@ bibox
 │   ml (5)     │  3  manco2017 ◆   │ Year: 2025         │
 │              │                   │ DOI: 10.1234/...   │
 ├──────────────┴───────────────────┴────────────────────┤
-│ h←collections  l→preview  / search  ? help  q quit   │
+│ / search  s sort  o open  w web  e export  ? help     │
 └───────────────────────────────────────────────────────┘
 ```
 
@@ -96,15 +101,17 @@ bibox
 | `Tab` | Switch preview mode (Info → Note → PDF) |
 | `Space` | Toggle select entry |
 | `V` | Select/deselect all |
-| `/` | Search (live filter) |
+| `/` | Search (entries or collections, based on focus) |
 | `s` | Sort menu |
 | `o` | Open PDF (or fetch from web) |
-| `e` | Export menu |
+| `w` | Open paper web page in browser |
+| `e` | Export menu (selected / collection / all) |
 | `y` | Copy citekey to clipboard |
+| `d` | Delete entry |
 | `c` | Manage collections |
 | `t` | Edit tags |
 | `N` | Edit note in `$EDITOR` |
-| `,` | Settings |
+| `,` | Settings (line numbers, panel ratio, export dirs, git sync) |
 | `?` | Help |
 | `q` | Quit |
 
@@ -113,11 +120,11 @@ bibox
 **Browse:**
 
 ```bash
-bibox list                          # Show collections
+bibox list                          # Show collections with counts
 ```
 
 ```bash
-bibox list cs                       # List entries in a collection
+bibox list ml                       # List entries in a collection
 ```
 
 ```bash
@@ -139,11 +146,23 @@ bibox edit kim2025rust --doi 10.1234/new   # Re-fetch metadata from Crossref
 ```
 
 ```bash
+bibox edit kim2025rust --tags-add "ml,nlp"
+```
+
+**Collections:**
+
+```bash
 bibox collect kim2025rust ml systems       # Add to collections
 ```
 
 ```bash
 bibox uncollect kim2025rust ml             # Remove from collection
+```
+
+**Import:**
+
+```bash
+bibox import refs.bib --to ml
 ```
 
 **Export:**
@@ -161,7 +180,13 @@ bibox export --collection cs --format ris  # Export collection as RIS
 ```
 
 ```bash
-bibox export --include-pdf                 # Export BibTeX + PDF files
+bibox export --include-pdf --zip           # BibTeX + PDFs, zipped
+```
+
+**Bulk update:**
+
+```bash
+bibox modify year=2025 --filter "collection:ml" --yes
 ```
 
 **Delete:**
@@ -170,11 +195,17 @@ bibox export --include-pdf                 # Export BibTeX + PDF files
 bibox delete kim2025rust
 ```
 
-## Notes (AI Agent Workflow)
+**Config:**
 
-Notes are stored as Markdown files, one per entry. Designed for both human editing and AI agent pipelines.
+```bash
+bibox config --json                        # View all settings and paths
+```
 
-Initialize with a template:
+## Notes
+
+Notes are Markdown files, one per entry. Designed for both human editing and AI agent pipelines.
+
+Initialize from a template:
 
 ```bash
 bibox note kim2025rust --template ai-summary
@@ -202,7 +233,31 @@ Human edits in $EDITOR:
 bibox note kim2025rust
 ```
 
-Built-in templates: `ai-summary`, `reading-notes`. Custom templates go in `~/.config/bibox/templates/`.
+### Templates
+
+```bash
+bibox template list                             # List all templates
+```
+
+```bash
+bibox template show ai-summary                  # Print template content
+```
+
+```bash
+bibox template create my-review --stdin < t.md  # Create custom template
+```
+
+```bash
+bibox template edit ai-summary                  # Edit in $EDITOR
+```
+
+```bash
+bibox template delete my-review                 # Delete custom template
+```
+
+Built-in templates: `ai-summary`, `reading-notes`. Custom templates override built-ins.
+
+Template variables: `{{title}}`, `{{citekey}}`, `{{doi}}`, `{{year}}`, `{{author}}`, `{{journal}}`, `{{booktitle}}`, `{{publisher}}`
 
 ## Portable Home & Git Sync
 
@@ -221,24 +276,51 @@ cd ~/bibox && git init && git add . && git commit -m "init"
 git remote add origin git@github.com:you/bibox-library.git
 git push -u origin master
 
-# Or use the TUI: press , → Git → Enter to sync
+# Or use the TUI: press , → Git → Enter to check status → Enter to sync
 ```
 
 ## Settings
 
-Press `,` in the TUI or edit `~/.config/bibox/config.toml`:
+Press `,` in the TUI, or run `bibox config` to see all current settings and paths.
 
 ```toml
 line_numbers = "absolute"    # absolute, relative, none
-panel_ratio = [2, 4, 4]     # left : center : right
+panel_ratio = [2, 4, 4]     # left : center : right (sum = 10)
 bib_export_dir = "."        # BibTeX export location
 export_dir = "~/Downloads"  # Other exports location
 home = "~/bibox"            # Portable home (set by bibox init)
 ```
 
+## AI Agent Integration
+
+Every command supports `--json` for machine-readable output. Run `bibox agent-guide` for a complete reference.
+
+```bash
+# Full workflow: search → add → note → push
+bibox add --search "attention is all you need" --index 0 --to ml --json
+bibox note vaswani2017attention --template ai-summary
+echo "The paper proposes..." | bibox note vaswani2017attention --stdin --section "Summary"
+echo "1. Multi-head attention..." | bibox note vaswani2017attention --stdin --section "Key Contributions"
+
+# Get all paths programmatically
+bibox config --json
+
+# Non-interactive sync
+bibox sync --yes --json
+```
+
+| Flag | Purpose |
+|------|---------|
+| `--json` | Machine-readable output (most commands) |
+| `--index N` | Auto-select Nth search result (0-based, with `--search`) |
+| `--stdin` | Read content from stdin (notes, templates) |
+| `--section "Name"` | Target a specific `## Heading` in a note |
+| `--yes` / `-y` | Skip confirmation prompts |
+| `--template <name>` | Initialize note from template |
+
 ## Tech Stack
 
-- **Rust** — clap, serde, reqwest, ratatui, crossterm, arboard
+- **Rust** — clap, serde, reqwest, ratatui, crossterm, pulldown-cmark, arboard
 - **APIs** — Crossref, Unpaywall, arXiv, OpenLibrary
 - **Storage** — JSON database, flat PDF directory, Markdown notes
 
