@@ -201,6 +201,7 @@ pub struct App {
     col_list_state: ListState,
     collections: Vec<String>,  // index 0 = "All", rest = collection names
     search_query: String,
+    col_search_query: String,
     mode: Mode,
     config: Config,
     // Panels
@@ -230,6 +231,8 @@ pub struct App {
     export_state: Option<ExportState>,
     // Settings state
     settings_idx: usize,
+    git_status_cache: String,
+    git_status_checked: bool,
 }
 
 impl App {
@@ -258,6 +261,7 @@ impl App {
             col_list_state,
             collections,
             search_query: String::new(),
+            col_search_query: String::new(),
             mode: Mode::Normal,
             config,
             focus: Panel::Entries,
@@ -278,6 +282,8 @@ impl App {
             selected_keys: std::collections::HashSet::new(),
             export_state: None,
             settings_idx: 0,
+            git_status_cache: String::new(),
+            git_status_checked: false,
         })
     }
 
@@ -884,22 +890,165 @@ fn draw_preview_note(f: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
-    let lines: Vec<Line> = app.note_content.lines()
-        .map(|l| {
-            if l.starts_with("# ") {
-                Line::from(Span::styled(l, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)))
-            } else if l.starts_with("## ") {
-                Line::from(Span::styled(l, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)))
-            } else {
-                Line::from(l.to_string())
-            }
-        })
-        .collect();
+    let lines = render_markdown_to_lines(&app.note_content);
 
     let p = Paragraph::new(lines)
         .scroll((app.preview_scroll, 0))
         .wrap(ratatui::widgets::Wrap { trim: true });
     f.render_widget(p, area);
+}
+
+fn render_markdown_to_lines(md: &str) -> Vec<Line<'static>> {
+    use pulldown_cmark::{Event, Parser, Tag, TagEnd, HeadingLevel};
+
+    let parser = Parser::new(md);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut current_spans: Vec<Span<'static>> = Vec::new();
+
+    // Style stack
+    let mut bold = false;
+    let mut italic = false;
+    let mut in_heading: Option<HeadingLevel> = None;
+    let mut in_blockquote = false;
+    let mut _in_list = false;
+    let mut list_ordered = false;
+    let mut list_index: u64 = 0;
+    let mut in_code_block = false;
+    let mut list_item_started = false;
+
+    for event in parser {
+        match event {
+            Event::Start(Tag::Heading { level, .. }) => {
+                in_heading = Some(level);
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                // Flush heading line
+                let style = match in_heading {
+                    Some(HeadingLevel::H1) => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Some(HeadingLevel::H2) => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    _ => Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                };
+                // Re-style all spans in this heading
+                let heading_spans: Vec<Span<'static>> = current_spans.drain(..)
+                    .map(|s| Span::styled(s.content.to_string(), style))
+                    .collect();
+                lines.push(Line::from(heading_spans));
+                lines.push(Line::from(""));
+                in_heading = None;
+            }
+            Event::Start(Tag::Strong) => { bold = true; }
+            Event::End(TagEnd::Strong) => { bold = false; }
+            Event::Start(Tag::Emphasis) => { italic = true; }
+            Event::End(TagEnd::Emphasis) => { italic = false; }
+            Event::Code(text) => {
+                let style = Style::default().fg(Color::Green).bg(Color::Rgb(40, 40, 40));
+                current_spans.push(Span::styled(format!(" {} ", text), style));
+            }
+            Event::Start(Tag::CodeBlock(_)) => {
+                if !current_spans.is_empty() {
+                    lines.push(Line::from(std::mem::take(&mut current_spans)));
+                }
+                in_code_block = true;
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                in_code_block = false;
+                lines.push(Line::from(""));
+            }
+            Event::Start(Tag::BlockQuote(_)) => { in_blockquote = true; }
+            Event::End(TagEnd::BlockQuote(_)) => {
+                in_blockquote = false;
+                lines.push(Line::from(""));
+            }
+            Event::Start(Tag::List(ordered)) => {
+                _in_list = true;
+                list_ordered = ordered.is_some();
+                list_index = ordered.unwrap_or(1);
+            }
+            Event::End(TagEnd::List(_)) => {
+                _in_list = false;
+                lines.push(Line::from(""));
+            }
+            Event::Start(Tag::Item) => {
+                list_item_started = true;
+            }
+            Event::End(TagEnd::Item) => {
+                if !current_spans.is_empty() {
+                    lines.push(Line::from(std::mem::take(&mut current_spans)));
+                }
+            }
+            Event::Start(Tag::Paragraph) => {}
+            Event::End(TagEnd::Paragraph) => {
+                if !current_spans.is_empty() {
+                    lines.push(Line::from(std::mem::take(&mut current_spans)));
+                }
+                lines.push(Line::from(""));
+            }
+            Event::Text(text) => {
+                if in_code_block {
+                    // Code block: render each line with background
+                    let style = Style::default().fg(Color::White).bg(Color::Rgb(40, 40, 40));
+                    for line in text.lines() {
+                        lines.push(Line::from(Span::styled(format!("  {}", line), style)));
+                    }
+                } else {
+                    // Handle list bullet/number prefix
+                    if list_item_started {
+                        let prefix = if in_blockquote { "│ " } else { "" };
+                        if list_ordered {
+                            current_spans.push(Span::styled(
+                                format!("{}  {}. ", prefix, list_index),
+                                Style::default().fg(Color::DarkGray),
+                            ));
+                            list_index += 1;
+                        } else {
+                            current_spans.push(Span::styled(
+                                format!("{}  • ", prefix),
+                                Style::default().fg(Color::DarkGray),
+                            ));
+                        }
+                        list_item_started = false;
+                    } else if in_blockquote && current_spans.is_empty() {
+                        current_spans.push(Span::styled(
+                            "│ ".to_string(),
+                            Style::default().fg(Color::Cyan),
+                        ));
+                    }
+
+                    let mut style = Style::default();
+                    if bold { style = style.add_modifier(Modifier::BOLD); }
+                    if italic { style = style.add_modifier(Modifier::ITALIC); }
+                    if in_blockquote { style = style.fg(Color::DarkGray).add_modifier(Modifier::ITALIC); }
+                    current_spans.push(Span::styled(text.to_string(), style));
+                }
+            }
+            Event::SoftBreak | Event::HardBreak => {
+                if !current_spans.is_empty() {
+                    lines.push(Line::from(std::mem::take(&mut current_spans)));
+                }
+            }
+            Event::Rule => {
+                lines.push(Line::from(Span::styled(
+                    "────────────────────────────────".to_string(),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+            _ => {}
+        }
+    }
+
+    // Flush remaining
+    if !current_spans.is_empty() {
+        lines.push(Line::from(current_spans));
+    }
+
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "Empty note.".to_string(),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    lines
 }
 
 fn draw_preview_pdf(f: &mut Frame, app: &App, area: Rect) {
@@ -952,7 +1101,13 @@ fn draw_preview_pdf(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let status = match &app.mode {
-        Mode::Search => format!("/ {} (Esc to clear)", app.search_query),
+        Mode::Search => {
+            if app.focus == Panel::Collections {
+                format!("/ {} (collection search, Esc to clear)", app.col_search_query)
+            } else {
+                format!("/ {} (Esc to clear)", app.search_query)
+            }
+        }
         _ => {
             let panel_hint = match app.focus {
                 Panel::Collections => "j/k navigate  l→entries",
@@ -960,7 +1115,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
                 Panel::Preview => "h←entries  Tab switch mode  j/k scroll",
             };
             format!(
-                "{}  │  / search  s sort  o open  e export  d delete  c collect  t tag  N note  , settings  ? help  q quit",
+                "{}  │  / search  s sort  o open  w web  e export  d delete  c collect  t tag  N note  , settings  ? help  q quit",
                 panel_hint
             )
         }
@@ -1027,6 +1182,7 @@ fn draw_help_popup(f: &mut Frame, area: Rect) {
         Line::from(""),
         Line::from(Span::styled("Actions", Style::default().fg(Color::Cyan))),
         Line::from("  y     Copy citekey          o     Open PDF / fetch"),
+        Line::from("  w     Open web page"),
         Line::from("  e     Export menu            d     Delete entry"),
         Line::from("  N     Edit note ($EDITOR)"),
         Line::from(""),
@@ -1232,10 +1388,7 @@ fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
         None => "(not set — use `bibox init <path>`)".into(),
     };
 
-    let git_label = match &app.config.home {
-        Some(h) => get_git_status(&crate::config::expand_tilde(h)),
-        None => "—".into(),
-    };
+    let git_label = app.git_status_cache.clone();
 
     let mut items: Vec<(String, bool)> = vec![
         (format!("Line numbers     [{}]", ln_label), true),
@@ -1270,9 +1423,14 @@ fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
         ]));
     }
 
-    // Show git sync hint when on Git row
+    // Show git hint when on Git row
     if app.settings_idx == readonly_start + 1 && app.config.home.is_some() {
-        lines.push(Line::from(Span::styled("           [Enter: sync (pull → commit → push)]", Style::default().fg(Color::Cyan))));
+        let hint = if app.git_status_checked {
+            "           [Enter: sync (pull → commit → push)]"
+        } else {
+            "           [Enter: check status]"
+        };
+        lines.push(Line::from(Span::styled(hint, Style::default().fg(Color::Cyan))));
     }
 
     lines.push(Line::from(""));
@@ -1476,8 +1634,13 @@ fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
             if app.preview_mode == PreviewMode::Note { app.load_note_for_preview(); }
         }
 
-        // Search
-        KeyCode::Char('/') => { app.mode = Mode::Search; }
+        // Search (context-aware: collections panel vs entries panel)
+        KeyCode::Char('/') => {
+            if app.focus == Panel::Collections {
+                app.col_search_query.clear();
+            }
+            app.mode = Mode::Search;
+        }
 
         // Copy citekey
         KeyCode::Char('y') => {
@@ -1500,6 +1663,27 @@ fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
                     let bkey = entry.bibtex_key.clone();
                     app.mode = Mode::Confirm(ConfirmAction::FetchPdf(bkey));
                 } else { app.mode = Mode::Message("No PDF attached.".into()); }
+            }
+        }
+
+        // Open web page
+        KeyCode::Char('w') => {
+            if let Some(entry) = app.selected_entry() {
+                let url = if let Some(ref doi) = entry.doi {
+                    Some(format!("https://doi.org/{}", doi))
+                } else if let Some(ref u) = entry.url {
+                    Some(u.clone())
+                } else {
+                    None
+                };
+                if let Some(url) = url {
+                    #[cfg(target_os = "macos")]
+                    let _ = std::process::Command::new("open").arg(&url).spawn();
+                    #[cfg(not(target_os = "macos"))]
+                    let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+                } else {
+                    app.mode = Mode::Message("No DOI or URL for this entry.".into());
+                }
             }
         }
 
@@ -1560,6 +1744,8 @@ fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
         // Settings
         KeyCode::Char(',') => {
             app.settings_idx = 0;
+            app.git_status_cache = "Press Enter to check".into();
+            app.git_status_checked = false;
             app.mode = Mode::Settings;
         }
 
@@ -1571,14 +1757,45 @@ fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
 }
 
 fn handle_search(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
-    match key.code {
-        KeyCode::Esc => { app.search_query.clear(); app.apply_filters(); app.mode = Mode::Normal; }
-        KeyCode::Backspace => { app.search_query.pop(); app.apply_filters(); }
-        KeyCode::Char(c) => { app.search_query.push(c); app.apply_filters(); }
-        KeyCode::Enter => { app.mode = Mode::Normal; }
-        _ => {}
+    if app.focus == Panel::Collections {
+        // Collection search
+        match key.code {
+            KeyCode::Esc => { app.col_search_query.clear(); app.mode = Mode::Normal; }
+            KeyCode::Backspace => { app.col_search_query.pop(); filter_collections(app); }
+            KeyCode::Char(c) => { app.col_search_query.push(c); filter_collections(app); }
+            KeyCode::Enter => { app.mode = Mode::Normal; }
+            _ => {}
+        }
+    } else {
+        // Entry search
+        match key.code {
+            KeyCode::Esc => { app.search_query.clear(); app.apply_filters(); app.mode = Mode::Normal; }
+            KeyCode::Backspace => { app.search_query.pop(); app.apply_filters(); }
+            KeyCode::Char(c) => { app.search_query.push(c); app.apply_filters(); }
+            KeyCode::Enter => { app.mode = Mode::Normal; }
+            _ => {}
+        }
     }
     Ok(false)
+}
+
+fn filter_collections(app: &mut App) {
+    let query = app.col_search_query.to_lowercase();
+    if query.is_empty() {
+        // Reset to first collection
+        app.col_list_state.select(Some(0));
+        return;
+    }
+    // Find first matching collection (including "All")
+    let col_count = app.col_count();
+    for i in 0..col_count {
+        let name = if i == 0 { "all" } else { &app.collections[i - 1] };
+        if name.to_lowercase().contains(&query) {
+            app.col_list_state.select(Some(i));
+            app.apply_filters();
+            return;
+        }
+    }
 }
 
 fn handle_confirm(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
@@ -1834,46 +2051,57 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
         }
         KeyCode::Enter => {
             if app.settings_idx == 5 {
-                // Git sync: pull → add → commit → push
                 if let Some(ref home) = app.config.home {
                     let home = crate::config::expand_tilde(home);
-                    let home_str = home.to_string_lossy().to_string();
-                    let result = (|| -> Result<String> {
-                        // pull
-                        let pull = std::process::Command::new("git")
-                            .args(["-C", &home_str, "pull", "--rebase"])
-                            .output()?;
-                        if !pull.status.success() {
-                            let err = String::from_utf8_lossy(&pull.stderr);
-                            anyhow::bail!("git pull failed: {}", err.trim());
-                        }
-                        // add
-                        let _ = std::process::Command::new("git")
-                            .args(["-C", &home_str, "add", "."])
-                            .output()?;
-                        // check if anything to commit
-                        let diff = std::process::Command::new("git")
-                            .args(["-C", &home_str, "diff", "--cached", "--quiet"])
-                            .output()?;
-                        if !diff.status.success() {
-                            // there are staged changes
-                            let _ = std::process::Command::new("git")
-                                .args(["-C", &home_str, "commit", "-m", "bibox sync"])
+                    if !app.git_status_checked {
+                        // First Enter: check status only
+                        app.git_status_cache = get_git_status(&home);
+                        app.git_status_checked = true;
+                    } else {
+                        // Second Enter: sync
+                        let home_str = home.to_string_lossy().to_string();
+                        let result = (|| -> Result<String> {
+                            let pull = std::process::Command::new("git")
+                                .args(["-C", &home_str, "pull", "--rebase"])
                                 .output()?;
+                            if !pull.status.success() {
+                                let err = String::from_utf8_lossy(&pull.stderr);
+                                anyhow::bail!("git pull failed: {}", err.trim());
+                            }
+                            let _ = std::process::Command::new("git")
+                                .args(["-C", &home_str, "add", "."])
+                                .output()?;
+                            let diff = std::process::Command::new("git")
+                                .args(["-C", &home_str, "diff", "--cached", "--quiet"])
+                                .output()?;
+                            if !diff.status.success() {
+                                let _ = std::process::Command::new("git")
+                                    .args(["-C", &home_str, "commit", "-m", "bibox sync"])
+                                    .output()?;
+                            }
+                            let push = std::process::Command::new("git")
+                                .args(["-C", &home_str, "push"])
+                                .output()?;
+                            if !push.status.success() {
+                                let err = String::from_utf8_lossy(&push.stderr);
+                                anyhow::bail!("git push failed: {}", err.trim());
+                            }
+                            Ok("Sync complete.".into())
+                        })();
+                        app.git_status_cache = get_git_status(&home);
+                        match result {
+                            Ok(msg) => {
+                                // Reload DB into TUI after sync
+                                let db_path = crate::config::resolve_db_path(&app.config);
+                                if let Ok(db) = load_db(&db_path) {
+                                    app.entries = db.entries;
+                                    app.rebuild_collections();
+                                    app.apply_filters();
+                                }
+                                app.mode = Mode::Message(msg);
+                            }
+                            Err(e) => { app.mode = Mode::Message(format!("Sync failed: {}", e)); }
                         }
-                        // push
-                        let push = std::process::Command::new("git")
-                            .args(["-C", &home_str, "push"])
-                            .output()?;
-                        if !push.status.success() {
-                            let err = String::from_utf8_lossy(&push.stderr);
-                            anyhow::bail!("git push failed: {}", err.trim());
-                        }
-                        Ok("Sync complete.".into())
-                    })();
-                    match result {
-                        Ok(msg) => { app.mode = Mode::Message(msg); }
-                        Err(e) => { app.mode = Mode::Message(format!("Sync failed: {}", e)); }
                     }
                 } else {
                     app.mode = Mode::Message("No home set. Run `bibox init <path>` first.".into());
@@ -1957,7 +2185,7 @@ fn run_loop(
     loop {
         terminal.draw(|f| draw(f, app))?;
 
-        if event::poll(std::time::Duration::from_millis(200))? {
+        if event::poll(std::time::Duration::from_millis(16))? {
             if let Event::Key(key) = event::read()? {
                 if handle_key(app, key)? { break; }
             }
