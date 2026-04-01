@@ -183,6 +183,14 @@ bibox export --collection cs --format ris  # Export collection as RIS
 bibox export --include-pdf --zip           # BibTeX + PDFs, zipped
 ```
 
+```bash
+bibox export --notes-only -o ~/notes       # Export all note .md files to folder
+```
+
+```bash
+bibox export --collection ml --notes-only -o ~/ml-notes  # Collection notes only
+```
+
 **Bulk update:**
 
 ```bash

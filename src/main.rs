@@ -301,7 +301,9 @@ Examples:
   bibox export --collection cs --format ris     # collection as RIS
   bibox export --include-pdf                    # BibTeX + PDFs
   bibox export --as-pdf --zip                   # PDFs only, zipped
-  bibox export kim2025 --clipboard              # copy to clipboard")]
+  bibox export kim2025 --clipboard              # copy to clipboard
+  bibox export --notes-only -o ~/notes          # copy note .md files to folder
+  bibox export --collection ml --notes-only -o ~/ml-notes")]
     Export {
         /// Citation keys to export (omit for collection/all)
         keys: Vec<String>,
@@ -341,6 +343,10 @@ Examples:
         /// Output format: bibtex (default), yaml, ris, csv
         #[arg(long, default_value = "bibtex")]
         format: String,
+
+        /// Export note (.md) files to the specified directory (use -o to set destination)
+        #[arg(long)]
+        notes_only: bool,
     },
 
     /// Open the PDF file for an entry in the system viewer
@@ -652,9 +658,10 @@ async fn main() -> Result<()> {
             include_pdf,
             zip,
             format,
+            notes_only,
         }) => {
             commands::cmd_export(
-                keys, collection, output, clipboard, r#type, tag, as_pdf, include_pdf, zip, format, &config,
+                keys, collection, output, clipboard, r#type, tag, as_pdf, include_pdf, zip, format, notes_only, &config,
             )?;
         }
 

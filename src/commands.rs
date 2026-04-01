@@ -1149,6 +1149,7 @@ pub fn cmd_export(
     include_pdf: bool,
     zip: bool,
     format: String,
+    notes_only: bool,
     config: &Config,
 ) -> Result<()> {
     let db_path = db_path_from_config(config);
@@ -1176,6 +1177,32 @@ pub fn cmd_export(
     // ── PDF-only export (--as-pdf) ──
     if as_pdf {
         return export_pdfs(&entries, col_name, &timestamp, output, zip, config);
+    }
+
+    // ── Notes-only export (--notes-only) ──
+    if notes_only {
+        let dest_dir = output.clone().unwrap_or_else(|| config.export_dir.clone());
+        std::fs::create_dir_all(&dest_dir)?;
+        let mut copied = 0;
+        let mut missing = 0;
+        for entry in &entries {
+            let note_path = config.notes_dir.join(format!("{}.md", entry.bibtex_key));
+            if note_path.exists() {
+                let dest = dest_dir.join(format!("{}.md", entry.bibtex_key));
+                std::fs::copy(&note_path, &dest)?;
+                copied += 1;
+            } else {
+                missing += 1;
+            }
+        }
+        let abs_dir = dest_dir.canonicalize().unwrap_or(dest_dir);
+        println!(
+            "Exported {} note(s) to {} ({} entries had no note)",
+            copied,
+            abs_dir.display(),
+            missing
+        );
+        return Ok(());
     }
 
     let fmt = format.to_lowercase();

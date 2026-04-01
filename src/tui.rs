@@ -1945,7 +1945,7 @@ fn handle_export_menu(app: &mut App, key: crossterm::event::KeyEvent) -> Result<
                 // Run export via cmd_export
                 let result = crate::commands::cmd_export(
                     keys, None, None, false, None, None, false, include_pdf, false,
-                    format.ext().to_string(), &app.config,
+                    format.ext().to_string(), false, &app.config,
                 );
                 match result {
                     Ok(()) => { app.mode = Mode::Message("Export complete.".into()); }
