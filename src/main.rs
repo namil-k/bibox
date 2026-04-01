@@ -481,6 +481,13 @@ Examples:
         json: bool,
     },
 
+    /// Check for a newer version and update via cargo install
+    Update {
+        /// Check for updates without installing
+        #[arg(long)]
+        check: bool,
+    },
+
     /// Manage note templates (list, show, create, edit, delete, export built-ins)
     Template {
         #[command(subcommand)]
@@ -704,6 +711,10 @@ async fn main() -> Result<()> {
 
         Some(Commands::AgentGuide { json }) => {
             commands::cmd_agent_guide(json)?;
+        }
+
+        Some(Commands::Update { check }) => {
+            commands::cmd_update(check)?;
         }
 
         Some(Commands::Template { action }) => {

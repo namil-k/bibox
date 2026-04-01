@@ -3030,6 +3030,49 @@ pub fn cmd_config(json: bool, config: &Config) -> Result<()> {
     Ok(())
 }
 
+pub fn cmd_update(check_only: bool) -> Result<()> {
+    const CURRENT: &str = env!("CARGO_PKG_VERSION");
+
+    // Fetch latest version from crates.io
+    let client = reqwest::blocking::Client::builder()
+        .user_agent(format!("bibox/{} (version-check)", CURRENT))
+        .build()?;
+
+    let resp: serde_json::Value = client
+        .get("https://crates.io/api/v1/crates/bibox")
+        .send()?
+        .json()?;
+
+    let latest = resp["crate"]["newest_version"]
+        .as_str()
+        .unwrap_or("unknown");
+
+    if latest == CURRENT {
+        println!("bibox {} is already up to date.", CURRENT);
+        return Ok(());
+    }
+
+    println!("Current: {}  →  Latest: {}", CURRENT, latest);
+
+    if check_only {
+        println!("Run `bibox update` to install the latest version.");
+        return Ok(());
+    }
+
+    println!("Installing bibox {}...", latest);
+    let status = std::process::Command::new("cargo")
+        .args(["install", "bibox", "--force"])
+        .status()?;
+
+    if status.success() {
+        println!("bibox {} installed successfully.", latest);
+    } else {
+        anyhow::bail!("cargo install failed (exit code {:?})", status.code());
+    }
+
+    Ok(())
+}
+
 pub fn cmd_agent_guide(json: bool) -> Result<()> {
     if json {
         let result = serde_json::json!({
