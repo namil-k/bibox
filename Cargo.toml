@@ -10,6 +10,11 @@ readme = "README.md"
 keywords = ["bibliography", "bibtex", "tui", "reference-manager", "academic"]
 categories = ["command-line-utilities", "science"]
 
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }{ archive-suffix }"
+bin-dir = "{ name }{ binary-ext }"
+pkg-fmt = "bin"
+
 [[bin]]
 name = "bibox"
 path = "src/main.rs"
