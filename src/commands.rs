@@ -3133,14 +3133,30 @@ pub fn cmd_update(check_only: bool) -> Result<()> {
     }
 
     println!("Installing bibox {}...", latest);
-    let status = std::process::Command::new("cargo")
-        .args(["install", "bibox", "--force"])
-        .status()?;
+
+    // Prefer cargo-binstall (downloads pre-built binary, no compilation)
+    let has_binstall = std::process::Command::new("cargo")
+        .args(["binstall", "--version"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+
+    let status = if has_binstall {
+        std::process::Command::new("cargo")
+            .args(["binstall", "bibox", "--no-confirm"])
+            .status()?
+    } else {
+        std::process::Command::new("cargo")
+            .args(["install", "bibox", "--force"])
+            .status()?
+    };
 
     if status.success() {
         println!("bibox {} installed successfully.", latest);
     } else {
-        anyhow::bail!("cargo install failed (exit code {:?})", status.code());
+        anyhow::bail!("update failed (exit code {:?})", status.code());
     }
 
     Ok(())
