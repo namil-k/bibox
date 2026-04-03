@@ -20,7 +20,6 @@ A terminal-based bibliography manager built in Rust. AI agents add papers, write
 - **Portable home** — `bibox init` puts everything in one Git-syncable folder
 - **Export** — BibTeX, YAML, RIS, CSV, notes (`.md`). Include PDFs. Copy to clipboard. Zip it up.
 - **Templates** — Built-in and custom note templates with `{{variable}}` substitution
-- **Headless build** — CLI-only build without TUI for servers and automation scripts
 
 ## Install
 
@@ -352,7 +351,7 @@ bibox sync --yes --json
 - **Rust** — clap, serde, reqwest, ratatui (optional), crossterm, pulldown-cmark (optional), arboard
 - **APIs** — Crossref, Unpaywall, arXiv, OpenLibrary
 - **Storage** — JSON database, flat PDF directory, Markdown notes
-- **Builds** — full (TUI default) or headless (`--no-default-features`)
+- **Builds** — `--no-default-features` for CLI-only (excludes ratatui/pulldown-cmark)
 
 ## License
 

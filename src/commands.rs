@@ -2856,7 +2856,7 @@ bibox is a terminal-based bibliography manager. All commands support `--json` fo
 ## Setup
 
 ```bash
-# Install (Linux server, no Rust needed)
+# Install on Linux server (no Rust needed)
 curl -L https://github.com/namil-k/bibox/releases/latest/download/bibox-x86_64-unknown-linux-musl -o ~/.local/bin/bibox
 chmod +x ~/.local/bin/bibox
 
