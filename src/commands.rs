@@ -2856,8 +2856,9 @@ bibox is a terminal-based bibliography manager. All commands support `--json` fo
 ## Setup
 
 ```bash
-# Install
-cargo install --path .
+# Install (Linux server, no Rust needed)
+curl -L https://github.com/namil-k/bibox/releases/latest/download/bibox-x86_64-unknown-linux-musl -o ~/.local/bin/bibox
+chmod +x ~/.local/bin/bibox
 
 # Initialize a portable home (db, pdfs, notes in one folder)
 bibox init <path> --json   # e.g. ~/bibox, ~/papers, etc.
@@ -2872,6 +2873,9 @@ cd <bibox-home> && git init && git remote add origin <url> && git push -u origin
 ## Adding Papers
 
 ```bash
+# By PDF (auto-extracts DOI, fetches metadata)
+bibox add paper.pdf --json
+
 # By DOI
 bibox add --doi 10.1145/3290605.3300907 --json
 
@@ -2887,7 +2891,7 @@ bibox add --url https://arxiv.org/abs/2301.12345 --json
 # Search by title (non-interactive: --index selects 0-based result)
 bibox add --search "attention is all you need" --index 0 --json
 
-# Add to a collection
+# Add to a collection on import
 bibox add --doi 10.xxx --to ml --json
 ```
 
@@ -2989,8 +2993,14 @@ bibox delete <key> -y
 # Add to collection
 bibox collect <key> ml systems
 
+# Add to sub-collection (path notation, unlimited depth)
+bibox collect <key> digest/2026-04
+
 # Remove from collection
 bibox uncollect <key> ml
+
+# List a collection and all sub-collections (prefix match)
+bibox list digest --json
 ```
 
 ## Importing
@@ -3014,6 +3024,12 @@ bibox export --collection cs --format ris
 
 # Export with PDFs
 bibox export --collection ml --include-pdf --zip
+
+# Export all note .md files to a folder
+bibox export --notes-only -o ~/notes
+
+# Export notes for a specific collection
+bibox export --collection ml --notes-only -o ~/ml-notes
 ```
 
 ## Sync
