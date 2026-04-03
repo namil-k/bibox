@@ -237,7 +237,6 @@ pub struct App {
     git_fetch_result: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     git_syncing: bool,
     git_sync_result: std::sync::Arc<std::sync::Mutex<Option<Result<String, String>>>>,
-    spinner_tick: u8,
 }
 
 impl App {
@@ -293,7 +292,6 @@ impl App {
             git_fetch_result: std::sync::Arc::new(std::sync::Mutex::new(None)),
             git_syncing: false,
             git_sync_result: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            spinner_tick: 0,
         })
     }
 
@@ -2244,9 +2242,10 @@ fn run_loop(
         }
 
         // Poll git sync background result
+        let sync_result_arc = std::sync::Arc::clone(&app.git_sync_result);
         if app.git_syncing {
             app.spinner_tick = app.spinner_tick.wrapping_add(1);
-            if let Ok(mut slot) = app.git_sync_result.try_lock() {
+            if let Ok(mut slot) = sync_result_arc.try_lock() {
                 if let Some(result) = slot.take() {
                     app.git_syncing = false;
                     app.git_status_checked = false;
@@ -2267,9 +2266,10 @@ fn run_loop(
         }
 
         // Poll git fetch background result
+        let fetch_result_arc = std::sync::Arc::clone(&app.git_fetch_result);
         if app.git_fetching {
             app.spinner_tick = app.spinner_tick.wrapping_add(1);
-            if let Ok(mut slot) = app.git_fetch_result.try_lock() {
+            if let Ok(mut slot) = fetch_result_arc.try_lock() {
                 if let Some(status) = slot.take() {
                     app.git_status_cache = status;
                     app.git_fetching = false;
