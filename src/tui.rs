@@ -302,7 +302,10 @@ impl App {
             .filter(|(_, e)| {
                 let col_ok = match &col {
                     None => true,
-                    Some(c) => e.collections.contains(c),
+                    Some(c) => {
+                        let prefix = format!("{}/", c);
+                        e.collections.iter().any(|ec| ec == c || ec.starts_with(&prefix))
+                    }
                 };
                 if !col_ok { return false; }
                 if query.is_empty() { return true; }
@@ -659,13 +662,19 @@ fn draw_collections_panel(f: &mut Frame, app: &App, area: Rect) {
 
     // "All" item
     let all_count = app.entries.len();
-    let all_text = format!("All ({})", all_count);
-    items.push(ListItem::new(all_text));
+    items.push(ListItem::new(format!("All ({})", all_count)));
 
-    // Collection items
+    // Tree-style collection items: indent by depth, show only the last segment as label
     for col in &app.collections {
-        let count = app.entries.iter().filter(|e| e.collections.contains(col)).count();
-        items.push(ListItem::new(format!("{} ({})", col, count)));
+        let depth = col.matches('/').count();
+        let label = col.split('/').last().unwrap_or(col.as_str());
+        let prefix_str = format!("{}/", col);
+        let count = app.entries.iter().filter(|e| {
+            e.collections.iter().any(|c| c == col || c.starts_with(&prefix_str))
+        }).count();
+        let indent = "  ".repeat(depth);
+        let connector = if depth > 0 { "└ " } else { "" };
+        items.push(ListItem::new(format!("{}{}{} ({})", indent, connector, label, count)));
     }
 
     let block = Block::default()

@@ -102,7 +102,8 @@ pub fn filter_entries<'a>(
         .iter()
         .filter(|e| {
             if let Some(col) = collection {
-                if !e.collections.iter().any(|c| c == col) {
+                let prefix = format!("{}/", col);
+                if !e.collections.iter().any(|c| c == col || c.starts_with(&prefix)) {
                     return false;
                 }
             }
@@ -143,7 +144,8 @@ pub fn search_entries<'a>(
         .iter()
         .filter(|e| {
             if let Some(col) = collection {
-                if !e.collections.iter().any(|c| c == col) {
+                let prefix = format!("{}/", col);
+                if !e.collections.iter().any(|c| c == col || c.starts_with(&prefix)) {
                     return false;
                 }
             }
