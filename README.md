@@ -24,49 +24,26 @@ A terminal-based bibliography manager built in Rust. AI agents add papers, write
 
 ## Install
 
-**From crates.io:**
+**With Rust (macOS / Linux desktop):**
 
 ```bash
 cargo install bibox
 ```
 
-**Headless (CLI-only, for servers):**
+**With cargo-binstall (fast, no compile):**
 
 ```bash
-cargo install bibox --no-default-features
+cargo binstall bibox
 ```
 
-**Pre-built binary (Linux x86_64, no Rust needed):**
-
-Download and copy the `bibox-x86_64-unknown-linux-musl` binary from the [latest GitHub release](https://github.com/namil-k/bibox/releases/latest):
+**On a server (no Rust needed):**
 
 ```bash
-# On the server
 curl -L https://github.com/namil-k/bibox/releases/latest/download/bibox-x86_64-unknown-linux-musl -o ~/.local/bin/bibox
 chmod +x ~/.local/bin/bibox
 ```
 
-Or cross-compile from macOS and upload directly:
-
-```bash
-# Mac (one-time setup)
-rustup target add x86_64-unknown-linux-musl
-brew install filosottile/musl-cross/musl-cross
-
-# Build & upload
-cargo build --release --no-default-features --target x86_64-unknown-linux-musl
-scp target/x86_64-unknown-linux-musl/release/bibox user@server:~/.local/bin/bibox
-```
-
-**From source:**
-
-```bash
-git clone https://github.com/namil-k/bibox.git
-cd bibox/bibox
-cargo install --path .
-```
-
-Build dependencies: OpenSSL (`brew install openssl` on macOS, `sudo apt install libssl-dev pkg-config` on Ubuntu). Not needed for the pre-built musl binary or cross-compiled builds.
+Pre-built binaries for Linux x86_64, macOS arm64, and macOS x86_64 are available on the [releases page](https://github.com/namil-k/bibox/releases/latest).
 
 **Update:**
 
