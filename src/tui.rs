@@ -110,6 +110,7 @@ struct ExportState {
 enum ConfirmAction {
     Delete(String),
     FetchPdf(String),
+    OpenBrowser(String, String), // (citekey, url)
 }
 
 struct BgTaskResult {
@@ -214,6 +215,7 @@ pub struct App {
     // Background tasks
     pending_editor: Option<std::path::PathBuf>,
     bg_result: Option<std::sync::mpsc::Receiver<Result<BgTaskResult>>>,
+    bg_fetch_key: Option<String>,
     spinner_tick: usize,
     // Sort
     sort_by: SortCriterion,
@@ -275,6 +277,7 @@ impl App {
             note_citekey: String::new(),
             pending_editor: None,
             bg_result: None,
+            bg_fetch_key: None,
             spinner_tick: 0,
             sort_by: SortCriterion::Created,
             sort_ascending: false,
@@ -628,6 +631,10 @@ fn draw(f: &mut Frame, app: &mut App) {
         Mode::Confirm(ConfirmAction::FetchPdf(key)) => {
             let key = key.clone();
             draw_confirm_popup(f, &format!("No PDF for '{}'. Fetch from web? (y/n)", key), size);
+        }
+        Mode::Confirm(ConfirmAction::OpenBrowser(key, _url)) => {
+            let key = key.clone();
+            draw_confirm_popup(f, &format!("Fetch failed (access denied). Open '{}' in browser? (y/n)", key), size);
         }
         Mode::Message(msg) => {
             let msg = msg.clone();
@@ -1852,9 +1859,19 @@ fn handle_confirm(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool
                             }));
                         });
                         app.bg_result = Some(rx);
+                        app.bg_fetch_key = Some(key.clone());
                         app.spinner_tick = 0;
                         app.mode = Mode::Loading("Fetching PDF...".into());
                     }
+                }
+                Mode::Confirm(ConfirmAction::OpenBrowser(_key, url)) => {
+                    #[cfg(target_os = "macos")]
+                    let _ = std::process::Command::new("open").arg(&url).spawn();
+                    #[cfg(not(target_os = "macos"))]
+                    let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+                    app.mode = Mode::Message(
+                        format!("Opened in browser. Download the PDF, then use:\nbibox edit <key> --attach-pdf ~/Downloads/<file>.pdf")
+                    );
                 }
                 _ => {}
             }
@@ -2298,9 +2315,34 @@ fn run_loop(
                         mem_entry.file_path = Some(result.file_path);
                     }
                     app.bg_result = None;
+                    app.bg_fetch_key = None;
                     app.mode = Mode::Message(format!("PDF saved: {}", result.full_path));
                 }
-                Ok(Err(e)) => { app.bg_result = None; app.mode = Mode::Message(format!("Fetch failed: {}", e)); }
+                Ok(Err(e)) => {
+                    app.bg_result = None;
+                    let err_str = e.to_string();
+                    let is_access_denied = err_str.contains("403") || err_str.contains("Forbidden");
+                    if is_access_denied {
+                        if let Some(key) = app.bg_fetch_key.take() {
+                            if let Some(entry) = app.entries.iter().find(|en| en.bibtex_key == key).cloned() {
+                                let url = entry.doi.as_ref().map(|d| format!("https://doi.org/{}", d))
+                                    .or_else(|| entry.url.clone());
+                                if let Some(url) = url {
+                                    app.mode = Mode::Confirm(ConfirmAction::OpenBrowser(key, url));
+                                } else {
+                                    app.mode = Mode::Message(format!("Fetch failed: {}", err_str));
+                                }
+                            } else {
+                                app.mode = Mode::Message(format!("Fetch failed: {}", err_str));
+                            }
+                        } else {
+                            app.mode = Mode::Message(format!("Fetch failed: {}", err_str));
+                        }
+                    } else {
+                        app.bg_fetch_key = None;
+                        app.mode = Mode::Message(format!("Fetch failed: {}", err_str));
+                    }
+                }
                 Err(std::sync::mpsc::TryRecvError::Empty) => { app.spinner_tick += 1; }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     app.bg_result = None;

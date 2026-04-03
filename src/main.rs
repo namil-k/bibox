@@ -249,6 +249,10 @@ Examples:
         /// Tags to remove, comma-separated
         #[arg(long)]
         tags_remove: Option<String>,
+
+        /// Attach a local PDF file (copies to bibox pdf dir and updates DB)
+        #[arg(long)]
+        attach_pdf: Option<PathBuf>,
     },
 
     /// Delete an entry and its associated PDF file
@@ -626,6 +630,7 @@ async fn main() -> Result<()> {
             note,
             tags_add,
             tags_remove,
+            attach_pdf,
         }) => {
             commands::cmd_edit(
                 key,
@@ -642,6 +647,7 @@ async fn main() -> Result<()> {
                 note,
                 tags_add,
                 tags_remove,
+                attach_pdf,
                 &config,
             ).await?;
         }

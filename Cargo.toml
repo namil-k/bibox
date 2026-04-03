@@ -1,6 +1,6 @@
 [package]
 name = "bibox"
-version = "0.2.12"
+version = "0.2.13"
 edition = "2021"
 description = "Terminal-based bibliography manager with three-panel TUI and AI-agent-friendly Markdown notes"
 license = "MIT"

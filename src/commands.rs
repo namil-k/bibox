@@ -794,6 +794,7 @@ pub async fn cmd_edit(
     note: Option<String>,
     tags_add: Option<String>,
     tags_remove: Option<String>,
+    attach_pdf: Option<std::path::PathBuf>,
     config: &Config,
 ) -> Result<()> {
     let db_path = db_path_from_config(config);
@@ -868,10 +869,19 @@ pub async fn cmd_edit(
         }
     }
 
-    // Rename file if metadata changed
+    // Rename file if metadata changed + attach PDF if requested
     let entry = find_by_key_mut(&mut db, &id_or_key)
         .with_context(|| config.msgs.entry_not_found(&id_or_key))?;
-    if entry.file_path.is_some() {
+
+    if let Some(src) = attach_pdf {
+        let filename = format!("{}.pdf", entry_to_filename(entry));
+        std::fs::create_dir_all(&config.bibox_dir)?;
+        let dest = config.bibox_dir.join(&filename);
+        std::fs::copy(&src, &dest)
+            .with_context(|| format!("Failed to copy PDF from {}", src.display()))?;
+        entry.file_path = Some(filename.clone());
+        println!("PDF attached: {}", dest.display());
+    } else if entry.file_path.is_some() {
         let new_filename = format!("{}.pdf", entry_to_filename(entry));
         let old_fp = entry.file_path.as_ref().unwrap().clone();
         if old_fp != new_filename {
