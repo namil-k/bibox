@@ -16,9 +16,11 @@ A terminal-based bibliography manager built in Rust. AI agents add papers, write
 - **Vim-style navigation** — `hjkl`, `gg`/`G`, `{n}j`, `Ctrl+d/u`, multi-select with `Space`
 - **AI-agent-friendly** — Every command supports `--json`. Notes have `--stdin`, `--section`, `--template` for programmatic access
 - **Markdown notes** — Per-entry notes with section-level updates, rendered with syntax highlighting in the TUI
+- **Sub-collections** — Hierarchical collections with path notation (`digest/2026-04`). Unlimited depth, works like a filesystem
 - **Portable home** — `bibox init` puts everything in one Git-syncable folder
-- **Export** — BibTeX, YAML, RIS, CSV. Include PDFs. Copy to clipboard. Zip it up.
+- **Export** — BibTeX, YAML, RIS, CSV, notes (`.md`). Include PDFs. Copy to clipboard. Zip it up.
 - **Templates** — Built-in and custom note templates with `{{variable}}` substitution
+- **Headless build** — CLI-only build without TUI for servers and automation scripts
 
 ## Install
 
@@ -26,6 +28,12 @@ A terminal-based bibliography manager built in Rust. AI agents add papers, write
 
 ```bash
 cargo install bibox
+```
+
+**Headless (CLI-only, for servers):**
+
+```bash
+cargo install bibox --no-default-features
 ```
 
 **From source:**
@@ -37,6 +45,12 @@ cargo install --path .
 ```
 
 Build dependencies: OpenSSL (`brew install openssl` on macOS, `sudo apt install libssl-dev pkg-config` on Ubuntu).
+
+**Update:**
+
+```bash
+bibox update
+```
 
 ## Quick Start
 
@@ -153,6 +167,14 @@ bibox edit kim2025rust --tags-add "ml,nlp"
 
 ```bash
 bibox collect kim2025rust ml systems       # Add to collections
+```
+
+```bash
+bibox collect kim2025rust digest/2026-04   # Add to sub-collection
+```
+
+```bash
+bibox list digest                          # List digest + all sub-collections
 ```
 
 ```bash
@@ -328,9 +350,10 @@ bibox sync --yes --json
 
 ## Tech Stack
 
-- **Rust** — clap, serde, reqwest, ratatui, crossterm, pulldown-cmark, arboard
+- **Rust** — clap, serde, reqwest, ratatui (optional), crossterm, pulldown-cmark (optional), arboard
 - **APIs** — Crossref, Unpaywall, arXiv, OpenLibrary
 - **Storage** — JSON database, flat PDF directory, Markdown notes
+- **Builds** — full (TUI default) or headless (`--no-default-features`)
 
 ## License
 
