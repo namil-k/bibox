@@ -36,6 +36,28 @@ cargo install bibox
 cargo install bibox --no-default-features
 ```
 
+**Pre-built binary (Linux x86_64, no Rust needed):**
+
+Download and copy the `bibox-x86_64-unknown-linux-musl` binary from the [latest GitHub release](https://github.com/namil-k/bibox/releases/latest):
+
+```bash
+# On the server
+curl -L https://github.com/namil-k/bibox/releases/latest/download/bibox-x86_64-unknown-linux-musl -o ~/.local/bin/bibox
+chmod +x ~/.local/bin/bibox
+```
+
+Or cross-compile from macOS and upload directly:
+
+```bash
+# Mac (one-time setup)
+rustup target add x86_64-unknown-linux-musl
+brew install filosottile/musl-cross/musl-cross
+
+# Build & upload
+cargo build --release --no-default-features --target x86_64-unknown-linux-musl
+scp target/x86_64-unknown-linux-musl/release/bibox user@server:~/.local/bin/bibox
+```
+
 **From source:**
 
 ```bash
@@ -44,7 +66,7 @@ cd bibox/bibox
 cargo install --path .
 ```
 
-Build dependencies: OpenSSL (`brew install openssl` on macOS, `sudo apt install libssl-dev pkg-config` on Ubuntu).
+Build dependencies: OpenSSL (`brew install openssl` on macOS, `sudo apt install libssl-dev pkg-config` on Ubuntu). Not needed for the pre-built musl binary or cross-compiled builds.
 
 **Update:**
 
