@@ -233,6 +233,11 @@ pub struct App {
     settings_idx: usize,
     git_status_cache: String,
     git_status_checked: bool,
+    git_fetching: bool,
+    git_fetch_result: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    git_syncing: bool,
+    git_sync_result: std::sync::Arc<std::sync::Mutex<Option<Result<String, String>>>>,
+    spinner_tick: u8,
 }
 
 impl App {
@@ -284,6 +289,11 @@ impl App {
             settings_idx: 0,
             git_status_cache: String::new(),
             git_status_checked: false,
+            git_fetching: false,
+            git_fetch_result: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            git_syncing: false,
+            git_sync_result: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            spinner_tick: 0,
         })
     }
 
@@ -1397,7 +1407,16 @@ fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
         None => "(not set — use `bibox init <path>`)".into(),
     };
 
-    let git_label = app.git_status_cache.clone();
+    const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let git_label = if app.git_fetching {
+        let frame = SPINNER_FRAMES[(app.spinner_tick as usize / 3) % SPINNER_FRAMES.len()];
+        format!("{} checking...", frame)
+    } else if app.git_syncing {
+        let frame = SPINNER_FRAMES[(app.spinner_tick as usize / 3) % SPINNER_FRAMES.len()];
+        format!("{} syncing...", frame)
+    } else {
+        app.git_status_cache.clone()
+    };
 
     let mut items: Vec<(String, bool)> = vec![
         (format!("Line numbers     [{}]", ln_label), true),
@@ -2063,54 +2082,58 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
                 if let Some(ref home) = app.config.home {
                     let home = crate::config::expand_tilde(home);
                     if !app.git_status_checked {
-                        // First Enter: check status only
-                        app.git_status_cache = get_git_status(&home);
+                        // First Enter: check status in background
+                        app.git_status_cache = String::new();
+                        app.git_fetching = true;
+                        let result_slot = std::sync::Arc::clone(&app.git_fetch_result);
+                        let home_clone = home.clone();
+                        std::thread::spawn(move || {
+                            let status = get_git_status(&home_clone);
+                            if let Ok(mut slot) = result_slot.lock() {
+                                *slot = Some(status);
+                            }
+                        });
                         app.git_status_checked = true;
                     } else {
-                        // Second Enter: sync
+                        // Second Enter: sync in background
+                        app.git_status_cache = String::new();
+                        app.git_syncing = true;
+                        let result_slot = std::sync::Arc::clone(&app.git_sync_result);
                         let home_str = home.to_string_lossy().to_string();
-                        let result = (|| -> Result<String> {
-                            let pull = std::process::Command::new("git")
-                                .args(["-C", &home_str, "pull", "--rebase"])
-                                .output()?;
-                            if !pull.status.success() {
-                                let err = String::from_utf8_lossy(&pull.stderr);
-                                anyhow::bail!("git pull failed: {}", err.trim());
-                            }
-                            let _ = std::process::Command::new("git")
-                                .args(["-C", &home_str, "add", "."])
-                                .output()?;
-                            let diff = std::process::Command::new("git")
-                                .args(["-C", &home_str, "diff", "--cached", "--quiet"])
-                                .output()?;
-                            if !diff.status.success() {
-                                let _ = std::process::Command::new("git")
-                                    .args(["-C", &home_str, "commit", "-m", "bibox sync"])
-                                    .output()?;
-                            }
-                            let push = std::process::Command::new("git")
-                                .args(["-C", &home_str, "push"])
-                                .output()?;
-                            if !push.status.success() {
-                                let err = String::from_utf8_lossy(&push.stderr);
-                                anyhow::bail!("git push failed: {}", err.trim());
-                            }
-                            Ok("Sync complete.".into())
-                        })();
-                        app.git_status_cache = get_git_status(&home);
-                        match result {
-                            Ok(msg) => {
-                                // Reload DB into TUI after sync
-                                let db_path = crate::config::resolve_db_path(&app.config);
-                                if let Ok(db) = load_db(&db_path) {
-                                    app.entries = db.entries;
-                                    app.rebuild_collections();
-                                    app.apply_filters();
+                        std::thread::spawn(move || {
+                            let result = (|| -> Result<String, String> {
+                                let pull = std::process::Command::new("git")
+                                    .args(["-C", &home_str, "pull", "--rebase"])
+                                    .output()
+                                    .map_err(|e| e.to_string())?;
+                                if !pull.status.success() {
+                                    return Err(format!("git pull failed: {}", String::from_utf8_lossy(&pull.stderr).trim()));
                                 }
-                                app.mode = Mode::Message(msg);
+                                let _ = std::process::Command::new("git")
+                                    .args(["-C", &home_str, "add", "."])
+                                    .output();
+                                let diff = std::process::Command::new("git")
+                                    .args(["-C", &home_str, "diff", "--cached", "--quiet"])
+                                    .output()
+                                    .map_err(|e| e.to_string())?;
+                                if !diff.status.success() {
+                                    let _ = std::process::Command::new("git")
+                                        .args(["-C", &home_str, "commit", "-m", "bibox sync"])
+                                        .output();
+                                }
+                                let push = std::process::Command::new("git")
+                                    .args(["-C", &home_str, "push"])
+                                    .output()
+                                    .map_err(|e| e.to_string())?;
+                                if !push.status.success() {
+                                    return Err(format!("git push failed: {}", String::from_utf8_lossy(&push.stderr).trim()));
+                                }
+                                Ok("Sync complete.".into())
+                            })();
+                            if let Ok(mut slot) = result_slot.lock() {
+                                *slot = Some(result);
                             }
-                            Err(e) => { app.mode = Mode::Message(format!("Sync failed: {}", e)); }
-                        }
+                        });
                     }
                 } else {
                     app.mode = Mode::Message("No home set. Run `bibox init <path>` first.".into());
@@ -2218,6 +2241,40 @@ fn run_loop(
             }
             // Reload note if in note preview mode
             app.note_citekey.clear();
+        }
+
+        // Poll git sync background result
+        if app.git_syncing {
+            app.spinner_tick = app.spinner_tick.wrapping_add(1);
+            if let Ok(mut slot) = app.git_sync_result.try_lock() {
+                if let Some(result) = slot.take() {
+                    app.git_syncing = false;
+                    app.git_status_checked = false;
+                    match result {
+                        Ok(msg) => {
+                            let db_path = crate::config::resolve_db_path(&app.config);
+                            if let Ok(db) = load_db(&db_path) {
+                                app.entries = db.entries;
+                                app.rebuild_collections();
+                                app.apply_filters();
+                            }
+                            app.mode = Mode::Message(msg);
+                        }
+                        Err(e) => { app.mode = Mode::Message(format!("Sync failed: {}", e)); }
+                    }
+                }
+            }
+        }
+
+        // Poll git fetch background result
+        if app.git_fetching {
+            app.spinner_tick = app.spinner_tick.wrapping_add(1);
+            if let Ok(mut slot) = app.git_fetch_result.try_lock() {
+                if let Some(status) = slot.take() {
+                    app.git_status_cache = status;
+                    app.git_fetching = false;
+                }
+            }
         }
 
         // Poll background task
