@@ -2317,13 +2317,23 @@ fn run_fetch_pdf(entry: &Entry, bibox_dir: &std::path::Path) -> Result<(String, 
                 Ok(Some(oa)) => { crate::unpaywall::download_pdf(&oa.pdf_url, &tmp).await?; }
                 Ok(None) => {
                     if let Some(ref url) = entry.url {
-                        crate::unpaywall::download_pdf(url, &tmp).await?;
+                        let pdf_url = if url.contains("arxiv.org/abs/") {
+                            url.replace("arxiv.org/abs/", "arxiv.org/pdf/")
+                        } else {
+                            url.clone()
+                        };
+                        crate::unpaywall::download_pdf(&pdf_url, &tmp).await?;
                     } else { anyhow::bail!("No open-access PDF found."); }
                 }
                 Err(e) => return Err(e),
             }
         } else if let Some(ref url) = entry.url {
-            crate::unpaywall::download_pdf(url, &tmp).await?;
+            let pdf_url = if url.contains("arxiv.org/abs/") {
+                url.replace("arxiv.org/abs/", "arxiv.org/pdf/")
+            } else {
+                url.clone()
+            };
+            crate::unpaywall::download_pdf(&pdf_url, &tmp).await?;
         } else { anyhow::bail!("No DOI or URL to fetch from."); }
         Ok(())
     })?;

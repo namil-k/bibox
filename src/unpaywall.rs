@@ -80,6 +80,16 @@ pub async fn download_pdf(url: &str, dest: &std::path::Path) -> Result<()> {
         anyhow::bail!("PDF download failed: HTTP {}", resp.status());
     }
 
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_lowercase();
+    if !content_type.contains("pdf") {
+        anyhow::bail!("URL did not return a PDF (content-type: {})", content_type);
+    }
+
     let bytes = resp.bytes().await.context("PDF download failed")?;
     std::fs::write(dest, bytes)?;
     Ok(())
