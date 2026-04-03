@@ -3150,29 +3150,50 @@ pub fn cmd_update(check_only: bool) -> Result<()> {
 
     println!("Installing bibox {}...", latest);
 
-    // Prefer cargo-binstall (downloads pre-built binary, no compilation)
-    let has_binstall = std::process::Command::new("cargo")
-        .args(["binstall", "--version"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-
-    let status = if has_binstall {
-        std::process::Command::new("cargo")
-            .args(["binstall", "bibox", "--no-confirm"])
-            .status()?
+    let success = if std::env::consts::OS == "linux" {
+        // On Linux: download pre-built musl binary directly (no compilation, no OOM)
+        let bin_url = format!(
+            "https://github.com/namil-k/bibox/releases/download/v{}/bibox-x86_64-unknown-linux-musl",
+            latest
+        );
+        let current_exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("/usr/local/bin/bibox"));
+        println!("Downloading from GitHub releases...");
+        let status = std::process::Command::new("curl")
+            .args(["-fsSL", &bin_url, "-o", &current_exe.to_string_lossy()])
+            .status()?;
+        if status.success() {
+            // Make executable
+            let _ = std::process::Command::new("chmod")
+                .args(["+x", &current_exe.to_string_lossy()])
+                .status();
+        }
+        status.success()
     } else {
-        std::process::Command::new("cargo")
-            .args(["install", "bibox", "--force"])
-            .status()?
+        // On macOS: prefer cargo-binstall, fall back to cargo install (compiles with TUI)
+        let has_binstall = std::process::Command::new("cargo")
+            .args(["binstall", "--version"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        let status = if has_binstall {
+            std::process::Command::new("cargo")
+                .args(["binstall", "bibox", "--no-confirm"])
+                .status()?
+        } else {
+            std::process::Command::new("cargo")
+                .args(["install", "bibox", "--force"])
+                .status()?
+        };
+        status.success()
     };
 
-    if status.success() {
+    if success {
         println!("bibox {} installed successfully.", latest);
     } else {
-        anyhow::bail!("update failed (exit code {:?})", status.code());
+        anyhow::bail!("update failed");
     }
 
     Ok(())
