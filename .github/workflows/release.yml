@@ -5,30 +5,52 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
-  build-linux:
-    runs-on: ubuntu-latest
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            binary: bibox
+            asset_name: bibox-x86_64-unknown-linux-musl
+
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary: bibox
+            asset_name: bibox-aarch64-apple-darwin
+
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            binary: bibox
+            asset_name: bibox-x86_64-apple-darwin
+
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-linux-musl
+          targets: ${{ matrix.target }}
 
-      - name: Install musl tools
+      - name: Install musl-tools (Linux)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get install -y musl-tools
 
-      - name: Build (headless, musl)
-        run: |
-          cargo build --release --no-default-features \
-            --target x86_64-unknown-linux-musl
+      - name: Build
+        run: cargo build --release --no-default-features --target ${{ matrix.target }}
 
       - name: Rename binary
-        run: |
-          cp target/x86_64-unknown-linux-musl/release/bibox bibox-linux-x86_64
+        run: cp target/${{ matrix.target }}/release/${{ matrix.binary }} ${{ matrix.asset_name }}
 
-      - name: Upload to Release
+      - name: Upload binary to release
         uses: softprops/action-gh-release@v2
         with:
-          files: bibox-linux-x86_64
+          files: ${{ matrix.asset_name }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
