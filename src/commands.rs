@@ -1725,11 +1725,60 @@ pub fn cmd_sync(yes: bool, json: bool, config: &Config) -> Result<()> {
         .collect();
 
     // Files in DB but not on disk
-    let missing: Vec<String> = db_files
+    let mut missing: Vec<String> = db_files
         .iter()
         .filter(|fp| !actual_files.contains(fp))
         .cloned()
         .collect();
+
+    // Files on disk but not in DB
+    let mut untracked: Vec<String> = actual_files
+        .iter()
+        .filter(|fp| !db_files.contains(fp))
+        .cloned()
+        .collect();
+
+    // ── Detect externally renamed files via DOI matching ──
+    // For each missing entry that has a DOI, scan untracked files for a DOI match.
+    let missing_with_doi: Vec<(String, String)> = db.entries.iter()
+        .filter(|e| e.file_path.as_ref().map_or(false, |fp| missing.contains(fp)))
+        .filter_map(|e| {
+            e.doi.as_ref().map(|doi| (e.file_path.as_ref().unwrap().clone(), doi.to_lowercase()))
+        })
+        .collect();
+
+    let mut matched_old: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut matched_new: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    if !missing_with_doi.is_empty() {
+        for new_fp in &untracked {
+            let full_path = config.bibox_dir.join(new_fp);
+            if let Ok(Some(file_doi)) = pdf::extract_doi(&full_path) {
+                let file_doi_lc = file_doi.to_lowercase();
+                for (old_fp, entry_doi) in &missing_with_doi {
+                    if file_doi_lc == *entry_doi {
+                        if let Some(entry) = db.entries.iter_mut()
+                            .find(|e| e.file_path.as_deref() == Some(old_fp.as_str()))
+                        {
+                            println!("Detected rename: {} → {}", old_fp, new_fp);
+                            entry.file_path = Some(new_fp.clone());
+                            matched_old.insert(old_fp.clone());
+                            matched_new.insert(new_fp.clone());
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Remove matched entries from missing/untracked so they aren't double-processed
+    missing.retain(|fp| !matched_old.contains(fp));
+    untracked.retain(|fp| !matched_new.contains(fp));
+
+    if !matched_old.is_empty() {
+        println!("Matched {} externally renamed file(s) by DOI.", matched_old.len());
+    }
 
     for fp in &missing {
         if yes || prompt_confirm(&config.msgs.sync_file_missing(fp)) {
@@ -1737,13 +1786,6 @@ pub fn cmd_sync(yes: bool, json: bool, config: &Config) -> Result<()> {
             println!("{}", config.msgs.sync_removed(fp));
         }
     }
-
-    // Files on disk but not in DB
-    let untracked: Vec<String> = actual_files
-        .iter()
-        .filter(|fp| !db_files.contains(fp))
-        .cloned()
-        .collect();
 
     for fp in &untracked {
         println!("{}", config.msgs.sync_new_file(fp));
