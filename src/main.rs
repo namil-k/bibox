@@ -15,6 +15,7 @@ mod notes;
 mod openlibrary;
 mod pdf;
 mod storage;
+#[cfg(feature = "tui")]
 mod tui;
 mod unpaywall;
 mod url_resolver;
@@ -550,7 +551,14 @@ async fn main() -> Result<()> {
 
     match cli.command {
         None => {
+            #[cfg(feature = "tui")]
             tui::run_tui(&config)?;
+            #[cfg(not(feature = "tui"))]
+            {
+                use clap::CommandFactory;
+                Cli::command().print_help()?;
+                println!();
+            }
         }
 
         Some(Commands::Add {
