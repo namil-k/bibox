@@ -2504,7 +2504,6 @@ struct RawBibEntry {
 fn parse_bibtex(content: &str) -> Vec<RawBibEntry> {
     let mut entries = vec![];
     let re_entry = regex::Regex::new(r"@(\w+)\s*\{\s*([^,\s]*)\s*,").unwrap();
-    let re_field = regex::Regex::new(r"\b(\w+)\s*=\s*\{([^}]*)\}").unwrap();
 
     let mut pos = 0;
     while let Some(cap) = re_entry.find_at(content, pos) {
@@ -2552,9 +2551,8 @@ fn parse_bibtex(content: &str) -> Vec<RawBibEntry> {
             note: None,
         };
 
-        for fcap in re_field.captures_iter(body) {
-            let field = fcap.get(1).unwrap().as_str().to_lowercase();
-            let value = fcap.get(2).unwrap().as_str().trim().to_string();
+        let fields = parse_bib_fields(body);
+        for (field, value) in fields {
             match field.as_str() {
                 "title" => raw.title = Some(value),
                 "author" => raw.author = Some(value),
@@ -2580,6 +2578,39 @@ fn parse_bibtex(content: &str) -> Vec<RawBibEntry> {
     }
 
     entries
+}
+
+/// Extract BibTeX field values from an entry body using depth-tracked brace parsing.
+/// Handles nested braces correctly (e.g. `title = {{Acronym}: Full Title}`).
+fn parse_bib_fields(body: &str) -> Vec<(String, String)> {
+    let re_field_start = regex::Regex::new(r"\b(\w+)\s*=\s*\{").unwrap();
+    let bytes = body.as_bytes();
+    let mut fields = vec![];
+
+    for cap in re_field_start.captures_iter(body) {
+        let field_name = cap.get(1).unwrap().as_str().to_lowercase();
+        let value_start = cap.get(0).unwrap().end(); // byte offset right after the opening `{`
+
+        let mut depth = 1i32;
+        let mut i = value_start;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        let value = body[value_start..i].trim().to_string();
+                        fields.push((field_name, value));
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+    }
+
+    fields
 }
 
 fn find_entry_body(content: &str, start: usize) -> &str {
