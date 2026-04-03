@@ -1683,8 +1683,14 @@ fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
                 let entry = entry.clone();
                 if entry.file_path.is_some() {
                     let full_path = app.config.bibox_dir.join(entry.file_path.as_ref().unwrap());
-                    if full_path.exists() { app.open_pdf(&entry); }
-                    else { app.mode = Mode::Message("PDF file missing from disk.".into()); }
+                    if full_path.exists() {
+                        app.open_pdf(&entry);
+                    } else if entry.doi.is_some() || entry.url.is_some() {
+                        let bkey = entry.bibtex_key.clone();
+                        app.mode = Mode::Confirm(ConfirmAction::FetchPdf(bkey));
+                    } else {
+                        app.mode = Mode::Message("PDF file missing from disk.".into());
+                    }
                 } else if entry.doi.is_some() || entry.url.is_some() {
                     let bkey = entry.bibtex_key.clone();
                     app.mode = Mode::Confirm(ConfirmAction::FetchPdf(bkey));
