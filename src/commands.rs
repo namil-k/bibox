@@ -225,6 +225,7 @@ pub async fn cmd_add(
                     booktitle: booktitle_arg,
                     doi: meta.doi,
                     url: Some(meta.url),
+                    abstract_text: None,
                     tags: vec![],
                     note: None,
                     collections: collection.map(|c| vec![c]).unwrap_or_default(),
@@ -441,6 +442,7 @@ pub async fn cmd_add(
                 booktitle: booktitle.clone(),
                 doi: doi.clone(),
                 url: None,
+                abstract_text: None,
                 tags: vec![],
                 note: None,
                 collections: vec![],
@@ -520,6 +522,7 @@ pub async fn cmd_add(
         booktitle,
         doi,
         url: meta.as_ref().and_then(|m| m.url.clone()),
+        abstract_text: None,
         tags: vec![],
         note: None,
         collections,
@@ -1122,7 +1125,10 @@ pub fn cmd_import(file: PathBuf, to: Option<String>, config: &Config) -> Result<
             booktitle: raw.booktitle,
             doi: raw.doi,
             url: raw.url,
-            tags: vec![],
+            abstract_text: raw.abstract_text,
+            tags: raw.keywords
+                .map(|k| k.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+                .unwrap_or_default(),
             note: raw.note,
             collections,
             file_path: None,
@@ -1839,6 +1845,7 @@ pub fn cmd_sync(yes: bool, json: bool, config: &Config) -> Result<()> {
                 booktitle: None,
                 doi,
                 url: None,
+                abstract_text: None,
                 tags: vec![],
                 note: Some(config.msgs.sync_added_note().to_string()),
                 collections: vec![],
@@ -2571,6 +2578,8 @@ struct RawBibEntry {
     doi: Option<String>,
     url: Option<String>,
     note: Option<String>,
+    abstract_text: Option<String>,
+    keywords: Option<String>,
 }
 
 fn parse_bibtex(content: &str) -> Vec<RawBibEntry> {
@@ -2621,6 +2630,8 @@ fn parse_bibtex(content: &str) -> Vec<RawBibEntry> {
             doi: None,
             url: None,
             note: None,
+            abstract_text: None,
+            keywords: None,
         };
 
         let fields = parse_bib_fields(body);
@@ -2641,6 +2652,8 @@ fn parse_bibtex(content: &str) -> Vec<RawBibEntry> {
                 "doi"       => raw.doi       = Some(value),
                 "url"       => raw.url       = Some(value),
                 "note"      => raw.note      = Some(value),
+                "abstract"  => raw.abstract_text = Some(decode_latex(&value)),
+                "keywords"  => raw.keywords  = Some(value),
                 _ => {}
             }
         }

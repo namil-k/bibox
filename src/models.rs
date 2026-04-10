@@ -60,6 +60,8 @@ pub struct Entry {
     // Common optional fields
     pub doi: Option<String>,
     pub url: Option<String>,
+    #[serde(default, rename = "abstract")]
+    pub abstract_text: Option<String>,
     pub tags: Vec<String>,
     pub note: Option<String>,
     pub collections: Vec<String>,

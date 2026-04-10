@@ -66,6 +66,21 @@ enum Mode {
     ExportMenu,
     Settings,
     FilePicker(FilePickerContext),
+    FetchPreview,
+}
+
+struct FieldChange {
+    field: String,
+    old_val: String,
+    new_val: String,
+    changed: bool, // old != new
+}
+
+struct FetchPreviewState {
+    key: String,
+    changes: Vec<FieldChange>,
+    selected: Vec<bool>,
+    index: usize,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -112,6 +127,7 @@ enum ConfirmAction {
     Delete(String),
     FetchPdf(String),
     OpenBrowser(String, String), // (citekey, url)
+    FetchMetaByTitle(String, String), // (citekey, title)
 }
 
 enum FilePickerContext {
@@ -227,6 +243,8 @@ pub struct App {
     pending_editor: Option<std::path::PathBuf>,
     bg_result: Option<std::sync::mpsc::Receiver<Result<BgTaskResult>>>,
     bg_fetch_key: Option<String>,
+    bg_meta_result: Option<std::sync::mpsc::Receiver<Result<(String, crate::crossref::Metadata)>>>,
+    fetch_preview: Option<FetchPreviewState>,
     file_picker_state: Option<ratatree::FilePickerState>,
     spinner_tick: usize,
     // Sort
@@ -239,6 +257,9 @@ pub struct App {
     picker: Option<ChecklistPicker>,
     // Vim key buffer (for gg, {number}j etc.)
     key_buf: String,
+    // Undo/Redo stacks (DB snapshots)
+    undo_stack: Vec<Vec<Entry>>,
+    redo_stack: Vec<Vec<Entry>>,
     // Multi-select
     selected_keys: std::collections::HashSet<String>,
     // Export menu state
@@ -290,6 +311,8 @@ impl App {
             pending_editor: None,
             bg_result: None,
             bg_fetch_key: None,
+            bg_meta_result: None,
+            fetch_preview: None,
             file_picker_state: None,
             spinner_tick: 0,
             sort_by: SortCriterion::Created,
@@ -299,6 +322,8 @@ impl App {
             prev_sort_ascending: false,
             picker: None,
             key_buf: String::new(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
             selected_keys: std::collections::HashSet::new(),
             export_state: None,
             settings_idx: 0,
@@ -521,6 +546,7 @@ impl App {
     }
 
     fn delete_selected(&mut self) -> Result<()> {
+        self.push_undo();
         if let Some(idx) = self.selected_entry_idx() {
             let entry = &self.entries[idx];
             if let Some(fp) = &entry.file_path {
@@ -551,6 +577,51 @@ impl App {
         }
     }
 
+    const MAX_UNDO: usize = 50;
+
+    /// Push current entries to undo stack before making a change.
+    fn push_undo(&mut self) {
+        if self.undo_stack.len() >= Self::MAX_UNDO {
+            self.undo_stack.remove(0);
+        }
+        self.undo_stack.push(self.entries.clone());
+        self.redo_stack.clear();
+    }
+
+    fn undo(&mut self) -> Result<()> {
+        if let Some(snapshot) = self.undo_stack.pop() {
+            self.redo_stack.push(self.entries.clone());
+            self.entries = snapshot;
+            let db_path = crate::config::resolve_db_path(&self.config);
+            let mut db = load_db(&db_path)?;
+            db.entries = self.entries.clone();
+            save_db(&db, &db_path)?;
+            self.rebuild_collections();
+            self.apply_filters();
+            self.mode = Mode::Message(format!("Undo ({})", self.undo_stack.len()));
+        } else {
+            self.mode = Mode::Message("Nothing to undo.".into());
+        }
+        Ok(())
+    }
+
+    fn redo(&mut self) -> Result<()> {
+        if let Some(snapshot) = self.redo_stack.pop() {
+            self.undo_stack.push(self.entries.clone());
+            self.entries = snapshot;
+            let db_path = crate::config::resolve_db_path(&self.config);
+            let mut db = load_db(&db_path)?;
+            db.entries = self.entries.clone();
+            save_db(&db, &db_path)?;
+            self.rebuild_collections();
+            self.apply_filters();
+            self.mode = Mode::Message(format!("Redo ({})", self.redo_stack.len()));
+        } else {
+            self.mode = Mode::Message("Nothing to redo.".into());
+        }
+        Ok(())
+    }
+
     fn open_collection_picker(&mut self) {
         if let Some(entry) = self.selected_entry() {
             let entry_cols: std::collections::HashSet<&String> = entry.collections.iter().collect();
@@ -564,6 +635,57 @@ impl App {
             ));
             self.mode = Mode::CollectionPicker;
         }
+    }
+
+    fn open_collection_picker_multi(&mut self) {
+        // For multi-select: show all collections, check ones that ALL selected entries share
+        let selected_entries: Vec<&Entry> = self.entries.iter()
+            .filter(|e| self.selected_keys.contains(&e.bibtex_key))
+            .collect();
+        if selected_entries.is_empty() { return; }
+
+        let all_cols: std::collections::BTreeSet<String> = self.entries.iter()
+            .flat_map(|e| e.collections.iter().cloned()).collect();
+
+        // Intersection: checked if ALL selected entries have this collection
+        let items: Vec<(String, bool)> = all_cols.into_iter().map(|c| {
+            let all_have = selected_entries.iter().all(|e| e.collections.contains(&c));
+            (c, all_have)
+        }).collect();
+
+        let count = selected_entries.len();
+        self.picker = Some(ChecklistPicker::new(
+            format!("Collections for {} entries:", count), items, "+ New collection...".into(),
+        ));
+        self.mode = Mode::CollectionPicker;
+    }
+
+    fn apply_picker_collections_multi(&mut self) -> Result<()> {
+        self.push_undo();
+        let new_cols = match &self.picker {
+            Some(picker) => picker.checked_names(),
+            None => { return Ok(()); }
+        };
+        self.picker = None;
+
+        // Apply to all selected entries
+        for e in self.entries.iter_mut() {
+            if self.selected_keys.contains(&e.bibtex_key) {
+                e.collections = new_cols.clone();
+                e.updated_at = Some(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+            }
+        }
+        let db_path = crate::config::resolve_db_path(&self.config);
+        let mut db = load_db(&db_path)?;
+        db.entries = self.entries.clone();
+        save_db(&db, &db_path)?;
+
+        let count = self.selected_keys.len();
+        self.selected_keys.clear();
+        self.rebuild_collections();
+        self.apply_filters();
+        self.mode = Mode::Message(format!("Updated collections for {} entries.", count));
+        Ok(())
     }
 
     fn open_tag_editor(&mut self) {
@@ -582,6 +704,7 @@ impl App {
     }
 
     fn apply_picker_collections(&mut self) -> Result<()> {
+        self.push_undo();
         let (new_cols, idx) = match (&self.picker, self.selected_entry_idx()) {
             (Some(picker), Some(idx)) => (picker.checked_names(), idx),
             _ => { self.picker = None; return Ok(()); }
@@ -598,6 +721,7 @@ impl App {
     }
 
     fn apply_picker_tags(&mut self) -> Result<()> {
+        self.push_undo();
         let (new_tags, idx) = match (&self.picker, self.selected_entry_idx()) {
             (Some(picker), Some(idx)) => (picker.checked_names(), idx),
             _ => { self.picker = None; return Ok(()); }
@@ -663,6 +787,14 @@ fn draw(f: &mut Frame, app: &mut App) {
         Mode::Confirm(ConfirmAction::OpenBrowser(key, _url)) => {
             let key = key.clone();
             draw_confirm_popup(f, &format!("Fetch failed (access denied). Open '{}' in browser? (y/n)", key), size);
+        }
+        Mode::Confirm(ConfirmAction::FetchMetaByTitle(_key, _title)) => {
+            draw_confirm_popup(f, "No DOI. Search Crossref by title? (y/n)", size);
+        }
+        Mode::FetchPreview => {
+            if let Some(ref state) = app.fetch_preview {
+                draw_fetch_preview(f, state, size);
+            }
         }
         Mode::Message(msg) => {
             let msg = msg.clone();
@@ -905,7 +1037,14 @@ fn draw_preview_info(f: &mut Frame, app: &App, area: Rect) {
     if let Some(doi) = &entry.doi { field!("DOI:", doi.as_str()); }
     if let Some(url) = &entry.url { field!("URL:", url.as_str()); }
     if !entry.tags.is_empty() { field!("Tags:", entry.tags.join(", ")); }
-    if !entry.collections.is_empty() { field!("Collections:", entry.collections.join(", ")); }
+    if !entry.collections.is_empty() {
+        field!("Collections:", entry.collections.join(", "));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled(format!("{:<12}", "Collections:"), Style::default().fg(Color::Cyan)),
+            Span::styled("(none)", Style::default().fg(Color::DarkGray)),
+        ]));
+    }
     if let Some(fp) = &entry.file_path {
         field!("File:", fp.as_str());
     } else {
@@ -913,6 +1052,12 @@ fn draw_preview_info(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(format!("{:<12}", "File:"), Style::default().fg(Color::Cyan)),
             Span::styled("No PDF", Style::default().fg(Color::DarkGray)),
         ]));
+    }
+    if let Some(ref abs) = entry.abstract_text {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled("Abstract:", Style::default().fg(Color::Cyan))));
+        // Word-wrap abstract text (simple approach: just push as-is, TUI wraps)
+        lines.push(Line::from(Span::styled(abs.as_str(), Style::default().fg(Color::DarkGray))));
     }
 
     let p = Paragraph::new(lines)
@@ -1256,7 +1401,7 @@ fn draw_help_popup(f: &mut Frame, area: Rect) {
 }
 
 fn draw_sort_popup(f: &mut Frame, app: &App, area: Rect) {
-    let popup_area = centered_rect(50, 10, area);
+    let popup_area = centered_rect(55, 14, area);
     f.render_widget(Clear, popup_area);
     let criteria = SortCriterion::all();
     let mut lines = vec![
@@ -1451,11 +1596,14 @@ fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
         app.git_status_cache.clone()
     };
 
+    let ck_fmt = &app.config.citekey_format;
+
     let mut items: Vec<(String, bool)> = vec![
         (format!("Line numbers     [{}]", ln_label), true),
         (format!("Panel ratio      [{}, {}, {}]", ratio[0], ratio[1], ratio[2]), true),
         (format!("Bib export dir   [{}]", bib_dir), true),
         (format!("Export dir       [{}]", exp_dir), true),
+        (format!("Citekey format   [{}]", ck_fmt), true),
     ];
     // separator + read-only items
     let readonly_start = items.len();
@@ -1523,6 +1671,7 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
         Mode::ExportMenu => handle_export_menu(app, key),
         Mode::Settings => handle_settings(app, key),
         Mode::FilePicker(_) => handle_file_picker(app, key),
+        Mode::FetchPreview => handle_fetch_preview(app, key),
     }
 }
 
@@ -1562,6 +1711,8 @@ fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
     match key.code {
         KeyCode::Char('q') => return Ok(true),
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
+        KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => { app.undo()?; }
+        KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => { app.redo()?; }
 
         // Panel navigation
         KeyCode::Char('h') | KeyCode::Left => {
@@ -1756,6 +1907,31 @@ fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
         }
 
         // Export menu
+        KeyCode::Char('f') => {
+            if let Some(entry) = app.selected_entry() {
+                let key = entry.bibtex_key.clone();
+                let doi = entry.doi.clone();
+                let title = entry.title.clone();
+                if let Some(doi) = doi {
+                    // Fetch by DOI
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    let key_clone = key.clone();
+                    std::thread::spawn(move || {
+                        let rt = tokio::runtime::Runtime::new().unwrap();
+                        let result = rt.block_on(crate::crossref::fetch_metadata(&doi));
+                        let _ = tx.send(result.map(|m| (key_clone, m)));
+                    });
+                    app.bg_meta_result = Some(rx);
+                    app.spinner_tick = 0;
+                    app.mode = Mode::Loading("Fetching metadata from Crossref...".into());
+                } else if let Some(title) = title {
+                    // No DOI - search by title
+                    app.mode = Mode::Confirm(ConfirmAction::FetchMetaByTitle(key, title));
+                } else {
+                    app.mode = Mode::Message("No DOI or title to search.".into());
+                }
+            }
+        }
         KeyCode::Char('e') => {
             let mut scope_options = vec![];
             if !app.selected_keys.is_empty() {
@@ -1800,8 +1976,13 @@ fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
         }
 
         KeyCode::Char('c') => {
-            if app.selected_entry().is_some() { app.open_collection_picker(); }
-            else { app.mode = Mode::Message("No entry selected.".into()); }
+            if !app.selected_keys.is_empty() {
+                app.open_collection_picker_multi();
+            } else if app.selected_entry().is_some() {
+                app.open_collection_picker();
+            } else {
+                app.mode = Mode::Message("No entry selected.".into());
+            }
         }
 
         KeyCode::Char('t') => {
@@ -1911,6 +2092,25 @@ fn handle_confirm(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool
                         app.mode = Mode::Loading("Fetching PDF...".into());
                     }
                 }
+                Mode::Confirm(ConfirmAction::FetchMetaByTitle(key, title)) => {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    let key_clone = key.clone();
+                    std::thread::spawn(move || {
+                        let rt = tokio::runtime::Runtime::new().unwrap();
+                        let result = rt.block_on(async {
+                            let results = crate::crossref::search_by_title(&title, 1).await?;
+                            if let Some(first) = results.into_iter().next() {
+                                crate::crossref::fetch_metadata(&first.doi).await
+                            } else {
+                                anyhow::bail!("No results found on Crossref for this title")
+                            }
+                        });
+                        let _ = tx.send(result.map(|m| (key_clone, m)));
+                    });
+                    app.bg_meta_result = Some(rx);
+                    app.spinner_tick = 0;
+                    app.mode = Mode::Loading("Searching Crossref by title...".into());
+                }
                 Mode::Confirm(ConfirmAction::OpenBrowser(_key, url)) => {
                     #[cfg(target_os = "macos")]
                     let _ = std::process::Command::new("open").arg(&url).spawn();
@@ -1980,7 +2180,14 @@ fn handle_picker(app: &mut App, key: crossterm::event::KeyEvent, is_tags: bool) 
             KeyCode::Down | KeyCode::Char('j') => { if let Some(ref mut p) = app.picker { p.move_down(); } }
             KeyCode::Char(' ') => { if let Some(ref mut p) = app.picker { p.toggle(); } }
             KeyCode::Enter => {
-                if is_tags { app.apply_picker_tags()?; } else { app.apply_picker_collections()?; }
+                if is_tags {
+                    app.apply_picker_tags()?;
+                } else if !app.selected_keys.is_empty() {
+                    app.apply_picker_collections_multi()?;
+                    return Ok(false); // mode already set in the function
+                } else {
+                    app.apply_picker_collections()?;
+                }
                 app.mode = Mode::Normal;
             }
             KeyCode::Esc => { app.picker = None; app.mode = Mode::Normal; }
@@ -2060,7 +2267,7 @@ fn handle_export_menu(app: &mut App, key: crossterm::event::KeyEvent) -> Result<
 
 fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
     use crate::config::LineNumbers;
-    let num_settings: usize = 6; // 0-3 editable, 4 home (ro), 5 git (ro+sync)
+    let num_settings: usize = 7; // 0-3 editable, 4 citekey format, 5 home (ro), 6 git
 
     let download_dir = dirs::download_dir()
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")));
@@ -2109,7 +2316,12 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
                     let pos = dir_presets.iter().position(|d| d == cur).unwrap_or(0);
                     app.config.export_dir = dir_presets[(pos + 1) % dir_presets.len()].clone();
                 }
-                _ => {} // 4,5 are read-only
+                4 => {
+                    let presets = crate::config::CITEKEY_PRESETS;
+                    let pos = presets.iter().position(|p| *p == app.config.citekey_format).unwrap_or(0);
+                    app.config.citekey_format = presets[(pos + 1) % presets.len()].to_string();
+                }
+                _ => {} // 5,6 are read-only
             }
         }
         KeyCode::Left | KeyCode::Char('h') => {
@@ -2142,11 +2354,17 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
                     let prev = if pos == 0 { dir_presets.len() - 1 } else { pos - 1 };
                     app.config.export_dir = dir_presets[prev].clone();
                 }
+                4 => {
+                    let presets = crate::config::CITEKEY_PRESETS;
+                    let pos = presets.iter().position(|p| *p == app.config.citekey_format).unwrap_or(0);
+                    let prev = if pos == 0 { presets.len() - 1 } else { pos - 1 };
+                    app.config.citekey_format = presets[prev].to_string();
+                }
                 _ => {}
             }
         }
         KeyCode::Enter => {
-            // Dir picker for path settings (2=bib_export_dir, 3=export_dir, 4=home)
+            // Dir picker for path settings (2=bib_export_dir, 3=export_dir, 5=home)
             if app.settings_idx == 2 {
                 let start = app.config.bib_export_dir.clone();
                 app.file_picker_state = Some(
@@ -2167,7 +2385,7 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
                 );
                 app.mode = Mode::FilePicker(FilePickerContext::ExportDir);
                 return Ok(false);
-            } else if app.settings_idx == 4 {
+            } else if app.settings_idx == 5 {
                 let start = app.config.home.clone()
                     .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")));
                 app.file_picker_state = Some(
@@ -2178,7 +2396,7 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
                 );
                 app.mode = Mode::FilePicker(FilePickerContext::Home);
                 return Ok(false);
-            } else if app.settings_idx == 5 {
+            } else if app.settings_idx == 6 {
                 if let Some(ref home) = app.config.home {
                     let home = crate::config::expand_tilde(home);
                     if !app.git_status_checked {
@@ -2250,6 +2468,7 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
                 app.config.panel_ratio = cfg.panel_ratio;
                 app.config.bib_export_dir = cfg.bib_export_dir;
                 app.config.export_dir = cfg.export_dir;
+                app.config.citekey_format = cfg.citekey_format;
             }
             app.mode = Mode::Normal;
         }
@@ -2357,6 +2576,7 @@ pub fn run_tui(config: &Config) -> Result<()> {
         panel_ratio: config.panel_ratio,
         bib_export_dir: config.bib_export_dir.clone(),
         export_dir: config.export_dir.clone(),
+        citekey_format: config.citekey_format.clone(),
         msgs: crate::i18n::Msgs::new(&config.language),
     };
 
@@ -2369,6 +2589,167 @@ pub fn run_tui(config: &Config) -> Result<()> {
     execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.show_cursor()?;
     result
+}
+
+fn draw_fetch_preview(f: &mut Frame, state: &FetchPreviewState, area: Rect) {
+    let popup_area = centered_rect(80, 60, area);
+    f.render_widget(Clear, popup_area);
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("Fetch results for [{}]:", state.key),
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
+
+    for (i, change) in state.changes.iter().enumerate() {
+        let arrow = if i == state.index { "▶ " } else { "  " };
+        let check = if state.selected[i] { "[x]" } else { "[ ]" };
+
+        let style = if !change.changed {
+            Style::default().fg(Color::DarkGray)
+        } else if i == state.index {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default()
+        };
+
+        // Truncate long values
+        let max_val = 35;
+        let old_display = if change.old_val.len() > max_val {
+            format!("{}...", &change.old_val[..max_val])
+        } else if change.old_val.is_empty() {
+            "(empty)".into()
+        } else {
+            change.old_val.clone()
+        };
+        let new_display = if change.new_val.len() > max_val {
+            format!("{}...", &change.new_val[..max_val])
+        } else if change.new_val.is_empty() {
+            "(empty)".into()
+        } else {
+            change.new_val.clone()
+        };
+
+        if change.changed {
+            lines.push(Line::from(vec![
+                Span::styled(arrow, Style::default().fg(Color::Yellow)),
+                Span::styled(format!("{} ", check), style),
+                Span::styled(format!("{:<10} ", change.field), style.add_modifier(Modifier::BOLD)),
+                Span::styled(old_display.clone(), Style::default().fg(Color::Red)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::raw("               "),
+                Span::styled(format!(" -> {}", new_display), Style::default().fg(Color::Green)),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled(arrow, Style::default().fg(Color::Yellow)),
+                Span::styled(format!("{} ", check), style),
+                Span::styled(format!("{:<10} ", change.field), style),
+                Span::styled(old_display.clone(), style),
+                Span::styled("  (unchanged)", Style::default().fg(Color::DarkGray)),
+            ]));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "↑↓ navigate  Space toggle  Enter apply  Esc cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let popup = Paragraph::new(lines)
+        .block(Block::default().borders(Borders::ALL).title(" Fetch Preview "));
+    f.render_widget(popup, popup_area);
+}
+
+fn handle_fetch_preview(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
+    let num_items = app.fetch_preview.as_ref().map(|s| s.changes.len()).unwrap_or(0);
+    if let Some(ref mut state) = app.fetch_preview {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if state.index > 0 { state.index -= 1; }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if state.index < num_items.saturating_sub(1) { state.index += 1; }
+            }
+            KeyCode::Char(' ') => {
+                state.selected[state.index] = !state.selected[state.index];
+            }
+            KeyCode::Enter => {
+                // Apply selected changes
+                app.push_undo();
+                let preview = app.fetch_preview.take().unwrap();
+                let db_path = crate::config::resolve_db_path(&app.config);
+                let mut db = load_db(&db_path)?;
+
+                // Check if citekey is changing
+                let old_key = preview.key.clone();
+                let mut new_key = old_key.clone();
+                for (i, change) in preview.changes.iter().enumerate() {
+                    if preview.selected[i] && change.field == "Citekey" && change.changed {
+                        new_key = change.new_val.clone();
+                    }
+                }
+
+                // Apply field changes to DB entry
+                if let Some(entry) = db.entries.iter_mut().find(|e| e.bibtex_key == old_key) {
+                    for (i, change) in preview.changes.iter().enumerate() {
+                        if !preview.selected[i] || !change.changed { continue; }
+                        match change.field.as_str() {
+                            "Title" => entry.title = Some(change.new_val.clone()),
+                            "Author" => {
+                                entry.author = change.new_val.split("; ")
+                                    .map(|s| s.to_string()).collect();
+                            }
+                            "Year" => entry.year = change.new_val.parse().ok(),
+                            "Journal" => entry.journal = if change.new_val.is_empty() { None } else { Some(change.new_val.clone()) },
+                            "Publisher" => entry.publisher = if change.new_val.is_empty() { None } else { Some(change.new_val.clone()) },
+                            "DOI" => entry.doi = Some(change.new_val.clone()),
+                            "Citekey" => {
+                                // Rename PDF file if exists
+                                if let Some(ref fp) = entry.file_path {
+                                    let old_path = app.config.bibox_dir.join(fp);
+                                    let new_fp = format!("{}.pdf", new_key);
+                                    let new_path = app.config.bibox_dir.join(&new_fp);
+                                    if old_path.exists() {
+                                        let _ = std::fs::rename(&old_path, &new_path);
+                                    }
+                                    entry.file_path = Some(new_fp);
+                                }
+                                // Rename note file if exists
+                                let old_note = app.config.notes_dir.join(format!("{}.md", old_key));
+                                if old_note.exists() {
+                                    let new_note = app.config.notes_dir.join(format!("{}.md", new_key));
+                                    let _ = std::fs::rename(&old_note, &new_note);
+                                }
+                                entry.bibtex_key = new_key.clone();
+                            }
+                            _ => {}
+                        }
+                    }
+                    entry.updated_at = Some(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+                }
+                save_db(&db, &db_path)?;
+
+                // Reload in-memory entries
+                app.entries = db.entries;
+                app.rebuild_collections();
+                app.apply_filters();
+
+                let applied = preview.selected.iter().filter(|s| **s).count();
+                app.mode = Mode::Message(format!("Updated {} field(s).", applied));
+            }
+            KeyCode::Esc => {
+                app.fetch_preview = None;
+                app.mode = Mode::Normal;
+            }
+            _ => {}
+        }
+    }
+    Ok(false)
 }
 
 fn run_loop(
@@ -2499,6 +2880,90 @@ fn run_loop(
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     app.bg_result = None;
                     app.mode = Mode::Message("Fetch failed: thread disconnected.".into());
+                }
+            }
+        }
+
+        // Poll metadata fetch result
+        if let Some(ref rx) = app.bg_meta_result {
+            match rx.try_recv() {
+                Ok(Ok((key, meta))) => {
+                    app.bg_meta_result = None;
+                    // Build FetchPreview from current entry vs fetched metadata
+                    if let Some(entry) = app.entries.iter().find(|e| e.bibtex_key == key) {
+                        let mut changes = vec![];
+                        let old_title = entry.title.clone().unwrap_or_default();
+                        let new_title = meta.title.clone().unwrap_or_default();
+                        changes.push(FieldChange {
+                            field: "Title".into(), old_val: old_title.clone(), new_val: new_title.clone(),
+                            changed: old_title != new_title,
+                        });
+                        let old_author = entry.author.join("; ");
+                        let new_author = meta.authors.join("; ");
+                        changes.push(FieldChange {
+                            field: "Author".into(), old_val: old_author.clone(), new_val: new_author.clone(),
+                            changed: old_author != new_author,
+                        });
+                        let old_year = entry.year.map(|y| y.to_string()).unwrap_or_default();
+                        let new_year = meta.year.map(|y| y.to_string()).unwrap_or_default();
+                        changes.push(FieldChange {
+                            field: "Year".into(), old_val: old_year.clone(), new_val: new_year.clone(),
+                            changed: old_year != new_year,
+                        });
+                        let old_journal = entry.journal.clone().unwrap_or_default();
+                        let new_journal = meta.journal.clone().unwrap_or_default();
+                        changes.push(FieldChange {
+                            field: "Journal".into(), old_val: old_journal.clone(), new_val: new_journal.clone(),
+                            changed: old_journal != new_journal,
+                        });
+                        let old_publisher = entry.publisher.clone().unwrap_or_default();
+                        let new_publisher = meta.publisher.clone().unwrap_or_default();
+                        changes.push(FieldChange {
+                            field: "Publisher".into(), old_val: old_publisher.clone(), new_val: new_publisher.clone(),
+                            changed: old_publisher != new_publisher,
+                        });
+                        let old_doi = entry.doi.clone().unwrap_or_default();
+                        let new_doi = meta.doi.clone();
+                        changes.push(FieldChange {
+                            field: "DOI".into(), old_val: old_doi.clone(), new_val: new_doi.clone(),
+                            changed: old_doi != new_doi,
+                        });
+                        // Citekey: generate from new data using config format
+                        let new_authors = meta.authors.clone();
+                        let new_key = crate::storage::generate_bibtex_key_fmt(
+                            &new_authors, meta.year,
+                            meta.title.as_deref().unwrap_or("unknown"),
+                            &app.config.citekey_format,
+                        );
+                        let new_key_unique = crate::storage::generate_unique_key_excluding(
+                            &app.entries.iter().map(|e| e.bibtex_key.as_str()).collect::<Vec<_>>(),
+                            &new_key, &key,
+                        );
+                        changes.push(FieldChange {
+                            field: "Citekey".into(), old_val: key.clone(), new_val: new_key_unique.clone(),
+                            changed: key != new_key_unique,
+                        });
+                        // Default: select changed fields
+                        let selected: Vec<bool> = changes.iter().map(|c| c.changed).collect();
+                        app.fetch_preview = Some(FetchPreviewState {
+                            key,
+                            changes,
+                            selected,
+                            index: 0,
+                        });
+                        app.mode = Mode::FetchPreview;
+                    } else {
+                        app.mode = Mode::Message("Entry not found in memory.".into());
+                    }
+                }
+                Ok(Err(e)) => {
+                    app.bg_meta_result = None;
+                    app.mode = Mode::Message(format!("Crossref fetch failed: {}", e));
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => { app.spinner_tick += 1; }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    app.bg_meta_result = None;
+                    app.mode = Mode::Message("Metadata fetch failed: thread disconnected.".into());
                 }
             }
         }

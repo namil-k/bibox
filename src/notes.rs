@@ -202,11 +202,13 @@ mod tests {
             booktitle: Some("NeurIPS 2024".to_string()),
             doi: Some("10.1234/test".to_string()),
             url: None,
+            abstract_text: None,
             tags: vec![],
             note: None,
             collections: vec![],
             file_path: None,
             created_at: "2024-01-01T00:00:00Z".to_string(),
+            updated_at: None,
         }
     }
 

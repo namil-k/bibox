@@ -78,7 +78,32 @@ pub fn generate_unique_key(db: &Database, base_key: &str) -> String {
     format!("{}_dup", base_key)
 }
 
+/// Generate a unique key against a list of existing keys, excluding one key (the entry being updated).
+pub fn generate_unique_key_excluding(existing: &[&str], base_key: &str, exclude: &str) -> String {
+    let exists = |k: &str| existing.iter().any(|e| *e == k && *e != exclude);
+    if !exists(base_key) {
+        return base_key.to_string();
+    }
+    for suffix in b'a'..=b'z' {
+        let candidate = format!("{}{}", base_key, suffix as char);
+        if !exists(&candidate) {
+            return candidate;
+        }
+    }
+    for i in 2..=99 {
+        let candidate = format!("{}{}", base_key, i);
+        if !exists(&candidate) {
+            return candidate;
+        }
+    }
+    format!("{}_dup", base_key)
+}
+
 pub fn generate_bibtex_key(authors: &[String], year: Option<u32>, title: &str) -> String {
+    generate_bibtex_key_fmt(authors, year, title, "{author}{year}{title}")
+}
+
+pub fn generate_bibtex_key_fmt(authors: &[String], year: Option<u32>, title: &str, fmt: &str) -> String {
     let last_name = authors
         .first()
         .and_then(|a| a.split(',').next())
@@ -109,7 +134,9 @@ pub fn generate_bibtex_key(authors: &[String], year: Option<u32>, title: &str) -
         .filter(|c| c.is_alphanumeric())
         .collect::<String>();
 
-    format!("{}{}{}", last_name, year_str, title_word)
+    fmt.replace("{author}", &last_name)
+        .replace("{year}", &year_str)
+        .replace("{title}", &title_word)
 }
 
 pub fn filter_entries<'a>(

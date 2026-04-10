@@ -48,6 +48,9 @@ pub struct Config {
     /// Export directory for other formats (yaml, ris, pdf) (default: ~/Downloads)
     #[serde(default = "default_export_dir")]
     pub export_dir: PathBuf,
+    /// Citekey format template. Variables: {author}, {year}, {title}
+    #[serde(default = "default_citekey_format")]
+    pub citekey_format: String,
     #[serde(skip)]
     pub msgs: Msgs,
 }
@@ -69,6 +72,7 @@ impl Default for Config {
             panel_ratio: default_panel_ratio(),
             bib_export_dir: default_bib_export_dir(),
             export_dir: default_export_dir(),
+            citekey_format: default_citekey_format(),
             msgs: Msgs::default(),
         }
     }
@@ -77,6 +81,17 @@ impl Default for Config {
 fn default_language() -> String {
     "en".to_string()
 }
+
+fn default_citekey_format() -> String {
+    "{author}{year}{title}".to_string()
+}
+
+pub const CITEKEY_PRESETS: &[&str] = &[
+    "{author}{year}{title}",
+    "{author}_{year}{title}",
+    "{author}_{title}_{year}",
+    "{author}{year}",
+];
 
 fn default_notes_dir() -> PathBuf {
     dirs::data_local_dir()
