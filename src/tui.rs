@@ -67,6 +67,7 @@ enum Mode {
     Settings,
     FilePicker(FilePickerContext),
     FetchPreview,
+    SearchResultPicker,
 }
 
 struct FieldChange {
@@ -74,6 +75,12 @@ struct FieldChange {
     old_val: String,
     new_val: String,
     changed: bool, // old != new
+}
+
+struct SearchResultPickerState {
+    key: String, // citekey of the entry being updated
+    results: Vec<crate::crossref::SearchResult>,
+    index: usize,
 }
 
 struct FetchPreviewState {
@@ -244,7 +251,9 @@ pub struct App {
     bg_result: Option<std::sync::mpsc::Receiver<Result<BgTaskResult>>>,
     bg_fetch_key: Option<String>,
     bg_meta_result: Option<std::sync::mpsc::Receiver<Result<(String, crate::crossref::Metadata)>>>,
+    bg_search_result: Option<std::sync::mpsc::Receiver<Result<(String, Vec<crate::crossref::SearchResult>)>>>,
     fetch_preview: Option<FetchPreviewState>,
+    search_picker: Option<SearchResultPickerState>,
     file_picker_state: Option<ratatree::FilePickerState>,
     spinner_tick: usize,
     // Sort
@@ -312,7 +321,9 @@ impl App {
             bg_result: None,
             bg_fetch_key: None,
             bg_meta_result: None,
+            bg_search_result: None,
             fetch_preview: None,
+            search_picker: None,
             file_picker_state: None,
             spinner_tick: 0,
             sort_by: SortCriterion::Created,
@@ -794,6 +805,11 @@ fn draw(f: &mut Frame, app: &mut App) {
         Mode::FetchPreview => {
             if let Some(ref state) = app.fetch_preview {
                 draw_fetch_preview(f, state, size);
+            }
+        }
+        Mode::SearchResultPicker => {
+            if let Some(ref state) = app.search_picker {
+                draw_search_result_picker(f, state, size);
             }
         }
         Mode::Message(msg) => {
@@ -1672,6 +1688,7 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
         Mode::Settings => handle_settings(app, key),
         Mode::FilePicker(_) => handle_file_picker(app, key),
         Mode::FetchPreview => handle_fetch_preview(app, key),
+        Mode::SearchResultPicker => handle_search_result_picker(app, key),
     }
 }
 
@@ -2097,17 +2114,10 @@ fn handle_confirm(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool
                     let key_clone = key.clone();
                     std::thread::spawn(move || {
                         let rt = tokio::runtime::Runtime::new().unwrap();
-                        let result = rt.block_on(async {
-                            let results = crate::crossref::search_by_title(&title, 1).await?;
-                            if let Some(first) = results.into_iter().next() {
-                                crate::crossref::fetch_metadata(&first.doi).await
-                            } else {
-                                anyhow::bail!("No results found on Crossref for this title")
-                            }
-                        });
-                        let _ = tx.send(result.map(|m| (key_clone, m)));
+                        let result = rt.block_on(crate::crossref::search_by_title(&title, 5));
+                        let _ = tx.send(result.map(|r| (key_clone, r)));
                     });
-                    app.bg_meta_result = Some(rx);
+                    app.bg_search_result = Some(rx);
                     app.spinner_tick = 0;
                     app.mode = Mode::Loading("Searching Crossref by title...".into());
                 }
@@ -2591,6 +2601,97 @@ pub fn run_tui(config: &Config) -> Result<()> {
     result
 }
 
+fn draw_search_result_picker(f: &mut Frame, state: &SearchResultPickerState, area: Rect) {
+    let popup_area = centered_rect(80, 50, area);
+    f.render_widget(Clear, popup_area);
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("Search results for [{}]:", state.key),
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
+
+    for (i, r) in state.results.iter().enumerate() {
+        let arrow = if i == state.index { "▶ " } else { "  " };
+        let style = if i == state.index { Style::default().fg(Color::Cyan) } else { Style::default() };
+
+        let author = if r.authors.is_empty() { "Unknown".into() } else {
+            let first = r.authors[0].split(',').next().unwrap_or(&r.authors[0]).trim().to_string();
+            if r.authors.len() > 1 { format!("{} et al.", first) } else { first }
+        };
+        let year = r.year.map(|y| y.to_string()).unwrap_or_default();
+
+        lines.push(Line::from(vec![
+            Span::styled(arrow, Style::default().fg(Color::Yellow)),
+            Span::styled(format!("{} ({}) ", author, year), style.add_modifier(Modifier::BOLD)),
+        ]));
+
+        // Title (truncate if needed)
+        let max_t = 60;
+        let title_display = if r.title.len() > max_t {
+            format!("    {}...", &r.title[..max_t])
+        } else {
+            format!("    {}", r.title)
+        };
+        lines.push(Line::from(Span::styled(title_display, style)));
+
+        // Venue
+        if let Some(ref v) = r.venue {
+            lines.push(Line::from(Span::styled(
+                format!("    {}", v), Style::default().fg(Color::DarkGray),
+            )));
+        }
+        lines.push(Line::from(""));
+    }
+
+    lines.push(Line::from(Span::styled(
+        "↑↓ navigate  Enter select  Esc cancel",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let popup = Paragraph::new(lines)
+        .block(Block::default().borders(Borders::ALL).title(" Select paper "));
+    f.render_widget(popup, popup_area);
+}
+
+fn handle_search_result_picker(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
+    let num = app.search_picker.as_ref().map(|s| s.results.len()).unwrap_or(0);
+    if let Some(ref mut state) = app.search_picker {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                if state.index > 0 { state.index -= 1; }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if state.index < num.saturating_sub(1) { state.index += 1; }
+            }
+            KeyCode::Enter => {
+                let selected = &state.results[state.index];
+                let doi = selected.doi.clone();
+                let entry_key = state.key.clone();
+                app.search_picker = None;
+                // Now fetch full metadata by DOI
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    let result = rt.block_on(crate::crossref::fetch_metadata(&doi));
+                    let _ = tx.send(result.map(|m| (entry_key, m)));
+                });
+                app.bg_meta_result = Some(rx);
+                app.spinner_tick = 0;
+                app.mode = Mode::Loading("Fetching metadata...".into());
+            }
+            KeyCode::Esc => {
+                app.search_picker = None;
+                app.mode = Mode::Normal;
+            }
+            _ => {}
+        }
+    }
+    Ok(false)
+}
+
 fn draw_fetch_preview(f: &mut Frame, state: &FetchPreviewState, area: Rect) {
     let popup_area = centered_rect(80, 60, area);
     f.render_widget(Clear, popup_area);
@@ -2964,6 +3065,34 @@ fn run_loop(
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     app.bg_meta_result = None;
                     app.mode = Mode::Message("Metadata fetch failed: thread disconnected.".into());
+                }
+            }
+        }
+
+        // Poll search results (title-based Crossref search)
+        if let Some(ref rx) = app.bg_search_result {
+            match rx.try_recv() {
+                Ok(Ok((key, results))) => {
+                    app.bg_search_result = None;
+                    if results.is_empty() {
+                        app.mode = Mode::Message("No results found on Crossref.".into());
+                    } else {
+                        app.search_picker = Some(SearchResultPickerState {
+                            key,
+                            results,
+                            index: 0,
+                        });
+                        app.mode = Mode::SearchResultPicker;
+                    }
+                }
+                Ok(Err(e)) => {
+                    app.bg_search_result = None;
+                    app.mode = Mode::Message(format!("Crossref search failed: {}", e));
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => { app.spinner_tick += 1; }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    app.bg_search_result = None;
+                    app.mode = Mode::Message("Search failed: thread disconnected.".into());
                 }
             }
         }

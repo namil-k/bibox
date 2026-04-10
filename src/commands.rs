@@ -3454,7 +3454,22 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
         }
     }
 
-    // ── 2. Duplicate citekeys ────────────────────────────────────────────────
+    // ── 2. Invalid citekey characters (non-ASCII, special chars) ───────────
+    let mut bad_key_keys: Vec<String> = Vec::new();
+    for e in &good_entries {
+        let has_bad = e.bibtex_key.chars().any(|c| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'));
+        if has_bad {
+            bad_key_keys.push(e.bibtex_key.clone());
+            issues.push(Issue {
+                kind: "bad_citekey".into(),
+                key: Some(e.bibtex_key.clone()),
+                detail: format!("Citekey contains non-ASCII or special chars"),
+                fixable: true,
+            });
+        }
+    }
+
+    // ── 3. Duplicate citekeys ────────────────────────────────────────────────
     let mut seen_keys: HashSet<String> = HashSet::new();
     let mut dup_keys: HashSet<String> = HashSet::new();
     for e in &good_entries {
@@ -3471,7 +3486,7 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
         });
     }
 
-    // ── 3. Missing file (file_path set but not on disk) ──────────────────────
+    // ── 4. Missing file (file_path set but not on disk) ──────────────────────
     let mut missing_pdf_keys: Vec<String> = Vec::new();
     for e in &good_entries {
         if let Some(fp) = &e.file_path {
@@ -3640,6 +3655,7 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
     // Checks summary
     let checks: &[(&str, &str, &str)] = &[
         ("malformed_entry", "All entries parseable",         "malformed entries"),
+        ("bad_citekey",     "All citekeys are clean ASCII",  "citekeys with bad chars"),
         ("duplicate_key",   "No duplicate citekeys",         "duplicate citekeys"),
         ("missing_pdf",     "All registered PDFs on disk",   "missing PDF files"),
         ("orphaned_pdf",    "No orphaned PDFs",              "orphaned PDFs"),
@@ -3670,13 +3686,14 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
     }
 
     // Detail sections for each issue kind that has problems
-    let kinds = ["malformed_entry", "duplicate_key", "missing_pdf", "orphaned_pdf",
+    let kinds = ["malformed_entry", "bad_citekey", "duplicate_key", "missing_pdf", "orphaned_pdf",
                   "missing_title", "dirty_title", "latex_escape", "orphaned_note"];
     for kind in &kinds {
         let group: Vec<&Issue> = issues.iter().filter(|i| i.kind == *kind).collect();
         if group.is_empty() { continue; }
         let (label, fix_hint) = match *kind {
             "malformed_entry" => ("Malformed entries",       "Manual repair needed"),
+            "bad_citekey"     => ("Bad citekey chars",        "--fix sanitizes to ASCII"),
             "duplicate_key"   => ("Duplicate citekeys",      "Use `bibox edit` to rename"),
             "missing_pdf"     => ("Missing PDFs",            "--fix clears file_path"),
             "orphaned_pdf"    => ("Orphaned PDFs",           "--fix deletes files"),
@@ -3736,6 +3753,38 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
 
         let mut fixed = 0;
         let mut db = crate::storage::load_db(&db_path)?;
+
+        // Sanitize bad citekeys (two-pass to avoid borrow conflict)
+        if !bad_key_keys.is_empty() {
+            // Pass 1: compute new keys
+            let renames: Vec<(String, String)> = bad_key_keys.iter().map(|old_key| {
+                let clean: String = old_key.chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+                    .collect();
+                let new_key = crate::storage::generate_unique_key(&db, &clean);
+                (old_key.clone(), new_key)
+            }).collect();
+            // Pass 2: apply
+            for (old_key, new_key) in &renames {
+                if let Some(e) = db.entries.iter_mut().find(|e| &e.bibtex_key == old_key) {
+                    if let Some(ref fp) = e.file_path {
+                        let old_path = bibox_dir.join(fp);
+                        let new_fp = format!("{}.pdf", new_key);
+                        let new_path = bibox_dir.join(&new_fp);
+                        if old_path.exists() { let _ = std::fs::rename(&old_path, &new_path); }
+                        e.file_path = Some(new_fp);
+                    }
+                    let old_note = notes_dir.join(format!("{}.md", old_key));
+                    if old_note.exists() {
+                        let new_note = notes_dir.join(format!("{}.md", new_key));
+                        let _ = std::fs::rename(&old_note, &new_note);
+                    }
+                    println!("    OK    {} -> {}", old_key, new_key);
+                    e.bibtex_key = new_key.clone();
+                    fixed += 1;
+                }
+            }
+        }
 
         // Clear missing file_path references
         if !missing_pdf_keys.is_empty() {

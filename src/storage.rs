@@ -134,9 +134,13 @@ pub fn generate_bibtex_key_fmt(authors: &[String], year: Option<u32>, title: &st
         .filter(|c| c.is_alphanumeric())
         .collect::<String>();
 
-    fmt.replace("{author}", &last_name)
+    let raw = fmt.replace("{author}", &last_name)
         .replace("{year}", &year_str)
-        .replace("{title}", &title_word)
+        .replace("{title}", &title_word);
+    // Sanitize: only allow ASCII alphanumeric, underscore, hyphen
+    raw.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .collect()
 }
 
 pub fn filter_entries<'a>(
