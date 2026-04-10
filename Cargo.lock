@@ -157,6 +157,7 @@ dependencies = [
  "crossterm",
  "dirs",
  "pulldown-cmark",
+ "ratatree",
  "ratatui",
  "regex",
  "reqwest",
@@ -1793,7 +1794,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.60.2",
 ]
 
 [[package]]
@@ -1853,6 +1854,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
 dependencies = [
  "getrandom 0.3.4",
+]
+
+[[package]]
+name = "ratatree"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7fb2be7ab36675fba700133e1bb0750a9a736700e94c0104ca4aa038019d64b"
+dependencies = [
+ "crossterm",
+ "dirs",
+ "ratatui",
 ]
 
 [[package]]

@@ -65,6 +65,7 @@ enum Mode {
     Loading(String),
     ExportMenu,
     Settings,
+    FilePicker(FilePickerContext),
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -111,6 +112,13 @@ enum ConfirmAction {
     Delete(String),
     FetchPdf(String),
     OpenBrowser(String, String), // (citekey, url)
+}
+
+enum FilePickerContext {
+    AttachPdf(String),  // citekey
+    BibExportDir,
+    ExportDir,
+    Home,
 }
 
 struct BgTaskResult {
@@ -216,6 +224,7 @@ pub struct App {
     pending_editor: Option<std::path::PathBuf>,
     bg_result: Option<std::sync::mpsc::Receiver<Result<BgTaskResult>>>,
     bg_fetch_key: Option<String>,
+    file_picker_state: Option<ratatree::FilePickerState>,
     spinner_tick: usize,
     // Sort
     sort_by: SortCriterion,
@@ -278,6 +287,7 @@ impl App {
             pending_editor: None,
             bg_result: None,
             bg_fetch_key: None,
+            file_picker_state: None,
             spinner_tick: 0,
             sort_by: SortCriterion::Created,
             sort_ascending: false,
@@ -621,6 +631,14 @@ fn draw(f: &mut Frame, app: &mut App) {
     draw_entries_panel(f, app, panels[1]);
     draw_preview_panel(f, app, panels[2]);
     draw_status_bar(f, app, outer[1]);
+
+    // File picker takes over full screen
+    if let Mode::FilePicker(_) = &app.mode {
+        if let Some(picker_state) = &mut app.file_picker_state {
+            f.render_stateful_widget(ratatree::FilePicker::default(), size, picker_state);
+        }
+        return;
+    }
 
     // Overlays
     match &app.mode {
@@ -1494,6 +1512,7 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
         Mode::TagEditor => handle_picker(app, key, true),
         Mode::ExportMenu => handle_export_menu(app, key),
         Mode::Settings => handle_settings(app, key),
+        Mode::FilePicker(_) => handle_file_picker(app, key),
     }
 }
 
@@ -1778,6 +1797,24 @@ fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
         KeyCode::Char('t') => {
             if app.selected_entry().is_some() { app.open_tag_editor(); }
             else { app.mode = Mode::Message("No entry selected.".into()); }
+        }
+
+        // Attach PDF
+        KeyCode::Char('A') => {
+            if let Some(entry) = app.selected_entry() {
+                let key = entry.bibtex_key.clone();
+                let start = dirs::download_dir()
+                    .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")));
+                app.file_picker_state = Some(
+                    ratatree::FilePickerState::builder()
+                        .start_dir(start)
+                        .mode(ratatree::PickerMode::FilesOnly)
+                        .build()
+                );
+                app.mode = Mode::FilePicker(FilePickerContext::AttachPdf(key));
+            } else {
+                app.mode = Mode::Message("No entry selected.".into());
+            }
         }
 
         // Settings
@@ -2099,7 +2136,39 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
             }
         }
         KeyCode::Enter => {
-            if app.settings_idx == 5 {
+            // Dir picker for path settings (2=bib_export_dir, 3=export_dir, 4=home)
+            if app.settings_idx == 2 {
+                let start = app.config.bib_export_dir.clone();
+                app.file_picker_state = Some(
+                    ratatree::FilePickerState::builder()
+                        .start_dir(start)
+                        .mode(ratatree::PickerMode::DirsOnly)
+                        .build()
+                );
+                app.mode = Mode::FilePicker(FilePickerContext::BibExportDir);
+                return Ok(false);
+            } else if app.settings_idx == 3 {
+                let start = app.config.export_dir.clone();
+                app.file_picker_state = Some(
+                    ratatree::FilePickerState::builder()
+                        .start_dir(start)
+                        .mode(ratatree::PickerMode::DirsOnly)
+                        .build()
+                );
+                app.mode = Mode::FilePicker(FilePickerContext::ExportDir);
+                return Ok(false);
+            } else if app.settings_idx == 4 {
+                let start = app.config.home.clone()
+                    .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")));
+                app.file_picker_state = Some(
+                    ratatree::FilePickerState::builder()
+                        .start_dir(start)
+                        .mode(ratatree::PickerMode::DirsOnly)
+                        .build()
+                );
+                app.mode = Mode::FilePicker(FilePickerContext::Home);
+                return Ok(false);
+            } else if app.settings_idx == 5 {
                 if let Some(ref home) = app.config.home {
                     let home = crate::config::expand_tilde(home);
                     if !app.git_status_checked {
@@ -2172,6 +2241,67 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
                 app.config.bib_export_dir = cfg.bib_export_dir;
                 app.config.export_dir = cfg.export_dir;
             }
+            app.mode = Mode::Normal;
+        }
+        _ => {}
+    }
+    Ok(false)
+}
+
+fn handle_file_picker(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
+    if let Some(picker_state) = &mut app.file_picker_state {
+        picker_state.handle_event(crossterm::event::Event::Key(key));
+    }
+
+    let result = app.file_picker_state.as_ref().map(|s| s.result());
+    match result {
+        Some(ratatree::PickerResult::Selected(paths)) => {
+            let path = paths.into_iter().next();
+            let mode = std::mem::replace(&mut app.mode, Mode::Normal);
+            app.file_picker_state = None;
+            if let (Some(path), Mode::FilePicker(ctx)) = (path, mode) {
+                match ctx {
+                    FilePickerContext::AttachPdf(key) => {
+                        let db_path = crate::config::resolve_db_path(&app.config);
+                        let bibox_dir = app.config.bibox_dir.clone();
+                        match (|| -> anyhow::Result<String> {
+                            let mut db = load_db(&db_path)?;
+                            let entry = find_by_key_mut(&mut db, &key)
+                                .ok_or_else(|| anyhow::anyhow!("Entry not found"))?;
+                            let filename = format!("{}.pdf", entry.bibtex_key);
+                            std::fs::create_dir_all(&bibox_dir)?;
+                            let dest = bibox_dir.join(&filename);
+                            std::fs::copy(&path, &dest)?;
+                            entry.file_path = Some(filename.clone());
+                            save_db(&db, &db_path)?;
+                            Ok(dest.to_string_lossy().to_string())
+                        })() {
+                            Ok(dest) => {
+                                if let Some(e) = app.entries.iter_mut().find(|e| e.bibtex_key == key) {
+                                    e.file_path = Some(path.file_name().unwrap_or_default().to_string_lossy().to_string());
+                                }
+                                app.mode = Mode::Message(format!("PDF attached: {}", dest));
+                            }
+                            Err(e) => { app.mode = Mode::Message(format!("Attach failed: {}", e)); }
+                        }
+                    }
+                    FilePickerContext::BibExportDir => {
+                        app.config.bib_export_dir = path;
+                    }
+                    FilePickerContext::ExportDir => {
+                        app.config.export_dir = path;
+                    }
+                    FilePickerContext::Home => {
+                        app.config.home = Some(path.clone());
+                        let expanded = crate::config::expand_tilde(&path);
+                        app.config.bibox_dir = expanded.join("pdfs");
+                        app.config.notes_dir = expanded.join("notes");
+                    }
+                }
+            }
+        }
+        Some(ratatree::PickerResult::Cancelled) => {
+            app.file_picker_state = None;
             app.mode = Mode::Normal;
         }
         _ => {}
