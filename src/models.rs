@@ -65,6 +65,8 @@ pub struct Entry {
     pub collections: Vec<String>,
     pub file_path: Option<String>,
     pub created_at: String,
+    #[serde(default)]
+    pub updated_at: Option<String>,
 }
 
 impl Entry {

@@ -132,6 +132,7 @@ pub async fn fetch_by_isbn(isbn: &str, db: &Database) -> Result<Entry> {
         collections: vec![],
         file_path: None,
         created_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        updated_at: None,
     };
 
     Ok(entry)

@@ -133,6 +133,7 @@ enum SortCriterion {
     Author,
     Title,
     Created,
+    Updated,
 }
 
 impl SortCriterion {
@@ -142,6 +143,7 @@ impl SortCriterion {
             SortCriterion::Author => "Author",
             SortCriterion::Title => "Title",
             SortCriterion::Created => "Created",
+            SortCriterion::Updated => "Updated",
         }
     }
     fn default_ascending(&self) -> bool {
@@ -150,10 +152,11 @@ impl SortCriterion {
             SortCriterion::Author => true,
             SortCriterion::Title => true,
             SortCriterion::Created => false,
+            SortCriterion::Updated => false,
         }
     }
-    fn all() -> [SortCriterion; 4] {
-        [SortCriterion::Year, SortCriterion::Author, SortCriterion::Title, SortCriterion::Created]
+    fn all() -> [SortCriterion; 5] {
+        [SortCriterion::Year, SortCriterion::Author, SortCriterion::Title, SortCriterion::Created, SortCriterion::Updated]
     }
 }
 
@@ -390,6 +393,13 @@ impl App {
                 }
                 SortCriterion::Created => {
                     let c = ea.created_at.cmp(&eb.created_at);
+                    if ascending { c } else { c.reverse() }
+                }
+                SortCriterion::Updated => {
+                    // Fall back to created_at when updated_at is None
+                    let a_ts = ea.updated_at.as_deref().unwrap_or(&ea.created_at);
+                    let b_ts = eb.updated_at.as_deref().unwrap_or(&eb.created_at);
+                    let c = a_ts.cmp(b_ts);
                     if ascending { c } else { c.reverse() }
                 }
             }

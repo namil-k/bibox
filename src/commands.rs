@@ -230,6 +230,7 @@ pub async fn cmd_add(
                     collections: collection.map(|c| vec![c]).unwrap_or_default(),
                     file_path: None,
                     created_at: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                    updated_at: None,
                 };
 
                 if json {
@@ -445,6 +446,7 @@ pub async fn cmd_add(
                 collections: vec![],
                 file_path: None,
                 created_at: String::new(),
+                updated_at: None,
             };
             format!("{}.pdf", entry_to_filename(&tmp_entry))
         } else {
@@ -523,6 +525,7 @@ pub async fn cmd_add(
         collections,
         file_path,
         created_at: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        updated_at: None,
     };
 
     if json {
@@ -898,6 +901,7 @@ pub async fn cmd_edit(
     }
 
     let key = entry.bibtex_key.clone();
+    entry.updated_at = Some(Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
     save_db(&db, &db_path)?;
     if config.git {
         git::auto_commit(&db_path, &format!("bibox: edit {}", key))?;
@@ -967,6 +971,9 @@ pub fn cmd_collect(id_or_key: String, collections: Vec<String>, config: &Config)
     }
 
     let key = entry.bibtex_key.clone();
+    if !added.is_empty() {
+        entry.updated_at = Some(Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+    }
     save_db(&db, &db_path)?;
 
     if !added.is_empty() {
@@ -995,6 +1002,7 @@ pub fn cmd_uncollect(id_or_key: String, collection: String, config: &Config) -> 
     }
 
     entry.collections.retain(|c| c != &collection);
+    entry.updated_at = Some(Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
     let key = entry.bibtex_key.clone();
     save_db(&db, &db_path)?;
     println!("{}", config.msgs.uncollected(&key, &collection));
@@ -1119,6 +1127,7 @@ pub fn cmd_import(file: PathBuf, to: Option<String>, config: &Config) -> Result<
             collections,
             file_path: None,
             created_at: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            updated_at: None,
         };
 
         db.entries.push(entry);
@@ -1835,6 +1844,7 @@ pub fn cmd_sync(yes: bool, json: bool, config: &Config) -> Result<()> {
                 collections: vec![],
                 file_path: Some(fp.clone()),
                 created_at: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                updated_at: None,
             };
 
             println!("{}", config.msgs.sync_entry_added(&key));
@@ -1874,7 +1884,7 @@ pub fn cmd_note(
     config: &Config,
 ) -> Result<()> {
     let db_path = db_path_from_config(config);
-    let db = load_db(&db_path)?;
+    let mut db = load_db(&db_path)?;
 
     let entry = find_by_key(&db, &id_or_key)
         .with_context(|| config.msgs.entry_not_found(&id_or_key))?
@@ -1976,6 +1986,10 @@ pub fn cmd_note(
             std::fs::write(&note_path, &result)?;
             println!("{}", config.msgs.note_appended(&note_path.display().to_string()));
         }
+        if let Some(e) = find_by_key_mut(&mut db, &entry.bibtex_key) {
+            e.updated_at = Some(Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+            let _ = save_db(&db, &db_path);
+        }
         return Ok(());
     }
 
@@ -1998,6 +2012,10 @@ pub fn cmd_note(
         .status()
         .with_context(|| format!("Failed to launch editor '{}'", editor))?;
 
+    if let Some(e) = find_by_key_mut(&mut db, &entry.bibtex_key) {
+        e.updated_at = Some(Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+        let _ = save_db(&db, &db_path);
+    }
     println!("{}", config.msgs.note_saved(&note_path.display().to_string()));
     Ok(())
 }
@@ -2159,6 +2177,7 @@ pub fn cmd_modify(
                 _ => {}
             }
         }
+        entry.updated_at = Some(Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
         modified += 1;
     }
 
@@ -2357,6 +2376,7 @@ pub fn cmd_review(
                 let entry = &mut db.entries[db_idx];
                 if !entry.tags.contains(&"reviewed".to_string()) {
                     entry.tags.push("reviewed".to_string());
+                    entry.updated_at = Some(Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
                     reviewed_count += 1;
                 }
                 save_db(&db, &db_path)?;
