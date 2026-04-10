@@ -100,6 +100,12 @@ Search by title on Crossref:
 bibox add --search "attention is all you need"
 ```
 
+Add a web page, product, or any non-paper reference as misc:
+
+```bash
+bibox add --title "Varjo Aero" --url https://varjo.com/products/aero/ --author "Varjo" --year 2024
+```
+
 Launch TUI:
 
 ```bash
@@ -147,7 +153,7 @@ bibox
 | `Ctrl+y` | Redo |
 | `,` | Settings (line numbers, panel ratio, citekey format, export dirs, git sync) |
 | `?` | Help |
-| `q` | Quit |
+| `q`/`Esc` | Quit |
 
 ## CLI
 

@@ -3111,6 +3111,12 @@ bibox add --search "attention is all you need" --index 0 --json
 
 # Add to a collection on import
 bibox add --doi 10.xxx --to ml --json
+
+# Web page / product / non-paper reference (misc entry)
+bibox add --title "Varjo Aero" --url https://varjo.com/products/aero/ --author "Varjo" --year 2024 --json
+
+# Minimal misc entry (title only)
+bibox add --title "Some Web Resource" --json
 ```
 
 ## Querying
