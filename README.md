@@ -115,7 +115,8 @@ bibox
 | `V` | Select/deselect all |
 | `/` | Search (entries or collections, based on focus) |
 | `s` | Sort menu |
-| `o` | Open PDF (or fetch from web) |
+| `o` | Open PDF (or fetch from web; re-fetches if file missing; opens browser on 403) |
+| `A` | Attach a local PDF via file picker (copies and renames to citekey.pdf) |
 | `w` | Open paper web page in browser |
 | `e` | Export menu (selected / collection / all) |
 | `y` | Copy citekey to clipboard |
@@ -221,6 +222,20 @@ bibox modify year=2025 --filter "collection:ml" --yes
 
 ```bash
 bibox delete kim2025rust
+```
+
+**Attach a PDF manually (when auto-fetch fails):**
+
+```bash
+bibox edit kim2025rust --attach-pdf ~/Downloads/paper.pdf
+```
+
+**Diagnose and repair database issues:**
+
+```bash
+bibox doctor            # Detect malformed entries, missing PDFs, orphaned notes
+bibox doctor --fix      # Auto-repair fixable issues
+bibox doctor --json     # Machine-readable output
 ```
 
 **Config:**

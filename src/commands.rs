@@ -2987,6 +2987,15 @@ bibox modify year=2025 --filter "collection:ml" --yes
 bibox modify journal="Nature" --filter "tag:review" --yes
 ```
 
+## Attaching PDFs
+
+```bash
+# Attach a local PDF to an existing entry (copies to bibox pdf dir, renames to citekey.pdf)
+bibox edit <key> --attach-pdf /path/to/paper.pdf
+```
+
+Useful when automatic fetch fails (403, paywalled). Download the PDF manually in a browser, then attach it.
+
 ## Deleting Entries
 
 ```bash
@@ -3084,12 +3093,32 @@ cd <bibox-home> && git add . && git commit -m "add vaswani2017attention" && git 
 | `--yes` / `-y` | Skip confirmation prompts |
 | `--template <name>` | Initialize note from template |
 
+## Diagnostics
+
+```bash
+# Check for issues (malformed entries, missing PDFs, duplicates, orphaned notes)
+bibox doctor --json
+
+# Auto-repair fixable issues (clears missing file_path refs, deletes orphaned PDFs)
+bibox doctor --fix
+```
+
+Issue types:
+- `malformed_entry` — DB entry that cannot be parsed (manual fix required)
+- `duplicate_key` — Two entries share the same citekey
+- `missing_pdf` — file_path is set but the PDF file is gone [fixable]
+- `orphaned_pdf` — PDF on disk not linked to any entry [fixable]
+- `missing_title` — Entry has no title
+- `orphaned_note` — Note file with no matching entry
+- `invalid_json` — db.json is not valid JSON (e.g. git merge conflict markers)
+
 ## Tips
 
 - Run `bibox config --json` to get all paths (home, db, pdfs, notes, config.toml location).
 - The home path is the git-syncable directory. Get it from `bibox config --json` → `home` field.
 - All `--json` output goes to stdout. Errors go to stderr.
 - When a command fails, the exit code is non-zero.
+- If db.json is corrupted or has git merge conflicts, run `bibox doctor` for a diagnosis.
 "##;
 
 pub fn cmd_config(json: bool, config: &Config) -> Result<()> {
