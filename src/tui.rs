@@ -2405,12 +2405,24 @@ fn run_loop(
                     match result {
                         Ok(msg) => {
                             let db_path = crate::config::resolve_db_path(&app.config);
-                            if let Ok(db) = load_db(&db_path) {
+                            // Check for merge conflict markers before reloading
+                            let has_conflicts = std::fs::read_to_string(&db_path)
+                                .map(|s| s.contains("<<<<<<<"))
+                                .unwrap_or(false);
+                            if has_conflicts {
+                                app.mode = Mode::Message(
+                                    "Sync done but db.json has merge conflicts! Run `bibox doctor` to inspect.".into()
+                                );
+                            } else if let Ok(db) = load_db(&db_path) {
                                 app.entries = db.entries;
                                 app.rebuild_collections();
                                 app.apply_filters();
+                                app.mode = Mode::Message(msg);
+                            } else {
+                                app.mode = Mode::Message(
+                                    "Sync done but db.json could not be loaded. Run `bibox doctor`.".into()
+                                );
                             }
-                            app.mode = Mode::Message(msg);
                         }
                         Err(e) => { app.mode = Mode::Message(format!("Sync failed: {}", e)); }
                     }

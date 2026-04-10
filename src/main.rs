@@ -493,6 +493,30 @@ Examples:
         check: bool,
     },
 
+    /// Diagnose and optionally repair issues in the database and file system
+    #[command(after_long_help = "\
+Issues detected:
+  malformed_entry  - DB entry that cannot be parsed (manual fix required)
+  duplicate_key    - Two entries share the same citekey
+  missing_pdf      - file_path is set but the PDF file is gone  [fixable]
+  orphaned_pdf     - PDF on disk not linked to any entry        [fixable]
+  missing_title    - Entry has no title
+  orphaned_note    - Note file with no matching entry
+
+Examples:
+  bibox doctor            # diagnose only
+  bibox doctor --fix      # auto-repair fixable issues
+  bibox doctor --json     # output as JSON")]
+    Doctor {
+        /// Auto-repair fixable issues (missing file_path refs, orphaned PDFs)
+        #[arg(long)]
+        fix: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Manage note templates (list, show, create, edit, delete, export built-ins)
     Template {
         #[command(subcommand)]
@@ -729,6 +753,10 @@ async fn main() -> Result<()> {
 
         Some(Commands::Update { check }) => {
             commands::cmd_update(check)?;
+        }
+
+        Some(Commands::Doctor { fix, json }) => {
+            commands::cmd_doctor(fix, json, &config)?;
         }
 
         Some(Commands::Template { action }) => {

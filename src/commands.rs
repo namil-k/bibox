@@ -3202,6 +3202,259 @@ pub fn cmd_update(check_only: bool) -> Result<()> {
     Ok(())
 }
 
+pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
+    use std::collections::HashSet;
+
+    let db_path = crate::config::resolve_db_path(config);
+    let bibox_dir = &config.bibox_dir;
+    let notes_dir = &config.notes_dir;
+
+    // ── Issue types ──────────────────────────────────────────────────────────
+
+    #[derive(serde::Serialize)]
+    struct Issue {
+        kind: String,
+        key: Option<String>,
+        detail: String,
+        fixable: bool,
+    }
+
+    let mut issues: Vec<Issue> = Vec::new();
+
+    // ── 1. Raw DB parse - find malformed entries ─────────────────────────────
+    let raw_entries: Vec<serde_json::Value> = if db_path.exists() {
+        let content = std::fs::read_to_string(&db_path)?;
+        match serde_json::from_str::<serde_json::Value>(&content) {
+            Err(e) => {
+                // The whole file is invalid JSON - report and stop entry-level checks
+                issues.push(Issue {
+                    kind: "invalid_json".into(),
+                    key: None,
+                    detail: format!("db.json is not valid JSON at line {} col {}: {}",
+                        e.line(), e.column(), e),
+                    fixable: false,
+                });
+                if json {
+                    let result = serde_json::json!({
+                        "total_entries": 0,
+                        "issues": issues,
+                        "issue_count": issues.len(),
+                    });
+                    println!("{}", serde_json::to_string_pretty(&result)?);
+                } else {
+                    println!("bibox doctor  (db: {})", db_path.display());
+                    println!();
+                    println!("CRITICAL: db.json is not valid JSON.");
+                    println!("  at line {} col {}: {}", e.line(), e.column(), e);
+                    println!();
+                    println!("Manual repair required. Open the file in a text editor:");
+                    println!("  {}", db_path.display());
+                }
+                return Ok(());
+            }
+            Ok(raw) => raw.get("entries")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default(),
+        }
+    } else {
+        vec![]
+    };
+
+    let mut good_entries: Vec<crate::models::Entry> = Vec::new();
+    let mut malformed_indices: Vec<usize> = Vec::new();
+    for (i, val) in raw_entries.iter().enumerate() {
+        match serde_json::from_value::<crate::models::Entry>(val.clone()) {
+            Ok(e) => good_entries.push(e),
+            Err(e) => {
+                malformed_indices.push(i);
+                let key_hint = val.get("bibtex_key").and_then(|v| v.as_str()).unwrap_or("?");
+                issues.push(Issue {
+                    kind: "malformed_entry".into(),
+                    key: Some(key_hint.to_string()),
+                    detail: format!("Entry at index {} cannot be parsed: {}", i, e),
+                    fixable: false,
+                });
+            }
+        }
+    }
+
+    // ── 2. Duplicate citekeys ────────────────────────────────────────────────
+    let mut seen_keys: HashSet<String> = HashSet::new();
+    let mut dup_keys: HashSet<String> = HashSet::new();
+    for e in &good_entries {
+        if !seen_keys.insert(e.bibtex_key.clone()) {
+            dup_keys.insert(e.bibtex_key.clone());
+        }
+    }
+    for key in &dup_keys {
+        issues.push(Issue {
+            kind: "duplicate_key".into(),
+            key: Some(key.clone()),
+            detail: format!("Duplicate citekey '{}' - use `bibox edit` to rename one", key),
+            fixable: false,
+        });
+    }
+
+    // ── 3. Missing file (file_path set but not on disk) ──────────────────────
+    let mut missing_pdf_keys: Vec<String> = Vec::new();
+    for e in &good_entries {
+        if let Some(fp) = &e.file_path {
+            let full = bibox_dir.join(fp);
+            if !full.exists() {
+                missing_pdf_keys.push(e.bibtex_key.clone());
+                issues.push(Issue {
+                    kind: "missing_pdf".into(),
+                    key: Some(e.bibtex_key.clone()),
+                    detail: format!("file_path '{}' is registered but file does not exist", fp),
+                    fixable: true,
+                });
+            }
+        }
+    }
+
+    // ── 4. Orphaned PDFs (files in bibox_dir not referenced by any entry) ────
+    let registered_files: HashSet<String> = good_entries.iter()
+        .filter_map(|e| e.file_path.clone())
+        .collect();
+
+    let mut orphaned_pdfs: Vec<std::path::PathBuf> = Vec::new();
+    if bibox_dir.exists() {
+        for entry in std::fs::read_dir(bibox_dir)?.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("pdf") {
+                let fname = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                if !registered_files.contains(&fname) {
+                    orphaned_pdfs.push(path.clone());
+                    issues.push(Issue {
+                        kind: "orphaned_pdf".into(),
+                        key: None,
+                        detail: format!("PDF '{}' is not linked to any entry", fname),
+                        fixable: true,
+                    });
+                }
+            }
+        }
+    }
+
+    // ── 5. Missing title ─────────────────────────────────────────────────────
+    for e in &good_entries {
+        if e.title.as_deref().unwrap_or("").trim().is_empty() {
+            issues.push(Issue {
+                kind: "missing_title".into(),
+                key: Some(e.bibtex_key.clone()),
+                detail: "Entry has no title".into(),
+                fixable: false,
+            });
+        }
+    }
+
+    // ── 6. Orphaned notes (notes with no matching entry) ─────────────────────
+    let entry_keys: HashSet<String> = good_entries.iter().map(|e| e.bibtex_key.clone()).collect();
+    if notes_dir.exists() {
+        for f in std::fs::read_dir(notes_dir)?.flatten() {
+            let path = f.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("md") {
+                let stem = path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+                if !entry_keys.contains(&stem) {
+                    issues.push(Issue {
+                        kind: "orphaned_note".into(),
+                        key: Some(stem.clone()),
+                        detail: format!("Note '{}.md' has no matching DB entry", stem),
+                        fixable: false,
+                    });
+                }
+            }
+        }
+    }
+
+    // ── Output ───────────────────────────────────────────────────────────────
+    if json {
+        let result = serde_json::json!({
+            "total_entries": good_entries.len() + malformed_indices.len(),
+            "issues": issues,
+            "issue_count": issues.len(),
+        });
+        println!("{}", serde_json::to_string_pretty(&result)?);
+        return Ok(());
+    }
+
+    println!("bibox doctor  (db: {})", db_path.display());
+    println!("Total entries in DB: {}", good_entries.len() + malformed_indices.len());
+    println!();
+
+    if issues.is_empty() {
+        println!("No issues found.");
+        return Ok(());
+    }
+
+    // Group by kind for display
+    let kinds = ["malformed_entry", "duplicate_key", "missing_pdf", "orphaned_pdf",
+                  "missing_title", "orphaned_note"];
+    for kind in &kinds {
+        let group: Vec<&Issue> = issues.iter().filter(|i| i.kind == *kind).collect();
+        if group.is_empty() { continue; }
+        let label = match *kind {
+            "malformed_entry" => "Malformed entries (cannot parse)",
+            "duplicate_key"   => "Duplicate citekeys",
+            "missing_pdf"     => "Missing PDF files (registered but not on disk)",
+            "orphaned_pdf"    => "Orphaned PDFs (on disk but not in DB)",
+            "missing_title"   => "Entries with no title",
+            "orphaned_note"   => "Orphaned notes (no matching entry)",
+            _                 => kind,
+        };
+        println!("[{}] {} ({})", if group.iter().any(|i| i.fixable) { "fixable" } else { "manual" }, label, group.len());
+        for issue in &group {
+            let key_str = issue.key.as_deref().unwrap_or("-");
+            println!("  - [{}] {}", key_str, issue.detail);
+        }
+        println!();
+    }
+
+    let fixable_count = issues.iter().filter(|i| i.fixable).count();
+    if fixable_count > 0 && !fix {
+        println!("{} fixable issue(s) found. Run `bibox doctor --fix` to repair.", fixable_count);
+    }
+
+    // ── Fix ──────────────────────────────────────────────────────────────────
+    if fix {
+        let mut fixed = 0;
+
+        // Clear missing file_path references
+        if !missing_pdf_keys.is_empty() {
+            let mut db = crate::storage::load_db(&db_path)?;
+            for e in db.entries.iter_mut() {
+                if missing_pdf_keys.contains(&e.bibtex_key) {
+                    e.file_path = None;
+                    fixed += 1;
+                }
+            }
+            crate::storage::save_db(&db, &db_path)?;
+            println!("Fixed: cleared {} missing file_path reference(s).", missing_pdf_keys.len());
+        }
+
+        // Delete orphaned PDFs
+        if !orphaned_pdfs.is_empty() {
+            for path in &orphaned_pdfs {
+                if let Err(e) = std::fs::remove_file(path) {
+                    eprintln!("Could not delete {}: {}", path.display(), e);
+                } else {
+                    fixed += 1;
+                    println!("Deleted orphaned PDF: {}", path.display());
+                }
+            }
+        }
+
+        if fixed > 0 {
+            println!("\n{} issue(s) fixed.", fixed);
+        } else {
+            println!("Nothing to fix automatically.");
+        }
+    }
+
+    Ok(())
+}
+
 pub fn cmd_agent_guide(json: bool) -> Result<()> {
     if json {
         let result = serde_json::json!({
