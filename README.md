@@ -1,5 +1,9 @@
 # bibox
 
+<p align="center">
+  <img src="assets/bbox_bass.png" alt="bibox" width="320">
+</p>
+
 [![Crates.io](https://img.shields.io/crates/v/bibox)](https://crates.io/crates/bibox)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -367,13 +371,6 @@ bibox sync --yes --json
 | `--section "Name"` | Target a specific `## Heading` in a note |
 | `--yes` / `-y` | Skip confirmation prompts |
 | `--template <name>` | Initialize note from template |
-
-## Tech Stack
-
-- **Rust** — clap, serde, reqwest, ratatui (optional), crossterm, pulldown-cmark (optional), arboard
-- **APIs** — Crossref, Unpaywall, arXiv, OpenLibrary
-- **Storage** — JSON database, flat PDF directory, Markdown notes
-- **Builds** — `--no-default-features` for CLI-only (excludes ratatui/pulldown-cmark)
 
 ## License
 
