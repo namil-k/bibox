@@ -193,11 +193,24 @@ bibox list digest                          # List digest + all sub-collections
 bibox uncollect kim2025rust ml             # Remove from collection
 ```
 
-**Import:**
+**Import (from Zotero, Mendeley, EndNote, etc.):**
+
+Export your library as `.bib` from any reference manager, then:
 
 ```bash
-bibox import refs.bib --to ml
+bibox import library.bib                     # Import all entries
+bibox import ml-papers.bib --to ml           # Import into a collection
 ```
+
+Migrating from Zotero? Export each collection as a separate `.bib` and import with `--to`:
+
+```bash
+bibox import zotero-ml.bib --to ml
+bibox import zotero-cv.bib --to cv
+bibox import zotero-acl2025.bib --to digest/acl2025
+```
+
+Or just give the `.bib` file to your agent. It'll handle it.
 
 **Export:**
 
