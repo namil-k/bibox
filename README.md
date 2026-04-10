@@ -13,19 +13,15 @@
 
 Just give your agent the GitHub link. It'll figure out the rest.
 
-A bibliography manager that splits the work: agents handle the CLI, you handle the TUI. Papers come in through DOI, PDF, arXiv, ISBN, or title search. Metadata is fetched from Crossref and Open Library. Notes are Markdown files agents can write to section by section. Everything lives in one Git-syncable folder.
-
 For humans: browse and edit in the TUI. For agents: manage entries and notes through the CLI.
 
-> **Best for:** researchers who use AI coding agents (OpenClaw, Claude Code, etc.) for literature review, and want a single place for papers, notes, and BibTeX that both human and agent can read/write.
+> **Best for:** researchers who use AI agents for literature review and want papers, notes, and BibTeX in one Git-syncable folder.
 >
-> **Not for:** if you need a GUI, built-in PDF annotation, or Word/Google Docs integration, use Zotero or Mendeley instead.
+> **Not for:** GUI, PDF annotation, or Word integration. Use Zotero instead.
 
-**vs. Zotero/Mendeley:** bibox has no GUI, no browser plugin, no cloud sync. What it has: a CLI that AI agents can drive, Markdown notes with section-level writes, and a TUI that runs over SSH. Everything is plain files (JSON + Markdown + PDFs) in a Git repo.
-
-**Metadata sources:** Crossref, Open Library, arXiv, Unpaywall
-**Export formats:** BibTeX, YAML, RIS, CSV, Markdown notes
-**Import:** BibTeX (from Zotero, Mendeley, EndNote, etc.)
+**Sources:** Crossref, Open Library, arXiv, Unpaywall
+**Formats:** BibTeX, YAML, RIS, CSV, Markdown
+**Import:** `.bib` from Zotero, Mendeley, EndNote
 
 ## Features
 

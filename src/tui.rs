@@ -1726,7 +1726,7 @@ fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
     app.key_buf.clear();
 
     match key.code {
-        KeyCode::Char('q') => return Ok(true),
+        KeyCode::Char('q') | KeyCode::Esc => return Ok(true),
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
         KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => { app.undo()?; }
         KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => { app.redo()?; }
