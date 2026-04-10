@@ -2626,18 +2626,18 @@ fn parse_bibtex(content: &str) -> Vec<RawBibEntry> {
         let fields = parse_bib_fields(body);
         for (field, value) in fields {
             match field.as_str() {
-                "title"     => raw.title     = Some(strip_bibtex_braces(&value)),
-                "author"    => raw.author    = Some(value),
+                "title"     => raw.title     = Some(decode_latex(&value)),
+                "author"    => raw.author    = Some(decode_latex(&value)),
                 "year"      => raw.year      = value.parse().ok(),
-                "journal"   => raw.journal   = Some(strip_bibtex_braces(&value)),
+                "journal"   => raw.journal   = Some(decode_latex(&value)),
                 "volume"    => raw.volume    = Some(value),
                 "number"    => raw.number    = Some(value),
                 "pages"     => raw.pages     = Some(value),
-                "publisher" => raw.publisher = Some(strip_bibtex_braces(&value)),
-                "editor"    => raw.editor    = Some(strip_bibtex_braces(&value)),
+                "publisher" => raw.publisher = Some(decode_latex(&value)),
+                "editor"    => raw.editor    = Some(decode_latex(&value)),
                 "edition"   => raw.edition   = Some(value),
                 "isbn"      => raw.isbn      = Some(value),
-                "booktitle" => raw.booktitle = Some(strip_bibtex_braces(&value)),
+                "booktitle" => raw.booktitle = Some(decode_latex(&value)),
                 "doi"       => raw.doi       = Some(value),
                 "url"       => raw.url       = Some(value),
                 "note"      => raw.note      = Some(value),
@@ -2674,6 +2674,95 @@ fn strip_bibtex_braces(s: &str) -> String {
         }
     }
     result.trim().to_string()
+}
+
+/// Decode common LaTeX escape sequences to Unicode.
+/// Handles accented characters (\'{e} → é), special letters (\l → ł), etc.
+fn decode_latex(s: &str) -> String {
+    // First pass: named commands like {\l}, {\o}, {\aa}, {\ss}, etc.
+    let named: &[(&str, &str)] = &[
+        // Polish / Scandinavian / German special letters
+        ("{\\l}", "ł"), ("{\\L}", "Ł"),
+        ("\\l ", "ł"), ("\\l{}", "ł"),
+        ("{\\o}", "ø"), ("{\\O}", "Ø"),
+        ("\\o ", "ø"), ("\\o{}", "ø"),
+        ("{\\aa}", "å"), ("{\\AA}", "Å"),
+        ("{\\ae}", "æ"), ("{\\AE}", "Æ"),
+        ("{\\oe}", "œ"), ("{\\OE}", "Œ"),
+        ("{\\ss}", "ß"),
+        ("\\ss ", "ß"), ("\\ss{}", "ß"),
+        // Common standalone
+        ("\\l", "ł"), ("\\L", "Ł"),
+        ("\\o", "ø"), ("\\O", "Ø"),
+        ("\\i", "ı"), ("\\j", "ȷ"),
+        // LaTeX special characters
+        ("\\&", "&"), ("\\%", "%"), ("\\$", "$"), ("\\#", "#"),
+        ("\\{", "{"), ("\\}", "}"), ("\\_", "_"), ("\\~{}", "~"),
+    ];
+
+    let mut out = s.to_string();
+    for (pat, repl) in named {
+        out = out.replace(pat, repl);
+    }
+
+    // Second pass: accent commands - \'X, \"X, \^X, \`X, \~X, \=X, \.X, \v{X}, \c{X}, \u{X}, \H{X}
+    // Handle both {\'{e}} and \'{e} and \'e forms
+    let accent_map: &[(&str, &[(char, char)])] = &[
+        ("'", &[('a','á'),('e','é'),('i','í'),('o','ó'),('u','ú'),('y','ý'),
+                ('A','Á'),('E','É'),('I','Í'),('O','Ó'),('U','Ú'),('Y','Ý'),
+                ('c','ć'),('n','ń'),('s','ś'),('z','ź'),('C','Ć'),('N','Ń'),('S','Ś'),('Z','Ź')]),
+        ("`", &[('a','à'),('e','è'),('i','ì'),('o','ò'),('u','ù'),
+                ('A','À'),('E','È'),('I','Ì'),('O','Ò'),('U','Ù')]),
+        ("\"",&[('a','ä'),('e','ë'),('i','ï'),('o','ö'),('u','ü'),('y','ÿ'),
+                ('A','Ä'),('E','Ë'),('I','Ï'),('O','Ö'),('U','Ü'),('Y','Ÿ')]),
+        ("^", &[('a','â'),('e','ê'),('i','î'),('o','ô'),('u','û'),
+                ('A','Â'),('E','Ê'),('I','Î'),('O','Ô'),('U','Û')]),
+        ("~", &[('a','ã'),('n','ñ'),('o','õ'),('A','Ã'),('N','Ñ'),('O','Õ')]),
+        ("v", &[('c','č'),('s','š'),('z','ž'),('r','ř'),('n','ň'),('e','ě'),('d','ď'),('t','ť'),
+                ('C','Č'),('S','Š'),('Z','Ž'),('R','Ř'),('N','Ň'),('E','Ě'),('D','Ď'),('T','Ť')]),
+        ("c", &[('c','ç'),('s','ş'),('C','Ç'),('S','Ş')]),
+        ("u", &[('a','ă'),('g','ğ'),('A','Ă'),('G','Ğ')]),
+        (".", &[('z','ż'),('Z','Ż')]),
+        ("H", &[('o','ő'),('u','ű'),('O','Ő'),('U','Ű')]),
+        ("=", &[('a','ā'),('e','ē'),('i','ī'),('o','ō'),('u','ū'),
+                ('A','Ā'),('E','Ē'),('I','Ī'),('O','Ō'),('U','Ū')]),
+    ];
+
+    for (cmd, mappings) in accent_map {
+        for &(from_ch, to_ch) in *mappings {
+            // {\'{e}} or {\'e}
+            let pat1 = format!("{{\\{}{{{}}}}}", cmd, from_ch);
+            let pat2 = format!("{{\\{}{}}}", cmd, from_ch);
+            // \'{e} or \'e
+            let pat3 = format!("\\{}{{{}}}", cmd, from_ch);
+            let pat4 = format!("\\{}{}", cmd, from_ch);
+            let repl = to_ch.to_string();
+            out = out.replace(&pat1, &repl);
+            out = out.replace(&pat2, &repl);
+            out = out.replace(&pat3, &repl);
+            out = out.replace(&pat4, &repl);
+        }
+    }
+
+    // Strip any remaining braces
+    strip_bibtex_braces(&out)
+}
+
+/// Returns true if text contains LaTeX escape sequences.
+/// Detects: \l, \'e, \"o (backslash + letter) and \& (backslash + special char).
+fn has_latex_escapes(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    for i in 0..bytes.len().saturating_sub(1) {
+        if bytes[i] == b'\\' {
+            let next = bytes[i + 1];
+            if next.is_ascii_alphabetic() || next == b'&' || next == b'\''
+                || next == b'"' || next == b'^' || next == b'`' || next == b'~'
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Extract BibTeX field values from an entry body using depth-tracked brace parsing.
@@ -3450,7 +3539,38 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
         }
     }
 
-    // ── 7. Orphaned notes (notes with no matching entry) ─────────────────────
+    // ── 7. LaTeX escapes in text fields (\l, \'{e}, etc.) ─────────────────────
+    let mut latex_keys: Vec<String> = Vec::new();
+    for e in &good_entries {
+        let mut affected: Vec<&str> = Vec::new();
+        // Check all text fields + author names
+        let fields = [
+            ("title",     e.title.as_deref()),
+            ("journal",   e.journal.as_deref()),
+            ("booktitle", e.booktitle.as_deref()),
+            ("publisher", e.publisher.as_deref()),
+            ("editor",    e.editor.as_deref()),
+        ];
+        for (name, val) in &fields {
+            if val.map(|s| has_latex_escapes(s)).unwrap_or(false) {
+                affected.push(name);
+            }
+        }
+        if e.author.iter().any(|a| has_latex_escapes(a)) {
+            affected.push("author");
+        }
+        if !affected.is_empty() {
+            latex_keys.push(e.bibtex_key.clone());
+            issues.push(Issue {
+                kind: "latex_escape".into(),
+                key: Some(e.bibtex_key.clone()),
+                detail: format!("LaTeX escapes in: {}", affected.join(", ")),
+                fixable: true,
+            });
+        }
+    }
+
+    // ── 8. Orphaned notes (notes with no matching entry) ─────────────────────
     let entry_keys: HashSet<String> = good_entries.iter().map(|e| e.bibtex_key.clone()).collect();
     if notes_dir.exists() {
         for f in std::fs::read_dir(notes_dir)?.flatten() {
@@ -3512,6 +3632,7 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
         ("orphaned_pdf",    "No orphaned PDFs",              "orphaned PDFs"),
         ("missing_title",   "All entries have titles",       "entries without title"),
         ("dirty_title",     "No BibTeX braces in text",      "entries with {} in text"),
+        ("latex_escape",    "No LaTeX escapes in text",      "entries with LaTeX escapes"),
         ("orphaned_note",   "No orphaned notes",             "orphaned notes"),
     ];
 
@@ -3537,7 +3658,7 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
 
     // Detail sections for each issue kind that has problems
     let kinds = ["malformed_entry", "duplicate_key", "missing_pdf", "orphaned_pdf",
-                  "missing_title", "dirty_title", "orphaned_note"];
+                  "missing_title", "dirty_title", "latex_escape", "orphaned_note"];
     for kind in &kinds {
         let group: Vec<&Issue> = issues.iter().filter(|i| i.kind == *kind).collect();
         if group.is_empty() { continue; }
@@ -3548,6 +3669,7 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
             "orphaned_pdf"    => ("Orphaned PDFs",           "--fix deletes files"),
             "missing_title"   => ("No title",                "Use `bibox edit --title`"),
             "dirty_title"     => ("BibTeX braces in text",   "--fix strips braces"),
+            "latex_escape"    => ("LaTeX escapes in text",   "--fix decodes to Unicode"),
             "orphaned_note"   => ("Orphaned notes",          "Delete manually or re-add entry"),
             _                 => (kind.as_ref(), ""),
         };
@@ -3563,6 +3685,11 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
                 issue.detail.split("field(s): ")
                     .nth(1)
                     .and_then(|s| s.split(" —").next())
+                    .unwrap_or(&issue.detail)
+                    .to_string()
+            } else if *kind == "latex_escape" {
+                issue.detail.split("in: ")
+                    .nth(1)
                     .unwrap_or(&issue.detail)
                     .to_string()
             } else if *kind == "orphaned_note" {
@@ -3626,6 +3753,34 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
             }
             fixed += dirty_title_keys.len();
             println!("    OK    Stripped braces from {} entries ({} fields)", dirty_title_keys.len(), field_count);
+        }
+
+        // Decode LaTeX escapes
+        if !latex_keys.is_empty() {
+            let mut field_count = 0;
+            for e in db.entries.iter_mut() {
+                if latex_keys.contains(&e.bibtex_key) {
+                    for field in [&mut e.title, &mut e.journal, &mut e.booktitle,
+                                  &mut e.publisher, &mut e.editor] {
+                        if let Some(v) = field.as_ref() {
+                            if has_latex_escapes(v) {
+                                *field = Some(decode_latex(v));
+                                field_count += 1;
+                            }
+                        }
+                    }
+                    let mut author_changed = false;
+                    for a in e.author.iter_mut() {
+                        if has_latex_escapes(a) {
+                            *a = decode_latex(a);
+                            author_changed = true;
+                        }
+                    }
+                    if author_changed { field_count += 1; }
+                }
+            }
+            fixed += latex_keys.len();
+            println!("    OK    Decoded LaTeX in {} entries ({} fields)", latex_keys.len(), field_count);
         }
 
         // Save DB once for all entry-level fixes
