@@ -173,23 +173,26 @@ pub async fn cmd_add(
     }
 
     // ── --url: resolve URL to DOI or metadata ──
+    // If resolve fails, the URL is preserved for manual/misc entry
+    let mut url_preserved: Option<String> = None;
     if let Some(ref url) = url_arg {
-        match crate::url_resolver::resolve_url(url).await? {
-            crate::url_resolver::ResolvedUrl::Doi(doi) => {
+        match crate::url_resolver::resolve_url(url).await {
+            Ok(crate::url_resolver::ResolvedUrl::Doi(doi)) => {
                 doi_arg = Some(doi);
             }
-            crate::url_resolver::ResolvedUrl::ArxivId(id) => {
+            Ok(crate::url_resolver::ResolvedUrl::ArxivId(id)) => {
                 let arxiv_url = format!("https://arxiv.org/abs/{}", id);
-                match crate::url_resolver::fetch_and_parse_meta(&arxiv_url).await? {
-                    crate::url_resolver::ResolvedUrl::Doi(doi) => {
+                match crate::url_resolver::fetch_and_parse_meta(&arxiv_url).await {
+                    Ok(crate::url_resolver::ResolvedUrl::Doi(doi)) => {
                         doi_arg = Some(doi);
                     }
                     _ => {
-                        anyhow::bail!("{}", config.msgs.url_resolve_failed());
+                        // Could not resolve arXiv → DOI; preserve URL for misc entry
+                        url_preserved = Some(url.clone());
                     }
                 }
             }
-            crate::url_resolver::ResolvedUrl::Metadata(meta) => {
+            Ok(crate::url_resolver::ResolvedUrl::Metadata(meta)) => {
                 // Direct metadata — create entry without Crossref
                 let title = title_arg.unwrap_or_else(|| meta.title.unwrap_or_else(|| "Untitled".to_string()));
                 let authors = if let Some(a) = author_arg {
@@ -246,6 +249,10 @@ pub async fn cmd_add(
                 }
                 return Ok(());
             }
+            Err(_) => {
+                // URL resolution failed — preserve URL for manual/misc entry
+                url_preserved = Some(url.clone());
+            }
         }
     }
 
@@ -261,6 +268,61 @@ pub async fn cmd_add(
     }
 
     // ISBN-only mode (no file, no DOI)
+    // Manual entry: --title with no file/DOI/ISBN/search/arxiv → create misc directly
+    // Also accepts --url to store as-is (without DOI resolution)
+    if file.is_none() && doi_arg.is_none() && isbn_arg.is_none()
+        && search_arg.is_none() && arxiv_arg.is_none()
+    {
+        if let Some(ref title) = title_arg {
+            let authors: Vec<String> = author_arg.as_deref()
+                .map(|a| a.split(';').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+                .unwrap_or_default();
+            let base_key = generate_bibtex_key(&authors, year_arg, title);
+            let bibtex_key = key_arg.unwrap_or_else(|| generate_unique_key(&db, &base_key));
+            let collections = to
+                .or_else(|| config.default_collection.clone())
+                .map(|c| vec![c])
+                .unwrap_or_default();
+            let entry = Entry {
+                id: Uuid::new_v4().to_string(),
+                bibtex_key: bibtex_key.clone(),
+                entry_type: EntryType::Misc,
+                title: Some(title.clone()),
+                author: authors,
+                year: year_arg,
+                journal: journal_arg,
+                volume: None,
+                number: None,
+                pages: None,
+                publisher: publisher_arg,
+                editor: None,
+                edition: None,
+                isbn: None,
+                booktitle: booktitle_arg,
+                doi: None,
+                url: url_preserved.clone().or_else(|| url_arg.clone()),
+                abstract_text: None,
+                tags: vec![],
+                note: None,
+                collections,
+                file_path: None,
+                created_at: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                updated_at: None,
+            };
+            if json {
+                println!("{}", serde_json::to_string_pretty(&entry)?);
+            } else {
+                println!("{}", config.msgs.added(&bibtex_key, title));
+            }
+            db.entries.push(entry);
+            save_db(&db, &db_path)?;
+            if config.git {
+                git::auto_commit(&db_path, &format!("bibox: add {}", bibtex_key))?;
+            }
+            return Ok(());
+        }
+    }
+
     if file.is_none() && doi_arg.is_none() {
         if let Some(ref isbn) = isbn_arg {
             println!("Fetching metadata from Open Library for ISBN {}...", isbn);
