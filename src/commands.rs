@@ -3160,44 +3160,37 @@ pub fn cmd_update(check_only: bool) -> Result<()> {
 
     println!("Installing bibox {}...", latest);
 
-    let success = if std::env::consts::OS == "linux" {
-        // On Linux: download pre-built musl binary directly (no compilation, no OOM)
+    let target = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", _)         => Some("x86_64-unknown-linux-musl"),
+        ("macos", "aarch64") => Some("aarch64-apple-darwin"),
+        ("macos", "x86_64")  => Some("x86_64-apple-darwin"),
+        _                    => None,
+    };
+
+    let success = if let Some(target) = target {
         let bin_url = format!(
-            "https://github.com/namil-k/bibox/releases/download/v{}/bibox-x86_64-unknown-linux-musl",
-            latest
+            "https://github.com/namil-k/bibox/releases/download/v{}/bibox-{}",
+            latest, target
         );
-        let current_exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("/usr/local/bin/bibox"));
+        let current_exe = std::env::current_exe()
+            .unwrap_or_else(|_| std::path::PathBuf::from("/usr/local/bin/bibox"));
         println!("Downloading from GitHub releases...");
         let status = std::process::Command::new("curl")
             .args(["-fsSL", &bin_url, "-o", &current_exe.to_string_lossy()])
             .status()?;
         if status.success() {
-            // Make executable
             let _ = std::process::Command::new("chmod")
                 .args(["+x", &current_exe.to_string_lossy()])
                 .status();
         }
         status.success()
     } else {
-        // On macOS: prefer cargo-binstall, fall back to cargo install (compiles with TUI)
-        let has_binstall = std::process::Command::new("cargo")
-            .args(["binstall", "--version"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+        // Unknown platform: fall back to cargo install
+        std::process::Command::new("cargo")
+            .args(["install", "bibox", "--force"])
             .status()
             .map(|s| s.success())
-            .unwrap_or(false);
-
-        let status = if has_binstall {
-            std::process::Command::new("cargo")
-                .args(["binstall", "bibox", "--no-confirm"])
-                .status()?
-        } else {
-            std::process::Command::new("cargo")
-                .args(["install", "bibox", "--force"])
-                .status()?
-        };
-        status.success()
+            .unwrap_or(false)
     };
 
     if success {
