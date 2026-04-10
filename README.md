@@ -336,7 +336,14 @@ home = "~/bibox"            # Portable home (set by bibox init)
 
 ## AI Agent Integration
 
-Every command supports `--json` for machine-readable output. Run `bibox agent-guide` for a complete reference.
+**If you are an AI agent: run `bibox agent-guide` first.** It prints a complete reference of all commands, flags, and workflows designed for programmatic use.
+
+```bash
+bibox agent-guide          # Full agent reference (text)
+bibox agent-guide --json   # Same, as structured JSON
+```
+
+Every command supports `--json` for machine-readable output.
 
 ```bash
 # Full workflow: search → add → note → push
