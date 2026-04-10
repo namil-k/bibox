@@ -2626,21 +2626,21 @@ fn parse_bibtex(content: &str) -> Vec<RawBibEntry> {
         let fields = parse_bib_fields(body);
         for (field, value) in fields {
             match field.as_str() {
-                "title" => raw.title = Some(value),
-                "author" => raw.author = Some(value),
-                "year" => raw.year = value.parse().ok(),
-                "journal" => raw.journal = Some(value),
-                "volume" => raw.volume = Some(value),
-                "number" => raw.number = Some(value),
-                "pages" => raw.pages = Some(value),
-                "publisher" => raw.publisher = Some(value),
-                "editor" => raw.editor = Some(value),
-                "edition" => raw.edition = Some(value),
-                "isbn" => raw.isbn = Some(value),
-                "booktitle" => raw.booktitle = Some(value),
-                "doi" => raw.doi = Some(value),
-                "url" => raw.url = Some(value),
-                "note" => raw.note = Some(value),
+                "title"     => raw.title     = Some(strip_bibtex_braces(&value)),
+                "author"    => raw.author    = Some(value),
+                "year"      => raw.year      = value.parse().ok(),
+                "journal"   => raw.journal   = Some(strip_bibtex_braces(&value)),
+                "volume"    => raw.volume    = Some(value),
+                "number"    => raw.number    = Some(value),
+                "pages"     => raw.pages     = Some(value),
+                "publisher" => raw.publisher = Some(strip_bibtex_braces(&value)),
+                "editor"    => raw.editor    = Some(strip_bibtex_braces(&value)),
+                "edition"   => raw.edition   = Some(value),
+                "isbn"      => raw.isbn      = Some(value),
+                "booktitle" => raw.booktitle = Some(strip_bibtex_braces(&value)),
+                "doi"       => raw.doi       = Some(value),
+                "url"       => raw.url       = Some(value),
+                "note"      => raw.note      = Some(value),
                 _ => {}
             }
         }
@@ -2650,6 +2650,30 @@ fn parse_bibtex(content: &str) -> Vec<RawBibEntry> {
     }
 
     entries
+}
+
+/// Strip LaTeX-style curly braces used for case preservation: {Word} → Word.
+/// Handles nested braces. Does not strip quotes or other LaTeX commands.
+fn strip_bibtex_braces(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c != '{' && c != '}' {
+            out.push(c);
+        }
+    }
+    // Collapse multiple spaces that may result from removing braces
+    let mut result = String::with_capacity(out.len());
+    let mut prev_space = false;
+    for c in out.chars() {
+        if c == ' ' {
+            if !prev_space { result.push(c); }
+            prev_space = true;
+        } else {
+            result.push(c);
+            prev_space = false;
+        }
+    }
+    result.trim().to_string()
 }
 
 /// Extract BibTeX field values from an entry body using depth-tracked brace parsing.
