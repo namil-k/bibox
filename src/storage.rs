@@ -8,8 +8,29 @@ pub fn load_db(db_path: &Path) -> Result<Database> {
         return Ok(Database::default());
     }
     let content = std::fs::read_to_string(db_path)?;
-    let db: Database = serde_json::from_str(&content)?;
-    Ok(db)
+
+    // Parse entry-by-entry so one bad entry doesn't break the whole DB
+    let raw: serde_json::Value = serde_json::from_str(&content)?;
+    let entries_val = raw.get("entries").and_then(|v| v.as_array());
+
+    let entries = match entries_val {
+        None => vec![],
+        Some(arr) => {
+            let mut good = Vec::with_capacity(arr.len());
+            for (i, val) in arr.iter().enumerate() {
+                match serde_json::from_value::<Entry>(val.clone()) {
+                    Ok(entry) => good.push(entry),
+                    Err(e) => {
+                        eprintln!("bibox: skipping malformed entry at index {} ({})", i, e);
+                        eprintln!("  Run `bibox doctor` to inspect and repair.");
+                    }
+                }
+            }
+            good
+        }
+    };
+
+    Ok(Database { entries })
 }
 
 pub fn save_db(db: &Database, db_path: &Path) -> Result<()> {

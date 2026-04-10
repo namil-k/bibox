@@ -2278,7 +2278,7 @@ fn handle_file_picker(app: &mut App, key: crossterm::event::KeyEvent) -> Result<
                         })() {
                             Ok(dest) => {
                                 if let Some(e) = app.entries.iter_mut().find(|e| e.bibtex_key == key) {
-                                    e.file_path = Some(path.file_name().unwrap_or_default().to_string_lossy().to_string());
+                                    e.file_path = Some(format!("{}.pdf", key));
                                 }
                                 app.mode = Mode::Message(format!("PDF attached: {}", dest));
                             }
