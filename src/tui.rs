@@ -2430,13 +2430,7 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
                         let home_str = home.to_string_lossy().to_string();
                         std::thread::spawn(move || {
                             let result = (|| -> Result<String, String> {
-                                let pull = std::process::Command::new("git")
-                                    .args(["-C", &home_str, "pull", "--rebase"])
-                                    .output()
-                                    .map_err(|e| e.to_string())?;
-                                if !pull.status.success() {
-                                    return Err(format!("git pull failed: {}", String::from_utf8_lossy(&pull.stderr).trim()));
-                                }
+                                // 1. Stage and commit local changes first
                                 let _ = std::process::Command::new("git")
                                     .args(["-C", &home_str, "add", "."])
                                     .output();
@@ -2449,6 +2443,15 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
                                         .args(["-C", &home_str, "commit", "-m", "bibox sync"])
                                         .output();
                                 }
+                                // 2. Pull with rebase (safe now - no unstaged changes)
+                                let pull = std::process::Command::new("git")
+                                    .args(["-C", &home_str, "pull", "--rebase"])
+                                    .output()
+                                    .map_err(|e| e.to_string())?;
+                                if !pull.status.success() {
+                                    return Err(format!("git pull failed: {}", String::from_utf8_lossy(&pull.stderr).trim()));
+                                }
+                                // 3. Push
                                 let push = std::process::Command::new("git")
                                     .args(["-C", &home_str, "push"])
                                     .output()

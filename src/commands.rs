@@ -3352,16 +3352,33 @@ pub fn cmd_update(check_only: bool) -> Result<()> {
         );
         let current_exe = std::env::current_exe()
             .unwrap_or_else(|_| std::path::PathBuf::from("/usr/local/bin/bibox"));
+        let tmp = std::env::temp_dir().join("bibox_update");
         println!("Downloading from GitHub releases...");
         let status = std::process::Command::new("curl")
-            .args(["-fsSL", &bin_url, "-o", &current_exe.to_string_lossy()])
+            .args(["-fsSL", &bin_url, "-o", &tmp.to_string_lossy()])
             .status()?;
         if status.success() {
             let _ = std::process::Command::new("chmod")
-                .args(["+x", &current_exe.to_string_lossy()])
+                .args(["+x", &tmp.to_string_lossy()])
                 .status();
+            // Replace current binary (mv works even on running executables on Linux)
+            let mv = std::process::Command::new("mv")
+                .args([&tmp.to_string_lossy().to_string(), &current_exe.to_string_lossy().to_string()])
+                .status();
+            if mv.map(|s| s.success()).unwrap_or(false) {
+                true
+            } else {
+                // mv failed (permission?) - try with sudo
+                println!("Permission denied. Trying with sudo...");
+                std::process::Command::new("sudo")
+                    .args(["mv", &tmp.to_string_lossy(), &current_exe.to_string_lossy()])
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false)
+            }
+        } else {
+            false
         }
-        status.success()
     } else {
         // Unknown platform: fall back to cargo install
         std::process::Command::new("cargo")
