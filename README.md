@@ -7,23 +7,29 @@
 [![Crates.io](https://img.shields.io/crates/v/bibox)](https://crates.io/crates/bibox)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**AI agents shouldn't be hand-editing your .bib files.**
-**bibox gives them commands. You get a TUI. Your bibliography stays clean.**
+**Using AI agents (OpenClaw) to search and summarize papers?**
+**Let them manage your bibliography and notes too.**
+**You just browse the TUI. bibox makes it work.**
 
-A terminal-based bibliography manager built in Rust. AI agents add papers, write notes, and manage collections through a structured CLI. You browse everything in a three-panel TUI and export BibTeX with one keystroke.
+Just give your agent the GitHub link. It'll figure out the rest.
+
+A terminal-based bibliography manager built in Rust. AI agents add papers, write notes, and manage collections through a structured CLI. You browse everything in a three-panel TUI, fetch metadata with one keystroke, and export BibTeX when you need it.
 
 ## Features
 
-- **Smart import** — Drop a PDF and bibox extracts the DOI, fetches metadata from Crossref, and files it automatically
-- **Multiple sources** — Add entries via PDF, DOI, ISBN, arXiv ID, URL, or title search
-- **Three-panel TUI** — Collections, entries, and preview (info / notes / PDF) side by side
-- **Vim-style navigation** — `hjkl`, `gg`/`G`, `{n}j`, `Ctrl+d/u`, multi-select with `Space`
-- **AI-agent-friendly** — Every command supports `--json`. Notes have `--stdin`, `--section`, `--template` for programmatic access
-- **Markdown notes** — Per-entry notes with section-level updates, rendered with syntax highlighting in the TUI
-- **Sub-collections** — Hierarchical collections with path notation (`digest/2026-04`). Unlimited depth, works like a filesystem
-- **Portable home** — `bibox init` puts everything in one Git-syncable folder
-- **Export** — BibTeX, YAML, RIS, CSV, notes (`.md`). Include PDFs. Copy to clipboard. Zip it up.
-- **Templates** — Built-in and custom note templates with `{{variable}}` substitution
+- **Smart import** - Drop a PDF and bibox extracts the DOI, fetches metadata from Crossref, and files it automatically
+- **Multiple sources** - Add entries via PDF, DOI, ISBN, arXiv ID, URL, or title search
+- **Three-panel TUI** - Collections, entries, and preview (info / notes / PDF) side by side
+- **Vim-style navigation** - `hjkl`, `gg`/`G`, `{n}j`, `Ctrl+d/u`, multi-select with `Space`
+- **Fetch & refresh** - Press `f` to pull metadata from Crossref, preview changes, pick which fields to update
+- **Undo/redo** - `Ctrl+z`/`Ctrl+y` with in-memory snapshots
+- **AI-agent-friendly** - Every command supports `--json`. Notes have `--stdin`, `--section`, `--template` for programmatic access
+- **Markdown notes** - Per-entry notes with section-level updates, rendered with syntax highlighting in the TUI
+- **Sub-collections** - Hierarchical collections with path notation (`digest/2026-04`). Unlimited depth, works like a filesystem
+- **Portable home** - `bibox init` puts everything in one Git-syncable folder
+- **Export** - BibTeX, YAML, RIS, CSV, notes (`.md`). Include PDFs. Copy to clipboard. Zip it up.
+- **Templates** - Built-in and custom note templates with `{{variable}}` substitution
+- **Doctor** - `bibox doctor` diagnoses and auto-repairs DB issues: bad citekeys, LaTeX escapes, orphaned files
 
 ## Install
 
@@ -119,16 +125,19 @@ bibox
 | `V` | Select/deselect all |
 | `/` | Search (entries or collections, based on focus) |
 | `s` | Sort menu |
+| `f` | Fetch/refresh metadata from Crossref (preview changes, select which to apply) |
 | `o` | Open PDF (or fetch from web; re-fetches if file missing; opens browser on 403) |
 | `A` | Attach a local PDF via file picker (copies and renames to citekey.pdf) |
 | `w` | Open paper web page in browser |
 | `e` | Export menu (selected / collection / all) |
 | `y` | Copy citekey to clipboard |
 | `d` | Delete entry |
-| `c` | Manage collections |
+| `c` | Manage collections (works on multi-selected entries too) |
 | `t` | Edit tags |
 | `N` | Edit note in `$EDITOR` |
-| `,` | Settings (line numbers, panel ratio, export dirs, git sync) |
+| `Ctrl+z` | Undo |
+| `Ctrl+y` | Redo |
+| `,` | Settings (line numbers, panel ratio, citekey format, export dirs, git sync) |
 | `?` | Help |
 | `q` | Quit |
 
@@ -331,11 +340,12 @@ git push -u origin master
 Press `,` in the TUI, or run `bibox config` to see all current settings and paths.
 
 ```toml
-line_numbers = "absolute"    # absolute, relative, none
-panel_ratio = [2, 4, 4]     # left : center : right (sum = 10)
-bib_export_dir = "."        # BibTeX export location
-export_dir = "~/Downloads"  # Other exports location
-home = "~/bibox"            # Portable home (set by bibox init)
+line_numbers = "absolute"              # absolute, relative, none
+panel_ratio = [2, 4, 4]               # left : center : right (sum = 10)
+citekey_format = "{author}{year}{title}" # {author}, {year}, {title} variables
+bib_export_dir = "."                   # BibTeX export location
+export_dir = "~/Downloads"             # Other exports location
+home = "~/bibox"                       # Portable home (set by bibox init)
 ```
 
 ## AI Agent Integration

@@ -3242,21 +3242,24 @@ cd <bibox-home> && git add . && git commit -m "add vaswani2017attention" && git 
 ## Diagnostics
 
 ```bash
-# Check for issues (malformed entries, missing PDFs, duplicates, orphaned notes)
+# Check for issues
 bibox doctor --json
 
-# Auto-repair fixable issues (clears missing file_path refs, deletes orphaned PDFs)
+# Auto-repair fixable issues
 bibox doctor --fix
 ```
 
 Issue types:
-- `malformed_entry` — DB entry that cannot be parsed (manual fix required)
-- `duplicate_key` — Two entries share the same citekey
-- `missing_pdf` — file_path is set but the PDF file is gone [fixable]
-- `orphaned_pdf` — PDF on disk not linked to any entry [fixable]
-- `missing_title` — Entry has no title
-- `orphaned_note` — Note file with no matching entry
-- `invalid_json` — db.json is not valid JSON (e.g. git merge conflict markers)
+- `malformed_entry` - DB entry that cannot be parsed (manual fix required)
+- `bad_citekey` - Citekey contains non-ASCII or special chars [fixable: sanitizes to ASCII]
+- `duplicate_key` - Two entries share the same citekey
+- `missing_pdf` - file_path is set but the PDF file is gone [fixable: clears reference]
+- `orphaned_pdf` - PDF on disk not linked to any entry [fixable: deletes file]
+- `missing_title` - Entry has no title
+- `dirty_title` - BibTeX braces {} leaked into text fields [fixable: strips braces]
+- `latex_escape` - LaTeX escapes (\l, \&, \' etc.) in text/author [fixable: decodes to Unicode]
+- `orphaned_note` - Note file with no matching entry
+- `invalid_json` - db.json is not valid JSON (e.g. git merge conflict markers)
 
 ## Tips
 
