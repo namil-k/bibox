@@ -3422,7 +3422,35 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
         }
     }
 
-    // ── 6. Orphaned notes (notes with no matching entry) ─────────────────────
+    // ── 6. Dirty text fields (BibTeX brace leakage: { or } in title/journal/etc.) ──
+    let mut dirty_title_keys: Vec<String> = Vec::new();
+    for e in &good_entries {
+        let fields = [
+            ("title",     e.title.as_deref()),
+            ("journal",   e.journal.as_deref()),
+            ("booktitle", e.booktitle.as_deref()),
+            ("publisher", e.publisher.as_deref()),
+            ("editor",    e.editor.as_deref()),
+        ];
+        let dirty_fields: Vec<&str> = fields.iter()
+            .filter(|(_, v)| v.map(|s| s.contains('{') || s.contains('}')).unwrap_or(false))
+            .map(|(f, _)| *f)
+            .collect();
+        if !dirty_fields.is_empty() {
+            dirty_title_keys.push(e.bibtex_key.clone());
+            issues.push(Issue {
+                kind: "dirty_title".into(),
+                key: Some(e.bibtex_key.clone()),
+                detail: format!(
+                    "BibTeX braces {{}} found in field(s): {} — run `--fix` to strip them",
+                    dirty_fields.join(", ")
+                ),
+                fixable: true,
+            });
+        }
+    }
+
+    // ── 7. Orphaned notes (notes with no matching entry) ─────────────────────
     let entry_keys: HashSet<String> = good_entries.iter().map(|e| e.bibtex_key.clone()).collect();
     if notes_dir.exists() {
         for f in std::fs::read_dir(notes_dir)?.flatten() {
@@ -3441,10 +3469,25 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
         }
     }
 
-    // ── Output ───────────────────────────────────────────────────────────────
+    // ── Stats for header ──────────────────────────────────────────────────────
+    let total_entries = good_entries.len() + malformed_indices.len();
+    let pdf_count = if bibox_dir.exists() {
+        std::fs::read_dir(bibox_dir).map(|rd| {
+            rd.flatten().filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("pdf")).count()
+        }).unwrap_or(0)
+    } else { 0 };
+    let note_count = if notes_dir.exists() {
+        std::fs::read_dir(notes_dir).map(|rd| {
+            rd.flatten().filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("md")).count()
+        }).unwrap_or(0)
+    } else { 0 };
+
+    // ── Output (JSON) ────────────────────────────────────────────────────────
     if json {
         let result = serde_json::json!({
-            "total_entries": good_entries.len() + malformed_indices.len(),
+            "total_entries": total_entries,
+            "pdf_count": pdf_count,
+            "note_count": note_count,
             "issues": issues,
             "issue_count": issues.len(),
         });
@@ -3452,77 +3495,160 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
         return Ok(());
     }
 
-    println!("bibox doctor  (db: {})", db_path.display());
-    println!("Total entries in DB: {}", good_entries.len() + malformed_indices.len());
+    // ── Output (human) ──────────────────────────────────────────────────────
+    let bar = "═".repeat(52);
+    println!();
+    println!("  bibox doctor {}", bar);
+    println!();
+    println!("    Database   {}", db_path.display());
+    println!("    Entries    {}    PDFs  {}    Notes  {}", total_entries, pdf_count, note_count);
+    println!();
+
+    // Checks summary
+    let checks: &[(&str, &str, &str)] = &[
+        ("malformed_entry", "All entries parseable",         "malformed entries"),
+        ("duplicate_key",   "No duplicate citekeys",         "duplicate citekeys"),
+        ("missing_pdf",     "All registered PDFs on disk",   "missing PDF files"),
+        ("orphaned_pdf",    "No orphaned PDFs",              "orphaned PDFs"),
+        ("missing_title",   "All entries have titles",       "entries without title"),
+        ("dirty_title",     "No BibTeX braces in text",      "entries with {} in text"),
+        ("orphaned_note",   "No orphaned notes",             "orphaned notes"),
+    ];
+
+    println!("  --- Checks {}", "-".repeat(44));
+    println!();
+    for (kind, ok_msg, fail_msg) in checks {
+        let count = issues.iter().filter(|i| i.kind == *kind).count();
+        if count == 0 {
+            println!("    OK    {}", ok_msg);
+        } else {
+            let fixable = issues.iter().any(|i| i.kind == *kind && i.fixable);
+            let tag = if fixable { "FIX " } else { "WARN" };
+            println!("    {}  {} ({})", tag, fail_msg, count);
+        }
+    }
     println!();
 
     if issues.is_empty() {
-        println!("No issues found.");
+        println!("    All clear. No issues found.");
+        println!();
         return Ok(());
     }
 
-    // Group by kind for display
+    // Detail sections for each issue kind that has problems
     let kinds = ["malformed_entry", "duplicate_key", "missing_pdf", "orphaned_pdf",
-                  "missing_title", "orphaned_note"];
+                  "missing_title", "dirty_title", "orphaned_note"];
     for kind in &kinds {
         let group: Vec<&Issue> = issues.iter().filter(|i| i.kind == *kind).collect();
         if group.is_empty() { continue; }
-        let label = match *kind {
-            "malformed_entry" => "Malformed entries (cannot parse)",
-            "duplicate_key"   => "Duplicate citekeys",
-            "missing_pdf"     => "Missing PDF files (registered but not on disk)",
-            "orphaned_pdf"    => "Orphaned PDFs (on disk but not in DB)",
-            "missing_title"   => "Entries with no title",
-            "orphaned_note"   => "Orphaned notes (no matching entry)",
-            _                 => kind,
+        let (label, fix_hint) = match *kind {
+            "malformed_entry" => ("Malformed entries",       "Manual repair needed"),
+            "duplicate_key"   => ("Duplicate citekeys",      "Use `bibox edit` to rename"),
+            "missing_pdf"     => ("Missing PDFs",            "--fix clears file_path"),
+            "orphaned_pdf"    => ("Orphaned PDFs",           "--fix deletes files"),
+            "missing_title"   => ("No title",                "Use `bibox edit --title`"),
+            "dirty_title"     => ("BibTeX braces in text",   "--fix strips braces"),
+            "orphaned_note"   => ("Orphaned notes",          "Delete manually or re-add entry"),
+            _                 => (kind.as_ref(), ""),
         };
-        println!("[{}] {} ({})", if group.iter().any(|i| i.fixable) { "fixable" } else { "manual" }, label, group.len());
+        let fixable = group.iter().any(|i| i.fixable);
+        let tag = if fixable { "FIX " } else { "WARN" };
+        println!("  {} {} ({}) {}", tag, label, group.len(),
+            if !fix_hint.is_empty() { format!("  {}", fix_hint) } else { String::new() });
         for issue in &group {
             let key_str = issue.key.as_deref().unwrap_or("-");
-            println!("  - [{}] {}", key_str, issue.detail);
+            // Compact detail: just show key + relevant info
+            let short_detail = if *kind == "dirty_title" {
+                // Extract field names from detail
+                issue.detail.split("field(s): ")
+                    .nth(1)
+                    .and_then(|s| s.split(" —").next())
+                    .unwrap_or(&issue.detail)
+                    .to_string()
+            } else if *kind == "orphaned_note" {
+                format!("{}.md", key_str)
+            } else {
+                issue.detail.clone()
+            };
+            println!("        {}  {}", key_str, short_detail);
         }
         println!();
     }
 
+    // Summary footer
     let fixable_count = issues.iter().filter(|i| i.fixable).count();
+    let manual_count = issues.iter().filter(|i| !i.fixable).count();
+    println!("  {}", "=".repeat(56));
+    let mut parts = vec![];
+    if fixable_count > 0 { parts.push(format!("{} fixable", fixable_count)); }
+    if manual_count > 0  { parts.push(format!("{} manual", manual_count)); }
+    print!("    {}", parts.join("  |  "));
     if fixable_count > 0 && !fix {
-        println!("{} fixable issue(s) found. Run `bibox doctor --fix` to repair.", fixable_count);
+        print!("  |  Run `bibox doctor --fix` to repair");
     }
+    println!();
+    println!();
 
     // ── Fix ──────────────────────────────────────────────────────────────────
-    if fix {
+    if fix && fixable_count > 0 {
+        println!("  --- Fixing {}", "-".repeat(43));
+        println!();
+
         let mut fixed = 0;
+        let mut db = crate::storage::load_db(&db_path)?;
 
         // Clear missing file_path references
         if !missing_pdf_keys.is_empty() {
-            let mut db = crate::storage::load_db(&db_path)?;
             for e in db.entries.iter_mut() {
                 if missing_pdf_keys.contains(&e.bibtex_key) {
                     e.file_path = None;
                     fixed += 1;
                 }
             }
-            crate::storage::save_db(&db, &db_path)?;
-            println!("Fixed: cleared {} missing file_path reference(s).", missing_pdf_keys.len());
+            println!("    OK    Cleared {} missing file_path ref(s)", missing_pdf_keys.len());
         }
 
-        // Delete orphaned PDFs
+        // Strip BibTeX braces from dirty text fields
+        if !dirty_title_keys.is_empty() {
+            let mut field_count = 0;
+            for e in db.entries.iter_mut() {
+                if dirty_title_keys.contains(&e.bibtex_key) {
+                    for field in [&mut e.title, &mut e.journal, &mut e.booktitle,
+                                  &mut e.publisher, &mut e.editor] {
+                        if let Some(v) = field.as_ref() {
+                            if v.contains('{') || v.contains('}') {
+                                *field = Some(strip_bibtex_braces(v));
+                                field_count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            fixed += dirty_title_keys.len();
+            println!("    OK    Stripped braces from {} entries ({} fields)", dirty_title_keys.len(), field_count);
+        }
+
+        // Save DB once for all entry-level fixes
+        if fixed > 0 {
+            crate::storage::save_db(&db, &db_path)?;
+        }
+
+        // Delete orphaned PDFs (file system, not DB)
         if !orphaned_pdfs.is_empty() {
             for path in &orphaned_pdfs {
                 if let Err(e) = std::fs::remove_file(path) {
-                    eprintln!("Could not delete {}: {}", path.display(), e);
+                    eprintln!("    FAIL  Could not delete {}: {}", path.display(), e);
                 } else {
                     fixed += 1;
-                    println!("Deleted orphaned PDF: {}", path.display());
                 }
             }
+            println!("    OK    Deleted {} orphaned PDF(s)", orphaned_pdfs.len());
         }
 
-        if fixed > 0 {
-            println!("\n{} issue(s) fixed.", fixed);
-        } else {
-            println!("Nothing to fix automatically.");
-        }
+        println!();
+        println!("  {}", "=".repeat(56));
+        println!("    {} issue(s) fixed.", fixed);
+        println!();
     }
 
     Ok(())
