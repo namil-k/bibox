@@ -1309,30 +1309,33 @@ pub fn cmd_export(
     match fmt.as_str() {
         "bibtex" => {
             let bibtex = entries_to_bibtex(&entries);
-            let filename = format!("{}_{}.bib", col_name, timestamp);
-            let out_path = output.as_ref().cloned().unwrap_or_else(|| config.bib_export_dir.join(&filename));
-            std::fs::write(&out_path, &bibtex)?;
-            let abs_path = out_path.canonicalize().unwrap_or(out_path);
-            println!(
-                "{}",
-                config
-                    .msgs
-                    .bibtex_saved(&abs_path.to_string_lossy(), entries.len())
-            );
+            if let Some(ref path) = output {
+                std::fs::write(path, &bibtex)?;
+                eprintln!("{}", config.msgs.bibtex_saved(&path.to_string_lossy(), entries.len()));
+            } else {
+                print!("{}", bibtex);
+                eprintln!("Exported {} entries as BibTeX to stdout", entries.len());
+            }
         }
         "yaml" => {
             let yaml = entries_to_yaml(&entries);
-            let filename = format!("{}_{}.yaml", col_name, timestamp);
-            let out_path = output.as_ref().cloned().unwrap_or_else(|| config.export_dir.join(&filename));
-            std::fs::write(&out_path, &yaml)?;
-            println!("Exported {} entries to {}", entries.len(), out_path.display());
+            if let Some(ref path) = output {
+                std::fs::write(path, &yaml)?;
+                eprintln!("Exported {} entries to {}", entries.len(), path.display());
+            } else {
+                print!("{}", yaml);
+                eprintln!("Exported {} entries as YAML to stdout", entries.len());
+            }
         }
         "ris" => {
             let ris = entries_to_ris(&entries);
-            let filename = format!("{}_{}.ris", col_name, timestamp);
-            let out_path = output.as_ref().cloned().unwrap_or_else(|| config.export_dir.join(&filename));
-            std::fs::write(&out_path, &ris)?;
-            println!("Exported {} entries to {}", entries.len(), out_path.display());
+            if let Some(ref path) = output {
+                std::fs::write(path, &ris)?;
+                eprintln!("Exported {} entries to {}", entries.len(), path.display());
+            } else {
+                print!("{}", ris);
+                eprintln!("Exported {} entries as RIS to stdout", entries.len());
+            }
         }
         "csv" => {
             let csv = entries_to_csv(&entries);

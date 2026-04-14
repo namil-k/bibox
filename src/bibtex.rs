@@ -1,5 +1,14 @@
 use crate::models::{Entry, EntryType};
 
+/// Escape LaTeX special characters for BibTeX output.
+/// & → \&, % → \%, # → \#
+/// Does NOT escape _ (common in DOIs/URLs) or $ (rare in bibliographic data).
+fn escape_bibtex(s: &str) -> String {
+    s.replace('&', "\\&")
+     .replace('%', "\\%")
+     .replace('#', "\\#")
+}
+
 pub fn entry_to_bibtex(entry: &Entry) -> String {
     let mut lines = Vec::new();
 
@@ -13,12 +22,12 @@ pub fn entry_to_bibtex(entry: &Entry) -> String {
     lines.push(format!("@{}{{{},", type_str, entry.bibtex_key));
 
     if let Some(title) = &entry.title {
-        lines.push(format!("  title     = {{{}}},", title));
+        lines.push(format!("  title     = {{{}}},", escape_bibtex(title)));
     }
 
     if !entry.author.is_empty() {
         let author_str = entry.author.join(" and ");
-        lines.push(format!("  author    = {{{}}},", author_str));
+        lines.push(format!("  author    = {{{}}},", escape_bibtex(&author_str)));
     }
 
     if let Some(year) = entry.year {
@@ -29,7 +38,7 @@ pub fn entry_to_bibtex(entry: &Entry) -> String {
     match entry.entry_type {
         EntryType::Article => {
             if let Some(j) = &entry.journal {
-                lines.push(format!("  journal   = {{{}}},", j));
+                lines.push(format!("  journal   = {{{}}},", escape_bibtex(j)));
             }
             if let Some(v) = &entry.volume {
                 lines.push(format!("  volume    = {{{}}},", v));
@@ -43,10 +52,10 @@ pub fn entry_to_bibtex(entry: &Entry) -> String {
         }
         EntryType::Book => {
             if let Some(p) = &entry.publisher {
-                lines.push(format!("  publisher = {{{}}},", p));
+                lines.push(format!("  publisher = {{{}}},", escape_bibtex(p)));
             }
             if let Some(ed) = &entry.editor {
-                lines.push(format!("  editor    = {{{}}},", ed));
+                lines.push(format!("  editor    = {{{}}},", escape_bibtex(ed)));
             }
             if let Some(e) = &entry.edition {
                 lines.push(format!("  edition   = {{{}}},", e));
@@ -57,7 +66,7 @@ pub fn entry_to_bibtex(entry: &Entry) -> String {
         }
         EntryType::InProceedings => {
             if let Some(bt) = &entry.booktitle {
-                lines.push(format!("  booktitle = {{{}}},", bt));
+                lines.push(format!("  booktitle = {{{}}},", escape_bibtex(bt)));
             }
             if let Some(p) = &entry.pages {
                 lines.push(format!("  pages     = {{{}}},", p));
@@ -75,7 +84,7 @@ pub fn entry_to_bibtex(entry: &Entry) -> String {
     }
 
     if let Some(note) = &entry.note {
-        lines.push(format!("  note      = {{{}}},", note));
+        lines.push(format!("  note      = {{{}}},", escape_bibtex(note)));
     }
 
     // Remove trailing comma from last field
