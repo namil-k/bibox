@@ -3251,12 +3251,17 @@ bibox import refs.bib --to ml
 
 ## Export
 
+Without `-o`, BibTeX/YAML/RIS/CSV content goes to stdout (status messages to stderr).
+
 ```bash
-# Export as BibTeX (default)
-bibox export <key1> <key2>
+# Export as BibTeX to stdout (pipe or redirect)
+bibox export --collection ml > refs.bib
+
+# Export specific entries to file
+bibox export <key1> <key2> -o refs.bib
 
 # Export collection as RIS
-bibox export --collection cs --format ris
+bibox export --collection cs --format ris -o cs.ris
 
 # Export with PDFs
 bibox export --collection ml --include-pdf --zip

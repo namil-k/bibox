@@ -229,18 +229,11 @@ Or just give the `.bib` file to your agent. It'll handle it.
 **Export:**
 
 ```bash
-bibox export                               # Export all as BibTeX
-```
-
-```bash
+bibox export                               # Print all as BibTeX to stdout
+bibox export > refs.bib                    # Redirect to file
+bibox export -o refs.bib                   # Same, explicit output path
 bibox export kim2025 dijkstra1968          # Export specific entries
-```
-
-```bash
 bibox export --collection cs --format ris  # Export collection as RIS
-```
-
-```bash
 bibox export --include-pdf --zip           # BibTeX + PDFs, zipped
 ```
 
