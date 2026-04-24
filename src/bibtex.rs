@@ -1,12 +1,45 @@
 use crate::models::{Entry, EntryType};
 
-/// Escape LaTeX special characters for BibTeX output.
-/// & → \&, % → \%, # → \#
-/// Does NOT escape _ (common in DOIs/URLs) or $ (rare in bibliographic data).
+fn decode_html_entities(s: &str) -> String {
+    s.replace("&amp;", "&")
+     .replace("&lt;", "<")
+     .replace("&gt;", ">")
+     .replace("&quot;", "\"")
+     .replace("&#39;", "'")
+     .replace("&apos;", "'")
+     .replace("&#x27;", "'")
+     .replace("&nbsp;", " ")
+}
+
 fn escape_bibtex(s: &str) -> String {
-    s.replace('&', "\\&")
-     .replace('%', "\\%")
-     .replace('#', "\\#")
+    let decoded = decode_html_entities(s);
+    let mut result = String::with_capacity(decoded.len() + 16);
+    let chars: Vec<char> = decoded.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+    while i < len {
+        if chars[i] == '\\' && i + 1 < len {
+            match chars[i + 1] {
+                '&' | '%' | '#' | '_' | '$' => {
+                    result.push('\\');
+                    result.push(chars[i + 1]);
+                    i += 2;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        match chars[i] {
+            '&' => result.push_str("\\&"),
+            '%' => result.push_str("\\%"),
+            '#' => result.push_str("\\#"),
+            '_' => result.push_str("\\_"),
+            '$' => result.push_str("\\$"),
+            ch => result.push(ch),
+        }
+        i += 1;
+    }
+    result
 }
 
 pub fn entry_to_bibtex(entry: &Entry) -> String {
@@ -151,4 +184,58 @@ pub fn entry_to_filename(entry: &Entry) -> String {
         year_part,
         sanitize(title_part)
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escape_raw_ampersand() {
+        assert_eq!(escape_bibtex("A & B"), "A \\& B");
+    }
+
+    #[test]
+    fn escape_all_special_chars() {
+        assert_eq!(escape_bibtex("a & b % c # d _ e $ f"), "a \\& b \\% c \\# d \\_ e \\$ f");
+    }
+
+    #[test]
+    fn no_double_escape() {
+        assert_eq!(escape_bibtex("already \\& escaped"), "already \\& escaped");
+        assert_eq!(escape_bibtex("test \\% ok"), "test \\% ok");
+        assert_eq!(escape_bibtex("val \\# x"), "val \\# x");
+        assert_eq!(escape_bibtex("a \\_ b"), "a \\_ b");
+        assert_eq!(escape_bibtex("c \\$ d"), "c \\$ d");
+    }
+
+    #[test]
+    fn html_entity_decode_and_escape() {
+        assert_eq!(escape_bibtex("Sex &amp; vision"), "Sex \\& vision");
+        assert_eq!(escape_bibtex("A &lt; B &gt; C"), "A < B > C");
+        assert_eq!(escape_bibtex("&quot;hello&quot;"), "\"hello\"");
+    }
+
+    #[test]
+    fn html_entity_nbsp() {
+        assert_eq!(escape_bibtex("word&nbsp;word"), "word word");
+    }
+
+    #[test]
+    fn mixed_html_and_raw() {
+        assert_eq!(
+            escape_bibtex("Virtual Reality &amp; Intelligent Hardware"),
+            "Virtual Reality \\& Intelligent Hardware"
+        );
+    }
+
+    #[test]
+    fn plain_text_unchanged() {
+        assert_eq!(escape_bibtex("Normal title here"), "Normal title here");
+    }
+
+    #[test]
+    fn unicode_preserved() {
+        assert_eq!(escape_bibtex("Müller & Ström"), "Müller \\& Ström");
+    }
 }
