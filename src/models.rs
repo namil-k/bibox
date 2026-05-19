@@ -63,6 +63,9 @@ pub struct Entry {
     #[serde(default, rename = "abstract")]
     pub abstract_text: Option<String>,
     pub tags: Vec<String>,
+    // Misc fields
+    pub howpublished: Option<String>,
+    pub month: Option<String>,
     pub note: Option<String>,
     pub collections: Vec<String>,
     pub file_path: Option<String>,
