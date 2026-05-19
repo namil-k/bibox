@@ -25,9 +25,13 @@ impl std::str::FromStr for EntryType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "article" => Ok(EntryType::Article),
-            "book" => Ok(EntryType::Book),
-            "inproceedings" => Ok(EntryType::InProceedings),
-            "misc" => Ok(EntryType::Misc),
+            "book" | "inbook" | "booklet" => Ok(EntryType::Book),
+            "inproceedings" | "incollection" | "conference" => Ok(EntryType::InProceedings),
+            "misc" | "online" | "electronic" | "www"
+            | "phdthesis" | "mastersthesis" | "thesis"
+            | "techreport" | "report" | "manual"
+            | "unpublished" | "proceedings" | "patent"
+            | "standard" | "dataset" | "software" => Ok(EntryType::Misc),
             _ => Err(anyhow::anyhow!("Unknown entry type: {}", s)),
         }
     }
