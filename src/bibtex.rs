@@ -300,7 +300,7 @@ mod tests {
         let bib = entry_to_bibtex(&entry);
         assert!(bib.contains("howpublished"), "should contain howpublished field");
         assert!(!bib.contains("  url "), "should not contain url when howpublished is set");
-        assert!(bib.contains(r"\url{"), "\\url{} should be preserved");
+        assert!(bib.contains(r"\url{"), "backslash url should be preserved");
     }
 
     #[test]
