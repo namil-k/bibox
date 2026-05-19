@@ -21,7 +21,7 @@ For humans: browse and edit in the TUI. For agents: manage entries and notes thr
 
 **Sources:** Crossref, Open Library, arXiv, Unpaywall
 **Formats:** BibTeX, YAML, RIS, CSV, Markdown
-**Import:** `.bib` from Zotero, Mendeley, EndNote
+**Import:** `.bib`, `.ris` from Zotero, Mendeley, EndNote
 
 ## Features
 
@@ -209,22 +209,23 @@ bibox uncollect kim2025rust ml             # Remove from collection
 
 **Import (from Zotero, Mendeley, EndNote, etc.):**
 
-Export your library as `.bib` from any reference manager, then:
+Export your library as `.bib` or `.ris` from any reference manager, then:
 
 ```bash
-bibox import library.bib                     # Import all entries
+bibox import library.bib                     # Import from BibTeX
+bibox import library.ris                     # Import from RIS
 bibox import ml-papers.bib --to ml           # Import into a collection
 ```
 
-Migrating from Zotero? Export each collection as a separate `.bib` and import with `--to`:
+Migrating from Zotero? Export each collection as a separate `.bib` or `.ris` and import with `--to`:
 
 ```bash
 bibox import zotero-ml.bib --to ml
-bibox import zotero-cv.bib --to cv
+bibox import zotero-cv.ris --to cv
 bibox import zotero-acl2025.bib --to digest/acl2025
 ```
 
-Or just give the `.bib` file to your agent. It'll handle it.
+Or just give the file to your agent. It'll handle it.
 
 **Export:**
 

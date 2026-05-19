@@ -303,10 +303,10 @@ Examples:
         collection: String,
     },
 
-    /// Import entries from a BibTeX (.bib) file
-    #[command(after_long_help = "Examples:\n  bibox import refs.bib\n  bibox import refs.bib --to ml")]
+    /// Import entries from a BibTeX (.bib) or RIS (.ris) file
+    #[command(after_long_help = "Examples:\n  bibox import refs.bib\n  bibox import refs.bib --to ml\n  bibox import library.ris --to papers")]
     Import {
-        /// Path to .bib file
+        /// Path to .bib or .ris file
         file: PathBuf,
 
         /// Assign all imported entries to a collection

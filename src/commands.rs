@@ -1114,7 +1114,11 @@ pub fn cmd_import(file: PathBuf, to: Option<String>, config: &Config) -> Result<
     let mut merged: Vec<String> = vec![];
     let mut skipped: Vec<String> = vec![];
 
-    let entries = parse_bibtex(&content);
+    let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+    let entries = match ext.as_str() {
+        "ris" => parse_ris(&content),
+        _ => parse_bibtex(&content),
+    };
 
     for mut raw in entries {
         let entry_type: EntryType = raw.entry_type.parse().unwrap_or(EntryType::Misc);
@@ -2793,6 +2797,117 @@ fn parse_bibtex(content: &str) -> Vec<RawBibEntry> {
     entries
 }
 
+fn parse_ris(content: &str) -> Vec<RawBibEntry> {
+    let mut entries = vec![];
+    let mut current: Option<RawBibEntry> = None;
+    let mut authors: Vec<String> = vec![];
+    let mut keywords: Vec<String> = vec![];
+    let mut start_page: Option<String> = None;
+    let mut end_page: Option<String> = None;
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() { continue; }
+
+        // RIS tag format: "XX  - value" or "ER  -"
+        if line.len() < 5 { continue; }
+        if &line[2..4] != "  " || !line[4..].starts_with('-') { continue; }
+        let tag = line[..2].trim();
+        let value = if line.len() > 6 { line[6..].trim().to_string() } else { String::new() };
+        if value.is_empty() && tag != "ER" { continue; }
+
+        match tag {
+            "TY" => {
+                let entry_type = match value.as_str() {
+                    "JOUR" | "MGZN" | "NEWS" => "article",
+                    "BOOK" | "EBOOK" => "book",
+                    "CONF" | "CPAPER" => "inproceedings",
+                    "CHAP" | "ECHAP" => "incollection",
+                    "THES" => "phdthesis",
+                    "RPRT" => "techreport",
+                    "ELEC" => "online",
+                    _ => "misc",
+                };
+                current = Some(RawBibEntry {
+                    key: None,
+                    entry_type: entry_type.to_string(),
+                    title: None, author: None, year: None, journal: None,
+                    volume: None, number: None, pages: None, publisher: None,
+                    editor: None, edition: None, isbn: None, booktitle: None,
+                    doi: None, url: None, note: None, howpublished: None,
+                    month: None, abstract_text: None, keywords: None,
+                });
+                authors.clear();
+                keywords.clear();
+                start_page = None;
+                end_page = None;
+            }
+            "ER" => {
+                if let Some(mut entry) = current.take() {
+                    if !authors.is_empty() {
+                        entry.author = Some(authors.join(" and "));
+                    }
+                    if !keywords.is_empty() {
+                        entry.keywords = Some(keywords.join(", "));
+                    }
+                    match (&start_page, &end_page) {
+                        (Some(sp), Some(ep)) => entry.pages = Some(format!("{}--{}", sp, ep)),
+                        (Some(sp), None) => entry.pages = Some(sp.clone()),
+                        _ => {}
+                    }
+                    entries.push(entry);
+                }
+                authors.clear();
+                keywords.clear();
+            }
+            _ => {
+                if let Some(ref mut entry) = current {
+                    match tag {
+                        "TI" | "T1" => entry.title = Some(value),
+                        "AU" | "A1" => authors.push(value),
+                        "PY" | "Y1" => {
+                            entry.year = value.split('/').next()
+                                .and_then(|y| y.trim().parse().ok());
+                        }
+                        "JO" | "JF" | "T2" => if entry.journal.is_none() { entry.journal = Some(value); },
+                        "BT" => if entry.booktitle.is_none() { entry.booktitle = Some(value); },
+                        "VL" => entry.volume = Some(value),
+                        "IS" => entry.number = Some(value),
+                        "SP" => start_page = Some(value),
+                        "EP" => end_page = Some(value),
+                        "DO" => entry.doi = Some(value),
+                        "SN" => entry.isbn = Some(value),
+                        "PB" => entry.publisher = Some(value),
+                        "UR" | "L1" | "L2" => if entry.url.is_none() { entry.url = Some(value); },
+                        "AB" | "N2" => entry.abstract_text = Some(value),
+                        "N1" => entry.note = Some(value),
+                        "KW" => keywords.push(value),
+                        "ED" | "A2" => entry.editor = Some(value),
+                        "ET" => entry.edition = Some(value),
+                        "DA" => if entry.month.is_none() { entry.month = Some(value); },
+                        "ID" => entry.key = Some(value),
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    // Handle file that doesn't end with ER
+    if let Some(mut entry) = current.take() {
+        if !authors.is_empty() { entry.author = Some(authors.join(" and ")); }
+        if !keywords.is_empty() { entry.keywords = Some(keywords.join(", ")); }
+        match (&start_page, &end_page) {
+            (Some(sp), Some(ep)) => entry.pages = Some(format!("{}--{}", sp, ep)),
+            (Some(sp), None) => entry.pages = Some(sp.clone()),
+            _ => {}
+        }
+        entries.push(entry);
+    }
+
+    entries
+}
+
 /// Strip LaTeX-style curly braces used for case preservation: {Word} → Word.
 /// Handles nested braces. Does not strip quotes or other LaTeX commands.
 fn strip_bibtex_braces(s: &str) -> String {
@@ -3316,8 +3431,12 @@ bibox list digest --json
 # Import from BibTeX file
 bibox import refs.bib
 
+# Import from RIS file (Zotero, Mendeley, EndNote)
+bibox import library.ris
+
 # Import into a collection
 bibox import refs.bib --to ml
+bibox import library.ris --to papers
 ```
 
 ## Export
@@ -4051,4 +4170,103 @@ pub fn cmd_agent_guide(json: bool) -> Result<()> {
         print!("{}", AGENT_GUIDE);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_ris_basic() {
+        let ris = "\
+TY  - JOUR
+TI  - Attention Is All You Need
+AU  - Vaswani, Ashish
+AU  - Shazeer, Noam
+PY  - 2017
+JO  - Advances in Neural Information Processing Systems
+VL  - 30
+SP  - 5998
+EP  - 6008
+DO  - 10.48550/arXiv.1706.03762
+KW  - transformer
+KW  - attention
+ER  -
+";
+        let entries = parse_ris(ris);
+        assert_eq!(entries.len(), 1);
+        let e = &entries[0];
+        assert_eq!(e.entry_type, "article");
+        assert_eq!(e.title.as_deref(), Some("Attention Is All You Need"));
+        assert_eq!(e.author.as_deref(), Some("Vaswani, Ashish and Shazeer, Noam"));
+        assert_eq!(e.year, Some(2017));
+        assert_eq!(e.journal.as_deref(), Some("Advances in Neural Information Processing Systems"));
+        assert_eq!(e.volume.as_deref(), Some("30"));
+        assert_eq!(e.pages.as_deref(), Some("5998--6008"));
+        assert_eq!(e.doi.as_deref(), Some("10.48550/arXiv.1706.03762"));
+        assert_eq!(e.keywords.as_deref(), Some("transformer, attention"));
+    }
+
+    #[test]
+    fn parse_ris_misc_type() {
+        let ris = "\
+TY  - GEN
+TI  - Some Web Resource
+AU  - Smith, John
+UR  - https://example.com
+N1  - Accessed 2024-01-15
+ER  -
+";
+        let entries = parse_ris(ris);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].entry_type, "misc");
+        assert_eq!(entries[0].url.as_deref(), Some("https://example.com"));
+        assert_eq!(entries[0].note.as_deref(), Some("Accessed 2024-01-15"));
+    }
+
+    #[test]
+    fn parse_ris_multiple_entries() {
+        let ris = "\
+TY  - JOUR
+TI  - Paper One
+AU  - Author A
+PY  - 2020
+ER  -
+
+TY  - BOOK
+TI  - Book Two
+AU  - Author B
+PY  - 2021
+PB  - Publisher X
+ER  -
+";
+        let entries = parse_ris(ris);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].entry_type, "article");
+        assert_eq!(entries[1].entry_type, "book");
+        assert_eq!(entries[1].publisher.as_deref(), Some("Publisher X"));
+    }
+
+    #[test]
+    fn parse_ris_thesis_and_conference() {
+        let ris = "\
+TY  - THES
+TI  - My PhD Thesis
+AU  - Kim, N
+PY  - 2026
+PB  - MIT
+ER  -
+
+TY  - CONF
+TI  - Conference Paper
+AU  - Lee, J
+PY  - 2025
+ER  -
+";
+        let entries = parse_ris(ris);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].entry_type, "phdthesis");
+        assert_eq!(entries[0].publisher.as_deref(), Some("MIT"));
+        assert_eq!(entries[1].entry_type, "inproceedings");
+    }
 }
