@@ -1047,11 +1047,13 @@ fn draw_preview_info(f: &mut Frame, app: &App, area: Rect) {
     field!("Type:", entry.entry_type.to_string());
     if !entry.author.is_empty() { field!("Author:", entry.author.join("; ")); }
     if let Some(y) = entry.year { field!("Year:", y.to_string()); }
+    if let Some(m) = &entry.month { field!("Month:", m.as_str()); }
     if let Some(j) = &entry.journal { field!("Journal:", j.as_str()); }
     if let Some(bt) = &entry.booktitle { field!("Booktitle:", bt.as_str()); }
     if let Some(p) = &entry.publisher { field!("Publisher:", p.as_str()); }
     if let Some(doi) = &entry.doi { field!("DOI:", doi.as_str()); }
     if let Some(url) = &entry.url { field!("URL:", url.as_str()); }
+    if let Some(hp) = &entry.howpublished { field!("Published:", hp.as_str()); }
     if !entry.tags.is_empty() { field!("Tags:", entry.tags.join(", ")); }
     if !entry.collections.is_empty() {
         field!("Collections:", entry.collections.join(", "));
