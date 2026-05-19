@@ -3158,6 +3158,10 @@ bibox add --doi 10.xxx --to ml --json
 # Web page / product / non-paper reference (misc entry)
 bibox add --title "Varjo Aero" --url https://varjo.com/products/aero/ --author "Varjo" --year 2024 --json
 
+# Online video (IEEE-style misc with howpublished + month)
+bibox add --title "Bangkok VR Tour" --author "VR Gorilla" --year 2024 --month jan \
+  --howpublished '[Online Video]. Available: \url{https://youtube.com/watch?v=xxx}' --json
+
 # Minimal misc entry (title only)
 bibox add --title "Some Web Resource" --json
 ```
@@ -3232,6 +3236,9 @@ bibox template delete my-review
 # Edit specific fields
 bibox edit <key> --title "New Title" --year 2025 --journal "Nature"
 
+# Set howpublished and month (for @misc / IEEE-style entries)
+bibox edit <key> --howpublished '[Online Video]. Available: \url{https://...}' --month jan
+
 # Re-fetch metadata from Crossref by DOI (preserves existing values)
 bibox edit <key> --doi 10.1234/new
 
@@ -3242,6 +3249,7 @@ bibox edit <key> --tags-remove "draft"
 # Bulk-update multiple entries
 bibox modify year=2025 --filter "collection:ml" --yes
 bibox modify journal="Nature" --filter "tag:review" --yes
+bibox modify howpublished="[Online]. Available: \url{...}" --filter "tag:web" --yes
 ```
 
 ## Attaching PDFs
@@ -3354,6 +3362,8 @@ cd <bibox-home> && git add . && git commit -m "add vaswani2017attention" && git 
 | `--section "Name"` | Target a specific `## Heading` in a note |
 | `--yes` / `-y` | Skip confirmation prompts |
 | `--template <name>` | Initialize note from template |
+| `--howpublished` | Set howpublished field (for `add`, `edit`, `modify`; used in IEEE @misc) |
+| `--month` | Set month field (for `add`, `edit`, `modify`; BibTeX macros like `jan` exported without braces) |
 
 ## Diagnostics
 
