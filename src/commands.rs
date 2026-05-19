@@ -846,6 +846,12 @@ pub fn cmd_show(id_or_key: String, json: bool, config: &Config) -> Result<()> {
     if let Some(fp) = &entry.file_path {
         println!("{}: {}", config.msgs.label_file(), fp);
     }
+    if let Some(hp) = &entry.howpublished {
+        println!("{}: {}", config.msgs.label_howpublished(), hp);
+    }
+    if let Some(m) = &entry.month {
+        println!("{}: {}", config.msgs.label_month(), m);
+    }
     if let Some(note) = &entry.note {
         println!("{}: {}", config.msgs.label_note(), note);
     }
@@ -870,6 +876,8 @@ pub async fn cmd_edit(
     number: Option<String>,
     pages: Option<String>,
     note: Option<String>,
+    howpublished: Option<String>,
+    month: Option<String>,
     tags_add: Option<String>,
     tags_remove: Option<String>,
     attach_pdf: Option<std::path::PathBuf>,
@@ -903,6 +911,12 @@ pub async fn cmd_edit(
                 entry.pages = pages.or(meta.pages).or(entry.pages.take());
                 entry.url = meta.url.or(entry.url.take());
 
+                if let Some(hp) = howpublished {
+                    entry.howpublished = Some(hp);
+                }
+                if let Some(m) = month {
+                    entry.month = Some(m);
+                }
                 if let Some(n) = note {
                     entry.note = Some(n);
                 }
@@ -935,6 +949,8 @@ pub async fn cmd_edit(
         if let Some(v) = volume { entry.volume = Some(v); }
         if let Some(n) = number { entry.number = Some(n); }
         if let Some(pg) = pages { entry.pages = Some(pg); }
+        if let Some(hp) = howpublished { entry.howpublished = Some(hp); }
+        if let Some(m) = month { entry.month = Some(m); }
         if let Some(n) = note { entry.note = Some(n); }
         if let Some(ta) = tags_add {
             for tag in ta.split(',').map(|s| s.trim().to_string()) {
