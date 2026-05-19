@@ -1217,6 +1217,8 @@ pub fn cmd_import(file: PathBuf, to: Option<String>, config: &Config) -> Result<
             tags: raw.keywords
                 .map(|k| k.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
                 .unwrap_or_default(),
+            howpublished: None,
+            month: None,
             note: raw.note,
             collections,
             file_path: None,
@@ -1938,6 +1940,8 @@ pub fn cmd_sync(yes: bool, json: bool, config: &Config) -> Result<()> {
                 url: None,
                 abstract_text: None,
                 tags: vec![],
+                howpublished: None,
+                month: None,
                 note: Some(config.msgs.sync_added_note().to_string()),
                 collections: vec![],
                 file_path: Some(fp.clone()),
