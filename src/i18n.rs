@@ -282,6 +282,20 @@ impl Msgs {
         }
     }
 
+    pub fn label_howpublished(&self) -> &'static str {
+        match self.lang {
+            Lang::En => "How published",
+            Lang::Ko => "출판 방법",
+        }
+    }
+
+    pub fn label_month(&self) -> &'static str {
+        match self.lang {
+            Lang::En => "Month",
+            Lang::Ko => "월",
+        }
+    }
+
     pub fn label_note(&self) -> &'static str {
         match self.lang {
             Lang::En => "Note",
