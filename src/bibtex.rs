@@ -261,4 +261,95 @@ mod tests {
     fn unicode_preserved() {
         assert_eq!(escape_bibtex("Müller & Ström"), "Müller \\& Ström");
     }
+
+    fn make_misc_entry() -> Entry {
+        Entry {
+            id: "test-id".to_string(),
+            bibtex_key: "vrgorilla2024thailand".to_string(),
+            entry_type: EntryType::Misc,
+            title: Some("Bangkok, Thailand Guided Tour in 360 VR".to_string()),
+            author: vec!["VR Gorilla".to_string()],
+            year: Some(2024),
+            journal: None,
+            volume: None,
+            number: None,
+            pages: None,
+            publisher: None,
+            editor: None,
+            edition: None,
+            isbn: None,
+            booktitle: None,
+            doi: None,
+            url: Some("https://www.youtube.com/watch?v=pCVeh2Rv5Qo".to_string()),
+            abstract_text: None,
+            tags: vec![],
+            howpublished: None,
+            month: None,
+            note: None,
+            collections: vec![],
+            file_path: None,
+            created_at: "2024-01-01 00:00:00".to_string(),
+            updated_at: None,
+        }
+    }
+
+    #[test]
+    fn misc_howpublished_replaces_url() {
+        let mut entry = make_misc_entry();
+        entry.howpublished = Some(r#"[Online Video]. Available: \url{https://www.youtube.com/watch?v=pCVeh2Rv5Qo}"#.to_string());
+        let bib = entry_to_bibtex(&entry);
+        assert!(bib.contains("howpublished"), "should contain howpublished field");
+        assert!(!bib.contains("  url "), "should not contain url when howpublished is set");
+        assert!(bib.contains(r"\url{"), "\\url{} should be preserved");
+    }
+
+    #[test]
+    fn misc_url_fallback_without_howpublished() {
+        let entry = make_misc_entry();
+        let bib = entry_to_bibtex(&entry);
+        assert!(bib.contains("url"), "should contain url when no howpublished");
+        assert!(!bib.contains("howpublished"), "should not contain howpublished");
+    }
+
+    #[test]
+    fn month_macro_no_braces() {
+        let mut entry = make_misc_entry();
+        entry.month = Some("jan".to_string());
+        let bib = entry_to_bibtex(&entry);
+        assert!(bib.contains("month     = jan"), "macro month should have no braces, got:\n{}", bib);
+    }
+
+    #[test]
+    fn month_non_macro_has_braces() {
+        let mut entry = make_misc_entry();
+        entry.month = Some("January".to_string());
+        let bib = entry_to_bibtex(&entry);
+        assert!(bib.contains("month     = {January}"), "non-macro month should have braces, got:\n{}", bib);
+    }
+
+    #[test]
+    fn month_macro_case_insensitive() {
+        let mut entry = make_misc_entry();
+        entry.month = Some("Jan".to_string());
+        let bib = entry_to_bibtex(&entry);
+        assert!(bib.contains("month     = jan"), "should normalize to lowercase, got:\n{}", bib);
+    }
+
+    #[test]
+    fn misc_full_ieee_format() {
+        let mut entry = make_misc_entry();
+        entry.month = Some("jan".to_string());
+        entry.howpublished = Some(r#"[Online Video]. Available: \url{https://www.youtube.com/watch?v=pCVeh2Rv5Qo}"#.to_string());
+        entry.note = Some("Accessed: Aug. 15, 2024".to_string());
+        entry.url = Some("https://www.youtube.com/watch?v=pCVeh2Rv5Qo".to_string());
+
+        let bib = entry_to_bibtex(&entry);
+
+        assert!(bib.contains("@misc{vrgorilla2024thailand,"));
+        assert!(bib.contains("month     = jan,"));
+        assert!(bib.contains("howpublished = {"));
+        assert!(bib.contains(r"\url{"));
+        assert!(bib.contains("note      = {Accessed: Aug. 15, 2024}"));
+        assert!(!bib.contains("  url "), "url field should not appear when howpublished is set");
+    }
 }
