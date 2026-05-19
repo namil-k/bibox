@@ -1490,6 +1490,12 @@ fn entries_to_yaml(entries: &[&Entry]) -> String {
         if let Some(ref u) = entry.url {
             out.push_str(&format!("url: {}\n", yaml_scalar(u)));
         }
+        if let Some(ref hp) = entry.howpublished {
+            out.push_str(&format!("howpublished: {}\n", yaml_scalar(hp)));
+        }
+        if let Some(ref m) = entry.month {
+            out.push_str(&format!("month: {}\n", yaml_scalar(m)));
+        }
         if let Some(ref isbn) = entry.isbn {
             out.push_str(&format!("isbn: {}\n", yaml_scalar(isbn)));
         }
@@ -1598,6 +1604,15 @@ fn entries_to_ris(entries: &[&Entry]) -> String {
         if let Some(ref pub_) = entry.publisher {
             out.push_str(&format!("PB  - {}\n", pub_));
         }
+        if let Some(ref u) = entry.url {
+            out.push_str(&format!("UR  - {}\n", u));
+        }
+        if let Some(ref m) = entry.month {
+            out.push_str(&format!("DA  - {}\n", m));
+        }
+        if let Some(ref note) = entry.note {
+            out.push_str(&format!("N1  - {}\n", note));
+        }
         out.push_str("ER  - \n\n");
     }
     out
@@ -1605,7 +1620,7 @@ fn entries_to_ris(entries: &[&Entry]) -> String {
 
 fn entries_to_csv(entries: &[&Entry]) -> String {
     let mut out = String::new();
-    out.push_str("key,type,title,authors,year,journal,doi,tags,collections\n");
+    out.push_str("key,type,title,authors,year,month,journal,doi,howpublished,tags,collections\n");
     for entry in entries {
         let title = entry.title.as_deref().unwrap_or("");
         let authors = entry.author.join("; ");
@@ -1613,8 +1628,10 @@ fn entries_to_csv(entries: &[&Entry]) -> String {
             .year
             .map(|y| y.to_string())
             .unwrap_or_default();
+        let month = entry.month.as_deref().unwrap_or("");
         let journal = entry.journal.as_deref().unwrap_or("");
         let doi = entry.doi.as_deref().unwrap_or("");
+        let howpublished = entry.howpublished.as_deref().unwrap_or("");
         let tags = entry.tags.join("; ");
         let collections = entry.collections.join("; ");
 
@@ -1628,9 +1645,13 @@ fn entries_to_csv(entries: &[&Entry]) -> String {
         out.push(',');
         out.push_str(&csv_field(&year));
         out.push(',');
+        out.push_str(&csv_field(month));
+        out.push(',');
         out.push_str(&csv_field(journal));
         out.push(',');
         out.push_str(&csv_field(doi));
+        out.push(',');
+        out.push_str(&csv_field(howpublished));
         out.push(',');
         out.push_str(&csv_field(&tags));
         out.push(',');
