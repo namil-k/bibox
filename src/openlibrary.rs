@@ -129,6 +129,8 @@ pub async fn fetch_by_isbn(isbn: &str, db: &Database) -> Result<Entry> {
         url: None,
         abstract_text: None,
         tags: vec![],
+        howpublished: None,
+        month: None,
         note: None,
         collections: vec![],
         file_path: None,

@@ -116,6 +116,14 @@ Examples:
         #[arg(long)]
         booktitle: Option<String>,
 
+        /// How published (for misc entries, e.g. "[Online Video]. Available: \\url{...}")
+        #[arg(long)]
+        howpublished: Option<String>,
+
+        /// Publication month (e.g. "jan", "feb", or freeform like "January")
+        #[arg(long)]
+        month: Option<String>,
+
         /// Output added entry as JSON (for scripting and AI agents)
         #[arg(long)]
         json: bool,
@@ -241,6 +249,14 @@ Examples:
         /// Note
         #[arg(long)]
         note: Option<String>,
+
+        /// How published (for misc entries)
+        #[arg(long)]
+        howpublished: Option<String>,
+
+        /// Publication month
+        #[arg(long)]
+        month: Option<String>,
 
         /// Tags to add, comma-separated
         #[arg(long)]
@@ -606,11 +622,13 @@ async fn main() -> Result<()> {
             journal,
             publisher,
             booktitle,
+            howpublished,
+            month,
             json,
         }) => {
             commands::cmd_add(
                 file, to, doi, isbn, arxiv, url, search, index, key, title, author, year, r#type, journal,
-                publisher, booktitle, json, &config,
+                publisher, booktitle, howpublished, month, json, &config,
             )
             .await?;
         }
@@ -652,6 +670,8 @@ async fn main() -> Result<()> {
             number,
             pages,
             note,
+            howpublished,
+            month,
             tags_add,
             tags_remove,
             attach_pdf,
@@ -669,6 +689,8 @@ async fn main() -> Result<()> {
                 number,
                 pages,
                 note,
+                howpublished,
+                month,
                 tags_add,
                 tags_remove,
                 attach_pdf,

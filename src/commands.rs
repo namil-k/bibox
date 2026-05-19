@@ -92,6 +92,8 @@ pub async fn cmd_add(
     journal_arg: Option<String>,
     publisher_arg: Option<String>,
     booktitle_arg: Option<String>,
+    howpublished_arg: Option<String>,
+    month_arg: Option<String>,
     json: bool,
     config: &Config,
 ) -> Result<()> {
@@ -230,6 +232,8 @@ pub async fn cmd_add(
                     url: Some(meta.url),
                     abstract_text: None,
                     tags: vec![],
+                    howpublished: howpublished_arg.clone(),
+                    month: month_arg.clone(),
                     note: None,
                     collections: collection.map(|c| vec![c]).unwrap_or_default(),
                     file_path: None,
@@ -303,6 +307,8 @@ pub async fn cmd_add(
                 url: url_preserved.clone().or_else(|| url_arg.clone()),
                 abstract_text: None,
                 tags: vec![],
+                howpublished: howpublished_arg.clone(),
+                month: month_arg.clone(),
                 note: None,
                 collections,
                 file_path: None,
@@ -506,6 +512,8 @@ pub async fn cmd_add(
                 url: None,
                 abstract_text: None,
                 tags: vec![],
+                howpublished: None,
+                month: None,
                 note: None,
                 collections: vec![],
                 file_path: None,
@@ -586,6 +594,8 @@ pub async fn cmd_add(
         url: meta.as_ref().and_then(|m| m.url.clone()),
         abstract_text: None,
         tags: vec![],
+        howpublished: howpublished_arg,
+        month: month_arg,
         note: None,
         collections,
         file_path,
@@ -836,6 +846,12 @@ pub fn cmd_show(id_or_key: String, json: bool, config: &Config) -> Result<()> {
     if let Some(fp) = &entry.file_path {
         println!("{}: {}", config.msgs.label_file(), fp);
     }
+    if let Some(hp) = &entry.howpublished {
+        println!("{}: {}", config.msgs.label_howpublished(), hp);
+    }
+    if let Some(m) = &entry.month {
+        println!("{}: {}", config.msgs.label_month(), m);
+    }
     if let Some(note) = &entry.note {
         println!("{}: {}", config.msgs.label_note(), note);
     }
@@ -860,6 +876,8 @@ pub async fn cmd_edit(
     number: Option<String>,
     pages: Option<String>,
     note: Option<String>,
+    howpublished: Option<String>,
+    month: Option<String>,
     tags_add: Option<String>,
     tags_remove: Option<String>,
     attach_pdf: Option<std::path::PathBuf>,
@@ -893,6 +911,12 @@ pub async fn cmd_edit(
                 entry.pages = pages.or(meta.pages).or(entry.pages.take());
                 entry.url = meta.url.or(entry.url.take());
 
+                if let Some(hp) = howpublished {
+                    entry.howpublished = Some(hp);
+                }
+                if let Some(m) = month {
+                    entry.month = Some(m);
+                }
                 if let Some(n) = note {
                     entry.note = Some(n);
                 }
@@ -925,6 +949,8 @@ pub async fn cmd_edit(
         if let Some(v) = volume { entry.volume = Some(v); }
         if let Some(n) = number { entry.number = Some(n); }
         if let Some(pg) = pages { entry.pages = Some(pg); }
+        if let Some(hp) = howpublished { entry.howpublished = Some(hp); }
+        if let Some(m) = month { entry.month = Some(m); }
         if let Some(n) = note { entry.note = Some(n); }
         if let Some(ta) = tags_add {
             for tag in ta.split(',').map(|s| s.trim().to_string()) {
@@ -1150,6 +1176,8 @@ pub fn cmd_import(file: PathBuf, to: Option<String>, config: &Config) -> Result<
                 if e.booktitle.is_none() { if let Some(v) = raw.booktitle.take() { e.booktitle = Some(v); n += 1; } }
                 if e.url.is_none() { if let Some(v) = raw.url.take() { e.url = Some(v); n += 1; } }
                 if e.note.is_none() { if let Some(v) = raw.note.take() { e.note = Some(v); n += 1; } }
+                if e.howpublished.is_none() { if let Some(v) = raw.howpublished.take() { e.howpublished = Some(v); n += 1; } }
+                if e.month.is_none() { if let Some(v) = raw.month.take() { e.month = Some(v); n += 1; } }
                 if n > 0 {
                     merged.push(config.msgs.merged_fields(&existing_key, n));
                 } else {
@@ -1191,6 +1219,8 @@ pub fn cmd_import(file: PathBuf, to: Option<String>, config: &Config) -> Result<
             tags: raw.keywords
                 .map(|k| k.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
                 .unwrap_or_default(),
+            howpublished: raw.howpublished,
+            month: raw.month,
             note: raw.note,
             collections,
             file_path: None,
@@ -1912,6 +1942,8 @@ pub fn cmd_sync(yes: bool, json: bool, config: &Config) -> Result<()> {
                 url: None,
                 abstract_text: None,
                 tags: vec![],
+                howpublished: None,
+                month: None,
                 note: Some(config.msgs.sync_added_note().to_string()),
                 collections: vec![],
                 file_path: Some(fp.clone()),
@@ -2129,7 +2161,7 @@ pub fn cmd_modify(
         // Validate field name
         match field.as_str() {
             "year" | "journal" | "publisher" | "booktitle" | "volume" | "number" | "pages"
-            | "note" | "tags_add" | "tags_remove" => {}
+            | "note" | "howpublished" | "month" | "tags_add" | "tags_remove" => {}
             other => anyhow::bail!("Unknown field '{}'", other),
         }
         parsed_assignments.push(Assignment { field, value });
@@ -2230,6 +2262,8 @@ pub fn cmd_modify(
                 "number" => entry.number = Some(a.value.clone()),
                 "pages" => entry.pages = Some(a.value.clone()),
                 "note" => entry.note = Some(a.value.clone()),
+                "howpublished" => entry.howpublished = Some(a.value.clone()),
+                "month" => entry.month = Some(a.value.clone()),
                 "tags_add" => {
                     for tag in a.value.split(',') {
                         let tag = tag.trim().to_string();
@@ -2643,6 +2677,8 @@ struct RawBibEntry {
     doi: Option<String>,
     url: Option<String>,
     note: Option<String>,
+    howpublished: Option<String>,
+    month: Option<String>,
     abstract_text: Option<String>,
     keywords: Option<String>,
 }
@@ -2695,6 +2731,8 @@ fn parse_bibtex(content: &str) -> Vec<RawBibEntry> {
             doi: None,
             url: None,
             note: None,
+            howpublished: None,
+            month: None,
             abstract_text: None,
             keywords: None,
         };
@@ -2717,6 +2755,8 @@ fn parse_bibtex(content: &str) -> Vec<RawBibEntry> {
                 "doi"       => raw.doi       = Some(value),
                 "url"       => raw.url       = Some(value),
                 "note"      => raw.note      = Some(value),
+                "howpublished" => raw.howpublished = Some(value),
+                "month"        => raw.month = Some(value),
                 "abstract"  => raw.abstract_text = Some(decode_latex(&value)),
                 "keywords"  => raw.keywords  = Some(value),
                 _ => {}
