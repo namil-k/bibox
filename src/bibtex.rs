@@ -42,6 +42,23 @@ fn escape_bibtex(s: &str) -> String {
     result
 }
 
+fn is_bibtex_month_macro(s: &str) -> bool {
+    matches!(
+        s.trim().to_lowercase().as_str(),
+        "jan" | "feb" | "mar" | "apr" | "may" | "jun"
+        | "jul" | "aug" | "sep" | "oct" | "nov" | "dec"
+    )
+}
+
+fn format_month_field(month: &str) -> String {
+    let trimmed = month.trim();
+    if is_bibtex_month_macro(trimmed) {
+        format!("  month     = {},", trimmed.to_lowercase())
+    } else {
+        format!("  month     = {{{}}},", trimmed)
+    }
+}
+
 pub fn entry_to_bibtex(entry: &Entry) -> String {
     let mut lines = Vec::new();
 
@@ -65,6 +82,10 @@ pub fn entry_to_bibtex(entry: &Entry) -> String {
 
     if let Some(year) = entry.year {
         lines.push(format!("  year      = {{{}}},", year));
+    }
+
+    if let Some(month) = &entry.month {
+        lines.push(format_month_field(month));
     }
 
     // Type-specific fields
@@ -106,7 +127,9 @@ pub fn entry_to_bibtex(entry: &Entry) -> String {
             }
         }
         EntryType::Misc => {
-            if let Some(u) = &entry.url {
+            if let Some(hp) = &entry.howpublished {
+                lines.push(format!("  howpublished = {{{}}},", escape_bibtex(hp)));
+            } else if let Some(u) = &entry.url {
                 lines.push(format!("  url       = {{{}}},", u));
             }
         }
