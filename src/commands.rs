@@ -1401,8 +1401,9 @@ pub fn cmd_export(
         for entry in &entries {
             if let Some(fp) = &entry.file_path {
                 let src = config.bibox_dir.join(fp);
-                if src.exists() {
-                    let dst = dest_dir.join(fp);
+                let filename = std::path::Path::new(fp).file_name().unwrap_or_default();
+                if src.exists() && !filename.is_empty() {
+                    let dst = dest_dir.join(filename);
                     std::fs::copy(&src, &dst)?;
                     copied += 1;
                 }
@@ -1431,8 +1432,9 @@ fn export_pdfs(
     for entry in entries {
         if let Some(fp) = &entry.file_path {
             let src = config.bibox_dir.join(fp);
-            if src.exists() {
-                let dst = dest_dir.join(fp);
+            let filename = std::path::Path::new(fp).file_name().unwrap_or_default();
+            if src.exists() && !filename.is_empty() {
+                let dst = dest_dir.join(filename);
                 std::fs::copy(&src, &dst)?;
                 copied += 1;
             }
@@ -1812,9 +1814,12 @@ pub fn cmd_init(path: PathBuf, migrate: bool, json: bool, config: &Config) -> Re
         println!("{}", serde_json::to_string_pretty(&result)?);
     } else {
         println!("Initialized bibox home: {}", home.display());
-        println!("  pdfs/    — PDF files");
-        println!("  notes/   — Markdown notes");
-        println!("  db.json  — Database");
+        println!("  pdfs/    - PDF files");
+        println!("  notes/   - Markdown notes");
+        println!("  db.json  - Database");
+        println!();
+        println!("To store PDFs separately (iCloud, Google Drive, Dropbox):");
+        println!("  Add to config.toml: pdf_dir = \"~/path/to/cloud/bibox-pdfs\"");
         println!();
         println!("To sync with GitHub:");
         println!("  cd {} && git init && git add . && git commit -m 'init bibox'", home.display());
@@ -3529,10 +3534,24 @@ Issue types:
 - `orphaned_note` - Note file with no matching entry
 - `invalid_json` - db.json is not valid JSON (e.g. git merge conflict markers)
 
+## PDF Storage (Cloud Sync)
+
+By default, PDFs live in `<home>/pdfs/`. To store them separately (e.g. iCloud, Google Drive, Dropbox), set `pdf_dir` in config.toml:
+
+```toml
+# ~/.config/bibox/config.toml
+pdf_dir = "~/Library/Mobile Documents/com~apple~CloudDocs/bibox-pdfs"  # iCloud
+# pdf_dir = "~/Google Drive/bibox-pdfs"                                # Google Drive
+# pdf_dir = "~/Dropbox/bibox-pdfs"                                     # Dropbox
+```
+
+This lets you git-sync `db.json` + notes without committing large PDFs. `bibox config --json` shows the resolved `pdf_dir`.
+
 ## Tips
 
 - Run `bibox config --json` to get all paths (home, db, pdfs, notes, config.toml location).
-- The home path is the git-syncable directory. Get it from `bibox config --json` → `home` field.
+- The home path is the git-syncable directory. Get it from `bibox config --json` -> `home` field.
+- `pdf_dir` in config output shows where PDFs are actually stored (may differ from home).
 - All `--json` output goes to stdout. Errors go to stderr.
 - When a command fails, the exit code is non-zero.
 - If db.json is corrupted or has git merge conflicts, run `bibox doctor` for a diagnosis.
@@ -3546,6 +3565,7 @@ pub fn cmd_config(json: bool, config: &Config) -> Result<()> {
         let result = serde_json::json!({
             "config_path": config_path.to_string_lossy(),
             "home": config.home.as_ref().map(|h| h.to_string_lossy().to_string()),
+            "pdf_dir": config.pdf_dir.as_ref().map(|p| p.to_string_lossy().to_string()),
             "db_path": db_path.to_string_lossy(),
             "bibox_dir": config.bibox_dir.to_string_lossy(),
             "notes_dir": config.notes_dir.to_string_lossy(),
@@ -3561,6 +3581,7 @@ pub fn cmd_config(json: bool, config: &Config) -> Result<()> {
     } else {
         println!("Config:       {}", config_path.display());
         println!("Home:         {}", config.home.as_ref().map(|h| h.to_string_lossy().to_string()).unwrap_or_else(|| "(not set)".into()));
+        println!("PDF dir:      {}", config.pdf_dir.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| "(default)".into()));
         println!("Database:     {}", db_path.display());
         println!("PDFs:         {}", config.bibox_dir.display());
         println!("Notes:        {}", config.notes_dir.display());

@@ -677,19 +677,6 @@ impl Msgs {
         }
     }
 
-    pub fn url_resolve_failed(&self) -> &'static str {
-        match self.lang {
-            Lang::En => "Could not extract metadata from URL. Try --doi or --search instead.",
-            Lang::Ko => "URL에서 메타데이터를 추출할 수 없습니다. --doi 또는 --search를 사용하세요.",
-        }
-    }
-
-    pub fn url_fetch_failed(&self, reason: &str) -> String {
-        match self.lang {
-            Lang::En => format!("Failed to fetch URL: {}", reason),
-            Lang::Ko => format!("URL 가져오기 실패: {}", reason),
-        }
-    }
 
     pub fn note_saved(&self, path: &str) -> String {
         match self.lang {

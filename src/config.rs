@@ -21,6 +21,10 @@ pub struct Config {
     /// Portable home directory (set by `bibox init`). When set, db/pdfs/notes live here.
     #[serde(default)]
     pub home: Option<PathBuf>,
+    /// Custom PDF storage directory (e.g. iCloud, Google Drive, Dropbox).
+    /// Overrides `home/pdfs/` when set.
+    #[serde(default)]
+    pub pdf_dir: Option<PathBuf>,
     pub bibox_dir: PathBuf,
     pub pdf_viewer: Option<String>,
     pub default_collection: Option<String>,
@@ -51,6 +55,9 @@ pub struct Config {
     /// Citekey format template. Variables: {author}, {year}, {title}
     #[serde(default = "default_citekey_format")]
     pub citekey_format: String,
+    /// Natural scrolling (like macOS default): scroll down to move content up
+    #[serde(default)]
+    pub natural_scroll: bool,
     #[serde(skip)]
     pub msgs: Msgs,
 }
@@ -59,6 +66,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             home: None,
+            pdf_dir: None,
             bibox_dir: default_bibox_dir(),
             pdf_viewer: None,
             default_collection: None,
@@ -73,6 +81,7 @@ impl Default for Config {
             bib_export_dir: default_bib_export_dir(),
             export_dir: default_export_dir(),
             citekey_format: default_citekey_format(),
+            natural_scroll: false,
             msgs: Msgs::default(),
         }
     }
@@ -160,6 +169,11 @@ pub fn load_config() -> Result<Config> {
         let home = expand_tilde(home);
         config.bibox_dir = home.join("pdfs");
         config.notes_dir = home.join("notes");
+    }
+
+    // pdf_dir overrides bibox_dir when explicitly set
+    if let Some(ref pdf_dir) = config.pdf_dir {
+        config.bibox_dir = expand_tilde(pdf_dir);
     }
 
     Ok(config)

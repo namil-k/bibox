@@ -1,6 +1,6 @@
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind, MouseButton},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEvent, MouseEventKind, MouseButton},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -14,7 +14,7 @@ use ratatui::{
 };
 use std::io;
 
-use crate::bibtex::{entries_to_bibtex, entry_to_filename};
+use crate::bibtex::entry_to_filename;
 use crate::config::Config;
 use crate::models::Entry;
 use crate::storage::{find_by_key_mut, load_db, save_db};
@@ -84,6 +84,28 @@ enum Mode {
     FilePicker(FilePickerContext),
     FetchPreview,
     SearchResultPicker,
+    ContextMenu,
+}
+
+struct ContextMenuState {
+    x: u16,
+    y: u16,
+    index: usize,
+}
+
+impl ContextMenuState {
+    const ITEMS: &'static [(&'static str, &'static str, char)] = &[
+        ("Open PDF",    "o", 'o'),
+        ("Web",         "w", 'w'),
+        ("Copy Key",    "y", 'y'),
+        ("Collect",     "c", 'c'),
+        ("Tag",         "t", 't'),
+        ("Note",        "N", 'N'),
+        ("Export",      "e", 'e'),
+        ("Fetch Meta",  "f", 'f'),
+        ("Sort",        "s", 's'),
+        ("Delete",      "d", 'd'),
+    ];
 }
 
 struct FieldChange {
@@ -157,6 +179,7 @@ enum FilePickerContext {
     AttachPdf(String),  // citekey
     BibExportDir,
     ExportDir,
+    PdfDir,
     Home,
 }
 
@@ -259,6 +282,7 @@ pub struct App {
     focus: Panel,
     preview_mode: PreviewMode,
     preview_scroll: u16,
+    preview_max_scroll: u16,
     // Note cache
     note_content: String,
     note_citekey: String,
@@ -299,6 +323,7 @@ pub struct App {
     git_sync_result: std::sync::Arc<std::sync::Mutex<Option<Result<String, String>>>>,
     // Panel areas for mouse hit-testing
     panel_areas: [Rect; 3],
+    context_menu: ContextMenuState,
 }
 
 impl App {
@@ -333,6 +358,7 @@ impl App {
             focus: Panel::Entries,
             preview_mode: PreviewMode::Info,
             preview_scroll: 0,
+            preview_max_scroll: 0,
             note_content: String::new(),
             note_citekey: String::new(),
             pending_editor: None,
@@ -363,6 +389,7 @@ impl App {
             git_syncing: false,
             git_sync_result: std::sync::Arc::new(std::sync::Mutex::new(None)),
             panel_areas: [Rect::default(); 3],
+            context_menu: ContextMenuState { x: 0, y: 0, index: 0 },
         })
     }
 
@@ -559,21 +586,6 @@ impl App {
         }
     }
 
-    fn export_collection_bib(&self) -> String {
-        let col = self.current_collection();
-        let entries: Vec<&Entry> = self.entries.iter()
-            .filter(|e| match col {
-                None => true,
-                Some(c) => e.collections.iter().any(|ec| ec == c),
-            })
-            .collect();
-        let bib = entries_to_bibtex(&entries);
-        let col_name = col.unwrap_or("all");
-        let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
-        let filename = format!("{}_{}.bib", col_name, timestamp);
-        let _ = std::fs::write(&filename, &bib);
-        filename
-    }
 
     fn delete_selected(&mut self) -> Result<()> {
         self.push_undo();
@@ -858,6 +870,9 @@ fn draw(f: &mut Frame, app: &mut App) {
         Mode::Settings => {
             draw_settings_popup(f, app, size);
         }
+        Mode::ContextMenu => {
+            draw_context_menu(f, app, size);
+        }
         _ => {}
     }
 }
@@ -906,7 +921,7 @@ fn draw_collections_panel(f: &mut Frame, app: &App, area: Rect) {
     let highlight_style = if focused {
         Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+        Style::default().fg(Color::White).bg(Color::DarkGray).add_modifier(Modifier::BOLD)
     };
 
     let list = List::new(items)
@@ -973,7 +988,7 @@ fn draw_entries_panel(f: &mut Frame, app: &mut App, area: Rect) {
 
         let mut item = ListItem::new(Text::from(vec![line1, line2, line3]));
         if is_selected {
-            item = item.style(Style::default().bg(Color::Rgb(30, 50, 30)));
+            item = item.style(Style::default().fg(Color::Green));
         }
         item
     }).collect();
@@ -1004,7 +1019,7 @@ fn draw_entries_panel(f: &mut Frame, app: &mut App, area: Rect) {
     let highlight_style = if focused {
         Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
     } else {
-        Style::default().add_modifier(Modifier::BOLD)
+        Style::default().fg(Color::White).bg(Color::DarkGray)
     };
 
     let list = List::new(items)
@@ -1065,19 +1080,19 @@ fn draw_preview_panel(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
-fn draw_preview_info(f: &mut Frame, app: &App, area: Rect) {
+fn draw_preview_info(f: &mut Frame, app: &mut App, area: Rect) {
     let entry = match app.selected_entry() {
-        Some(e) => e,
+        Some(e) => e.clone(),
         None => {
             f.render_widget(Paragraph::new("No entry selected.").style(Style::default().fg(Color::DarkGray)), area);
             return;
         }
     };
 
-    let mut lines: Vec<Line<'_>> = vec![];
+    let mut lines: Vec<Line<'static>> = vec![];
 
     if let Some(t) = &entry.title {
-        lines.push(Line::from(Span::styled(t.as_str(), Style::default().add_modifier(Modifier::BOLD))));
+        lines.push(Line::from(Span::styled(t.clone(), Style::default().add_modifier(Modifier::BOLD))));
         lines.push(Line::from(""));
     }
 
@@ -1090,17 +1105,17 @@ fn draw_preview_info(f: &mut Frame, app: &App, area: Rect) {
         };
     }
 
-    field!("Key:", entry.bibtex_key.as_str());
+    field!("Key:", &entry.bibtex_key);
     field!("Type:", entry.entry_type.to_string());
     if !entry.author.is_empty() { field!("Author:", entry.author.join("; ")); }
     if let Some(y) = entry.year { field!("Year:", y.to_string()); }
-    if let Some(m) = &entry.month { field!("Month:", m.as_str()); }
-    if let Some(j) = &entry.journal { field!("Journal:", j.as_str()); }
-    if let Some(bt) = &entry.booktitle { field!("Booktitle:", bt.as_str()); }
-    if let Some(p) = &entry.publisher { field!("Publisher:", p.as_str()); }
-    if let Some(doi) = &entry.doi { field!("DOI:", doi.as_str()); }
-    if let Some(url) = &entry.url { field!("URL:", url.as_str()); }
-    if let Some(hp) = &entry.howpublished { field!("Published:", hp.as_str()); }
+    if let Some(m) = &entry.month { field!("Month:", m.clone()); }
+    if let Some(j) = &entry.journal { field!("Journal:", j.clone()); }
+    if let Some(bt) = &entry.booktitle { field!("Booktitle:", bt.clone()); }
+    if let Some(p) = &entry.publisher { field!("Publisher:", p.clone()); }
+    if let Some(doi) = &entry.doi { field!("DOI:", doi.clone()); }
+    if let Some(url) = &entry.url { field!("URL:", url.clone()); }
+    if let Some(hp) = &entry.howpublished { field!("Published:", hp.clone()); }
     if !entry.tags.is_empty() { field!("Tags:", entry.tags.join(", ")); }
     if !entry.collections.is_empty() {
         field!("Collections:", entry.collections.join(", "));
@@ -1111,7 +1126,7 @@ fn draw_preview_info(f: &mut Frame, app: &App, area: Rect) {
         ]));
     }
     if let Some(fp) = &entry.file_path {
-        field!("File:", fp.as_str());
+        field!("File:", fp.clone());
     } else {
         lines.push(Line::from(vec![
             Span::styled(format!("{:<12}", "File:"), Style::default().fg(Color::Cyan)),
@@ -1121,9 +1136,12 @@ fn draw_preview_info(f: &mut Frame, app: &App, area: Rect) {
     if let Some(ref abs) = entry.abstract_text {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled("Abstract:", Style::default().fg(Color::Cyan))));
-        // Word-wrap abstract text (simple approach: just push as-is, TUI wraps)
-        lines.push(Line::from(Span::styled(abs.as_str(), Style::default().fg(Color::DarkGray))));
+        lines.push(Line::from(Span::styled(abs.clone(), Style::default().fg(Color::DarkGray))));
     }
+
+    let content_lines = lines.len() as u16;
+    app.preview_max_scroll = content_lines.saturating_sub(1);
+    app.preview_scroll = app.preview_scroll.min(app.preview_max_scroll);
 
     let p = Paragraph::new(lines)
         .scroll((app.preview_scroll, 0))
@@ -1153,6 +1171,10 @@ fn draw_preview_note(f: &mut Frame, app: &mut App, area: Rect) {
     }
 
     let lines = render_markdown_to_lines(&app.note_content);
+
+    let content_lines = lines.len() as u16;
+    app.preview_max_scroll = content_lines.saturating_sub(1);
+    app.preview_scroll = app.preview_scroll.min(app.preview_max_scroll);
 
     let p = Paragraph::new(lines)
         .scroll((app.preview_scroll, 0))
@@ -1203,7 +1225,7 @@ fn render_markdown_to_lines(md: &str) -> Vec<Line<'static>> {
             Event::Start(Tag::Emphasis) => { italic = true; }
             Event::End(TagEnd::Emphasis) => { italic = false; }
             Event::Code(text) => {
-                let style = Style::default().fg(Color::Green).bg(Color::Rgb(40, 40, 40));
+                let style = Style::default().fg(Color::Green).bg(Color::DarkGray);
                 current_spans.push(Span::styled(format!(" {} ", text), style));
             }
             Event::Start(Tag::CodeBlock(_)) => {
@@ -1248,7 +1270,7 @@ fn render_markdown_to_lines(md: &str) -> Vec<Line<'static>> {
             Event::Text(text) => {
                 if in_code_block {
                     // Code block: render each line with background
-                    let style = Style::default().fg(Color::White).bg(Color::Rgb(40, 40, 40));
+                    let style = Style::default().fg(Color::White).bg(Color::DarkGray);
                     for line in text.lines() {
                         lines.push(Line::from(Span::styled(format!("  {}", line), style)));
                     }
@@ -1313,28 +1335,22 @@ fn render_markdown_to_lines(md: &str) -> Vec<Line<'static>> {
     lines
 }
 
-fn draw_preview_pdf(f: &mut Frame, app: &App, area: Rect) {
-    let entry = match app.selected_entry() {
-        Some(e) => e,
+fn draw_preview_pdf(f: &mut Frame, app: &mut App, area: Rect) {
+    let fp = match app.selected_entry().and_then(|e| e.file_path.clone()) {
+        Some(fp) => fp,
         None => {
-            f.render_widget(Paragraph::new("No entry selected.").style(Style::default().fg(Color::DarkGray)), area);
+            let msg = if app.selected_entry().is_some() {
+                "No PDF attached.\nPress o to fetch or open."
+            } else {
+                "No entry selected."
+            };
+            f.render_widget(Paragraph::new(msg).style(Style::default().fg(Color::DarkGray)), area);
             return;
         }
     };
 
-    if entry.file_path.is_none() {
-        f.render_widget(
-            Paragraph::new("No PDF attached.\nPress o to fetch or open.").style(Style::default().fg(Color::DarkGray)),
-            area,
-        );
-        return;
-    }
+    let full_path = app.config.bibox_dir.join(&fp);
 
-    // PDF preview placeholder — Kitty protocol rendering to be implemented
-    let fp = entry.file_path.as_ref().unwrap();
-    let full_path = app.config.bibox_dir.join(fp);
-
-    // Try pdftotext fallback for now
     let text = std::process::Command::new("pdftotext")
         .args(["-l", "1", "-layout", &full_path.to_string_lossy(), "-"])
         .output()
@@ -1346,12 +1362,16 @@ fn draw_preview_pdf(f: &mut Frame, app: &App, area: Rect) {
             let lines: Vec<Line> = content.lines()
                 .map(|l| Line::from(l.to_string()))
                 .collect();
+            let content_lines = lines.len() as u16;
+            app.preview_max_scroll = content_lines.saturating_sub(1);
+            app.preview_scroll = app.preview_scroll.min(app.preview_max_scroll);
             let p = Paragraph::new(lines)
                 .scroll((app.preview_scroll, 0))
                 .wrap(ratatui::widgets::Wrap { trim: false });
             f.render_widget(p, area);
         }
         None => {
+            app.preview_max_scroll = 0;
             f.render_widget(
                 Paragraph::new(format!("PDF: {}\n\nInstall pdftotext for text preview:\n  brew install poppler", fp))
                     .style(Style::default().fg(Color::DarkGray)),
@@ -1403,6 +1423,46 @@ fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+fn draw_context_menu(f: &mut Frame, app: &App, screen: Rect) {
+    let items = ContextMenuState::ITEMS;
+    let menu_w: u16 = 20;
+    let menu_h = items.len() as u16 + 2; // +2 for borders
+
+    let x = if app.context_menu.x + menu_w > screen.width {
+        screen.width.saturating_sub(menu_w)
+    } else {
+        app.context_menu.x
+    };
+    let y = if app.context_menu.y + menu_h > screen.height {
+        screen.height.saturating_sub(menu_h)
+    } else {
+        app.context_menu.y
+    };
+
+    let area = Rect::new(x, y, menu_w, menu_h);
+    f.render_widget(Clear, area);
+
+    let list_items: Vec<ListItem> = items.iter().enumerate().map(|(i, (label, key, _))| {
+        let style = if i == app.context_menu.index {
+            Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        ListItem::new(Line::from(vec![
+            Span::styled(format!(" {:<12}", label), style),
+            Span::styled(format!("{:>3} ", key), style.add_modifier(Modifier::DIM)),
+        ]))
+    }).collect();
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(Span::styled(" Actions ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
+
+    let list = List::new(list_items).block(block);
+    f.render_widget(list, area);
 }
 
 fn draw_confirm_popup(f: &mut Frame, msg: &str, area: Rect) {
@@ -1576,6 +1636,21 @@ fn draw_export_popup(f: &mut Frame, es: &ExportState, area: Rect) {
     f.render_widget(popup, popup_area);
 }
 
+fn pdf_dir_presets() -> Vec<std::path::PathBuf> {
+    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    let mut presets = Vec::new();
+    // iCloud (macOS)
+    let icloud = home.join("Library/Mobile Documents/com~apple~CloudDocs/bibox-pdfs");
+    presets.push(icloud);
+    // Google Drive
+    presets.push(home.join("Google Drive/bibox-pdfs"));
+    // Dropbox
+    presets.push(home.join("Dropbox/bibox-pdfs"));
+    // ~/Documents/bibox-pdfs
+    presets.push(home.join("Documents/bibox-pdfs"));
+    presets
+}
+
 fn get_git_status(home: &std::path::Path) -> String {
     // Check if it's a git repo
     let is_git = std::process::Command::new("git")
@@ -1663,12 +1738,20 @@ fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
 
     let ck_fmt = &app.config.citekey_format;
 
+    let scroll_label = if app.config.natural_scroll { "natural" } else { "standard" };
+    let pdf_dir_label = match &app.config.pdf_dir {
+        Some(p) => p.display().to_string(),
+        None => "(default: home/pdfs/)".into(),
+    };
+
     let mut items: Vec<(String, bool)> = vec![
         (format!("Line numbers     [{}]", ln_label), true),
         (format!("Panel ratio      [{}, {}, {}]", ratio[0], ratio[1], ratio[2]), true),
+        (format!("Scroll direction [{}]", scroll_label), true),
         (format!("Bib export dir   [{}]", bib_dir), true),
         (format!("Export dir       [{}]", exp_dir), true),
         (format!("Citekey format   [{}]", ck_fmt), true),
+        (format!("PDF storage      [{}]", pdf_dir_label), true),
     ];
     // separator + read-only items
     let readonly_start = items.len();
@@ -1719,6 +1802,150 @@ fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
 
 // ── Event loop ───────────────────────────────────────────────────────────────
 
+fn handle_mouse(app: &mut App, mouse: MouseEvent) {
+    let col = mouse.column;
+    let row = mouse.row;
+
+    if !matches!(app.mode, Mode::Normal | Mode::ContextMenu) {
+        return;
+    }
+
+    let (scroll_up, scroll_down) = if app.config.natural_scroll {
+        (MouseEventKind::ScrollDown, MouseEventKind::ScrollUp)
+    } else {
+        (MouseEventKind::ScrollUp, MouseEventKind::ScrollDown)
+    };
+
+    match mouse.kind {
+        kind if kind == scroll_up => {
+            if matches!(app.mode, Mode::ContextMenu) {
+                app.context_menu.index = app.context_menu.index.saturating_sub(1);
+            } else {
+                match app.focus {
+                    Panel::Collections => app.move_col_up(),
+                    Panel::Entries => app.move_entry_up(),
+                    Panel::Preview => app.preview_scroll = app.preview_scroll.saturating_sub(3),
+                }
+            }
+            return;
+        }
+        kind if kind == scroll_down => {
+            if matches!(app.mode, Mode::ContextMenu) {
+                let max = ContextMenuState::ITEMS.len().saturating_sub(1);
+                app.context_menu.index = (app.context_menu.index + 1).min(max);
+            } else {
+                match app.focus {
+                    Panel::Collections => app.move_col_down(),
+                    Panel::Entries => app.move_entry_down(),
+                    Panel::Preview => app.preview_scroll = app.preview_scroll.saturating_add(3).min(app.preview_max_scroll),
+                }
+            }
+            return;
+        }
+        MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Down(MouseButton::Right) => {}
+        _ => return,
+    }
+
+    let is_right = matches!(mouse.kind, MouseEventKind::Down(MouseButton::Right));
+
+    // Context menu is open: handle clicks inside/outside
+    if matches!(app.mode, Mode::ContextMenu) {
+        let items = ContextMenuState::ITEMS;
+        let menu_w: u16 = 20;
+        let menu_h = items.len() as u16 + 2;
+        let mx = app.context_menu.x;
+        let my = app.context_menu.y;
+        let in_menu = col >= mx && col < mx + menu_w && row >= my && row < my + menu_h;
+
+        if in_menu && !is_right {
+            let rel = (row.saturating_sub(my + 1)) as usize;
+            if rel < items.len() {
+                app.context_menu.index = rel;
+                execute_context_action(app, rel);
+                return;
+            }
+        }
+        app.mode = Mode::Normal;
+        if !is_right {
+            return;
+        }
+        // Right-click outside menu: close old, open new below
+    }
+
+    // Panel hit-test
+    let clicked_panel = app.panel_areas.iter().enumerate().find(|(_, area)| {
+        col >= area.x && col < area.x + area.width
+            && row >= area.y && row < area.y + area.height
+    });
+    let Some((panel_idx, &area)) = clicked_panel else { return };
+
+    let panel = match panel_idx {
+        0 => Panel::Collections,
+        1 => Panel::Entries,
+        _ => Panel::Preview,
+    };
+    app.focus = panel;
+
+    // Select the clicked item first (for both left and right click)
+    let inner_y = area.y + 1;
+    let inner_height = area.height.saturating_sub(2);
+    let in_content = row >= inner_y && row < inner_y + inner_height;
+
+    if in_content {
+        let rel_row = row.saturating_sub(inner_y) as usize;
+        match panel_idx {
+            0 => {
+                let clicked_idx = rel_row + app.col_list_state.offset();
+                if clicked_idx < app.col_count() {
+                    app.col_list_state.select(Some(clicked_idx));
+                    app.list_state.select(Some(0));
+                    app.apply_filters();
+                }
+            }
+            1 => {
+                let entry_idx = rel_row / 3 + app.list_state.offset();
+                if entry_idx < app.filtered.len() {
+                    app.list_state.select(Some(entry_idx));
+                    app.update_preview();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Right-click: open context menu at cursor
+    if is_right && app.selected_entry().is_some() {
+        app.context_menu.x = col;
+        app.context_menu.y = row;
+        app.context_menu.index = 0;
+        app.mode = Mode::ContextMenu;
+        return;
+    }
+
+    // Left-click on preview tab bar
+    if !is_right && panel_idx == 2 && row == area.y {
+        let rel_x = col.saturating_sub(area.x + 1);
+        let tab_labels = ["Info", "Note", "PDF"];
+        let mut x = if app.focus == Panel::Preview { 3 } else { 1 };
+        for (i, label) in tab_labels.iter().enumerate() {
+            let tab_width = label.len() as u16 + 2;
+            if rel_x >= x && rel_x < x + tab_width {
+                app.preview_mode = match i {
+                    0 => PreviewMode::Info,
+                    1 => PreviewMode::Note,
+                    _ => PreviewMode::Pdf,
+                };
+                app.preview_scroll = 0;
+                if app.preview_mode == PreviewMode::Note {
+                    app.load_note_for_preview();
+                }
+                return;
+            }
+            x += tab_width + 3;
+        }
+    }
+}
+
 fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
     match &app.mode {
         Mode::Normal => handle_normal(app, key),
@@ -1738,7 +1965,45 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
         Mode::FilePicker(_) => handle_file_picker(app, key),
         Mode::FetchPreview => handle_fetch_preview(app, key),
         Mode::SearchResultPicker => handle_search_result_picker(app, key),
+        Mode::ContextMenu => handle_context_menu(app, key),
     }
+}
+
+fn handle_context_menu(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
+    let max = ContextMenuState::ITEMS.len().saturating_sub(1);
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => { app.mode = Mode::Normal; }
+        KeyCode::Char('j') | KeyCode::Down => {
+            app.context_menu.index = (app.context_menu.index + 1).min(max);
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            app.context_menu.index = app.context_menu.index.saturating_sub(1);
+        }
+        KeyCode::Enter => {
+            let idx = app.context_menu.index;
+            execute_context_action(app, idx);
+        }
+        KeyCode::Char(c) => {
+            if let Some(idx) = ContextMenuState::ITEMS.iter().position(|(_, _, k)| *k == c) {
+                execute_context_action(app, idx);
+            }
+        }
+        _ => {}
+    }
+    Ok(false)
+}
+
+fn execute_context_action(app: &mut App, idx: usize) {
+    app.mode = Mode::Normal;
+    let key_char = match ContextMenuState::ITEMS.get(idx) {
+        Some((_, _, c)) => *c,
+        None => return,
+    };
+    let fake_key = crossterm::event::KeyEvent::new(
+        KeyCode::Char(key_char),
+        KeyModifiers::NONE,
+    );
+    let _ = handle_normal(app, fake_key);
 }
 
 fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
@@ -1775,7 +2040,14 @@ fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
     app.key_buf.clear();
 
     match key.code {
-        KeyCode::Char('q') | KeyCode::Esc => return Ok(true),
+        KeyCode::Char('q') => return Ok(true),
+        KeyCode::Esc => {
+            if !app.selected_keys.is_empty() {
+                app.selected_keys.clear();
+            } else {
+                return Ok(true);
+            }
+        }
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
         KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => { app.undo()?; }
         KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => { app.redo()?; }
@@ -1812,7 +2084,7 @@ fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
                 match app.focus {
                     Panel::Collections => app.move_col_down(),
                     Panel::Entries => app.move_entry_down(),
-                    Panel::Preview => { app.preview_scroll += 1; }
+                    Panel::Preview => { app.preview_scroll = app.preview_scroll.saturating_add(1).min(app.preview_max_scroll); }
                 }
             }
         }
@@ -1841,7 +2113,7 @@ fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
                         app.update_preview();
                     }
                 }
-                Panel::Preview => { app.preview_scroll = u16::MAX; }
+                Panel::Preview => { app.preview_scroll = app.preview_max_scroll; }
             }
         }
 
@@ -1872,7 +2144,7 @@ fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
         KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             match app.focus {
                 Panel::Entries => { for _ in 0..10 { app.move_entry_down(); } }
-                Panel::Preview => { app.preview_scroll += 10; }
+                Panel::Preview => { app.preview_scroll = app.preview_scroll.saturating_add(10).min(app.preview_max_scroll); }
                 Panel::Collections => { for _ in 0..5 { app.move_col_down(); } }
             }
         }
@@ -1909,12 +2181,7 @@ fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
             }
         }
 
-        // Esc — clear selection
-        KeyCode::Esc => {
-            if !app.selected_keys.is_empty() {
-                app.selected_keys.clear();
-            }
-        }
+
 
         // Preview mode switch
         KeyCode::Tab => {
@@ -2132,7 +2399,7 @@ fn filter_collections(app: &mut App) {
     // Find first matching collection (including "All")
     let col_count = app.col_count();
     for i in 0..col_count {
-        let name = if i == 0 { "all" } else { &app.collections[i - 1] };
+        let name = if i == 0 { "all" } else { match app.collections.get(i - 1) { Some(n) => n.as_str(), None => continue } };
         if name.to_lowercase().contains(&query) {
             app.col_list_state.select(Some(i));
             app.apply_filters();
@@ -2212,14 +2479,16 @@ fn handle_sort_menu(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bo
         KeyCode::Up | KeyCode::Char('k') => { if app.sort_menu_index > 0 { app.sort_menu_index -= 1; } }
         KeyCode::Down | KeyCode::Char('j') => { if app.sort_menu_index < criteria.len() - 1 { app.sort_menu_index += 1; } }
         KeyCode::Char(' ') => {
-            let selected = criteria[app.sort_menu_index];
-            if selected == app.sort_by { app.sort_ascending = !app.sort_ascending; }
-            else { app.sort_by = selected; }
+            if let Some(&selected) = criteria.get(app.sort_menu_index) {
+                if selected == app.sort_by { app.sort_ascending = !app.sort_ascending; }
+                else { app.sort_by = selected; }
+            }
         }
         KeyCode::Enter => {
-            let new_criterion = criteria[app.sort_menu_index];
-            if new_criterion != app.sort_by { app.sort_ascending = new_criterion.default_ascending(); }
-            app.sort_by = new_criterion;
+            if let Some(&new_criterion) = criteria.get(app.sort_menu_index) {
+                if new_criterion != app.sort_by { app.sort_ascending = new_criterion.default_ascending(); }
+                app.sort_by = new_criterion;
+            }
             app.apply_sort();
             app.mode = Mode::Normal;
         }
@@ -2282,7 +2551,7 @@ fn handle_export_menu(app: &mut App, key: crossterm::event::KeyEvent) -> Result<
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 match es.section {
-                    0 => { if es.scope_idx < es.scope_options.len() - 1 { es.scope_idx += 1; } }
+                    0 => { if es.scope_idx + 1 < es.scope_options.len() { es.scope_idx += 1; } }
                     1 => { if es.format_idx < formats.len() - 1 { es.format_idx += 1; } }
                     _ => {}
                 }
@@ -2291,11 +2560,9 @@ fn handle_export_menu(app: &mut App, key: crossterm::event::KeyEvent) -> Result<
                 if es.section == 2 { es.include_pdf = !es.include_pdf; }
             }
             KeyCode::Enter => {
-                let scope = es.scope_options[es.scope_idx].0;
-                let format = formats[es.format_idx];
+                let scope = es.scope_options.get(es.scope_idx).map(|o| o.0).unwrap_or(ExportScope::All);
+                let format = formats.get(es.format_idx).copied().unwrap_or(ExportFormat::BibTeX);
                 let include_pdf = es.include_pdf;
-                let col = app.current_collection().map(|s| s.to_string());
-
                 // Collect entries based on scope
                 let keys: Vec<String> = match scope {
                     ExportScope::Selected => app.selected_keys.iter().cloned().collect(),
@@ -2303,12 +2570,6 @@ fn handle_export_menu(app: &mut App, key: crossterm::event::KeyEvent) -> Result<
                         app.filtered.iter().map(|&i| app.entries[i].bibtex_key.clone()).collect()
                     }
                     ExportScope::All => app.entries.iter().map(|e| e.bibtex_key.clone()).collect(),
-                };
-
-                let col_name = match scope {
-                    ExportScope::Selected => "selected".to_string(),
-                    ExportScope::Collection => col.unwrap_or_else(|| "all".to_string()),
-                    ExportScope::All => "all".to_string(),
                 };
 
                 app.export_state = None;
@@ -2336,7 +2597,7 @@ fn handle_export_menu(app: &mut App, key: crossterm::event::KeyEvent) -> Result<
 
 fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
     use crate::config::LineNumbers;
-    let num_settings: usize = 7; // 0-3 editable, 4 citekey format, 5 home (ro), 6 git
+    let num_settings: usize = 9; // 0-6 editable, 7 home (ro), 8 git
 
     let download_dir = dirs::download_dir()
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")));
@@ -2375,22 +2636,34 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
                         _ => [2, 4, 4],
                     };
                 }
-                2 => {
+                2 => { app.config.natural_scroll = !app.config.natural_scroll; }
+                3 => {
                     let cur = &app.config.bib_export_dir;
                     let pos = dir_presets.iter().position(|d| d == cur).unwrap_or(0);
                     app.config.bib_export_dir = dir_presets[(pos + 1) % dir_presets.len()].clone();
                 }
-                3 => {
+                4 => {
                     let cur = &app.config.export_dir;
                     let pos = dir_presets.iter().position(|d| d == cur).unwrap_or(0);
                     app.config.export_dir = dir_presets[(pos + 1) % dir_presets.len()].clone();
                 }
-                4 => {
+                5 => {
                     let presets = crate::config::CITEKEY_PRESETS;
                     let pos = presets.iter().position(|p| *p == app.config.citekey_format).unwrap_or(0);
                     app.config.citekey_format = presets[(pos + 1) % presets.len()].to_string();
                 }
-                _ => {} // 5,6 are read-only
+                6 => {
+                    // Toggle pdf_dir: None -> some cloud presets
+                    let cloud_presets = pdf_dir_presets();
+                    let cur = app.config.pdf_dir.clone();
+                    let pos = cur.and_then(|c| cloud_presets.iter().position(|p| *p == c)).map(|p| p + 1).unwrap_or(0);
+                    if pos < cloud_presets.len() {
+                        app.config.pdf_dir = Some(cloud_presets[pos].clone());
+                    } else {
+                        app.config.pdf_dir = None;
+                    }
+                }
+                _ => {} // 7,8 are read-only
             }
         }
         KeyCode::Left | KeyCode::Char('h') => {
@@ -2411,30 +2684,45 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
                         _ => [2, 4, 4],
                     };
                 }
-                2 => {
+                2 => { app.config.natural_scroll = !app.config.natural_scroll; }
+                3 => {
                     let cur = &app.config.bib_export_dir;
                     let pos = dir_presets.iter().position(|d| d == cur).unwrap_or(0);
                     let prev = if pos == 0 { dir_presets.len() - 1 } else { pos - 1 };
                     app.config.bib_export_dir = dir_presets[prev].clone();
                 }
-                3 => {
+                4 => {
                     let cur = &app.config.export_dir;
                     let pos = dir_presets.iter().position(|d| d == cur).unwrap_or(0);
                     let prev = if pos == 0 { dir_presets.len() - 1 } else { pos - 1 };
                     app.config.export_dir = dir_presets[prev].clone();
                 }
-                4 => {
+                5 => {
                     let presets = crate::config::CITEKEY_PRESETS;
                     let pos = presets.iter().position(|p| *p == app.config.citekey_format).unwrap_or(0);
                     let prev = if pos == 0 { presets.len() - 1 } else { pos - 1 };
                     app.config.citekey_format = presets[prev].to_string();
                 }
+                6 => {
+                    let cloud_presets = pdf_dir_presets();
+                    let cur = app.config.pdf_dir.clone();
+                    let pos = cur.and_then(|c| cloud_presets.iter().position(|p| *p == c));
+                    match pos {
+                        Some(0) => { app.config.pdf_dir = None; }
+                        Some(p) => { app.config.pdf_dir = Some(cloud_presets[p - 1].clone()); }
+                        None => {
+                            if !cloud_presets.is_empty() {
+                                app.config.pdf_dir = Some(cloud_presets.last().unwrap().clone());
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
         KeyCode::Enter => {
-            // Dir picker for path settings (2=bib_export_dir, 3=export_dir, 5=home)
-            if app.settings_idx == 2 {
+            // Dir picker for path settings (3=bib_export_dir, 4=export_dir, 6=pdf_dir, 7=home)
+            if app.settings_idx == 3 {
                 let start = app.config.bib_export_dir.clone();
                 app.file_picker_state = Some(
                     ratatree::FilePickerState::builder()
@@ -2444,7 +2732,7 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
                 );
                 app.mode = Mode::FilePicker(FilePickerContext::BibExportDir);
                 return Ok(false);
-            } else if app.settings_idx == 3 {
+            } else if app.settings_idx == 4 {
                 let start = app.config.export_dir.clone();
                 app.file_picker_state = Some(
                     ratatree::FilePickerState::builder()
@@ -2454,7 +2742,19 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
                 );
                 app.mode = Mode::FilePicker(FilePickerContext::ExportDir);
                 return Ok(false);
-            } else if app.settings_idx == 5 {
+            } else if app.settings_idx == 6 {
+                let start = app.config.pdf_dir.clone()
+                    .or_else(|| app.config.home.as_ref().map(|h| crate::config::expand_tilde(h).join("pdfs")))
+                    .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")));
+                app.file_picker_state = Some(
+                    ratatree::FilePickerState::builder()
+                        .start_dir(start)
+                        .mode(ratatree::PickerMode::DirsOnly)
+                        .build()
+                );
+                app.mode = Mode::FilePicker(FilePickerContext::PdfDir);
+                return Ok(false);
+            } else if app.settings_idx == 7 {
                 let start = app.config.home.clone()
                     .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")));
                 app.file_picker_state = Some(
@@ -2465,7 +2765,7 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
                 );
                 app.mode = Mode::FilePicker(FilePickerContext::Home);
                 return Ok(false);
-            } else if app.settings_idx == 6 {
+            } else if app.settings_idx == 8 {
                 if let Some(ref home) = app.config.home {
                     let home = crate::config::expand_tilde(home);
                     if !app.git_status_checked {
@@ -2592,6 +2892,10 @@ fn handle_file_picker(app: &mut App, key: crossterm::event::KeyEvent) -> Result<
                     FilePickerContext::ExportDir => {
                         app.config.export_dir = path;
                     }
+                    FilePickerContext::PdfDir => {
+                        app.config.pdf_dir = Some(path.clone());
+                        app.config.bibox_dir = crate::config::expand_tilde(&path);
+                    }
                     FilePickerContext::Home => {
                         app.config.home = Some(path.clone());
                         let expanded = crate::config::expand_tilde(&path);
@@ -2635,6 +2939,7 @@ pub fn run_tui(config: &Config) -> Result<()> {
 
     let config_clone = Config {
         home: config.home.clone(),
+        pdf_dir: config.pdf_dir.clone(),
         bibox_dir: config.bibox_dir.clone(),
         pdf_viewer: config.pdf_viewer.clone(),
         default_collection: config.default_collection.clone(),
@@ -2649,6 +2954,7 @@ pub fn run_tui(config: &Config) -> Result<()> {
         bib_export_dir: config.bib_export_dir.clone(),
         export_dir: config.export_dir.clone(),
         citekey_format: config.citekey_format.clone(),
+        natural_scroll: config.natural_scroll,
         msgs: crate::i18n::Msgs::new(&config.language),
     };
 
@@ -2844,7 +3150,7 @@ fn handle_fetch_preview(app: &mut App, key: crossterm::event::KeyEvent) -> Resul
             KeyCode::Enter => {
                 // Apply selected changes
                 app.push_undo();
-                let preview = app.fetch_preview.take().unwrap();
+                let Some(preview) = app.fetch_preview.take() else { return Ok(false); };
                 let db_path = crate::config::resolve_db_path(&app.config);
                 let mut db = load_db(&db_path)?;
 
@@ -2923,29 +3229,31 @@ fn run_loop(
         terminal.draw(|f| draw(f, app))?;
 
         if event::poll(std::time::Duration::from_millis(16))? {
-            match event::read()? {
-                Event::Key(key) => {
-                    if handle_key(app, key)? { break; }
-                }
-                Event::Mouse(mouse) => {
-                    if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
-                        let col = mouse.column;
-                        let row = mouse.row;
-                        for (i, area) in app.panel_areas.iter().enumerate() {
-                            if col >= area.x && col < area.x + area.width
-                                && row >= area.y && row < area.y + area.height
-                            {
-                                app.focus = match i {
-                                    0 => Panel::Collections,
-                                    1 => Panel::Entries,
-                                    _ => Panel::Preview,
-                                };
-                                break;
-                            }
-                        }
-                    }
-                }
+            let ev = event::read()?;
+
+            // Drain all pending events to avoid input lag from buffered mouse scrolls.
+            // Key events get priority: if any key event is pending, process it immediately.
+            let mut key_event = None;
+            let mut mouse_event = None;
+
+            match &ev {
+                Event::Key(k) => { key_event = Some(*k); }
+                Event::Mouse(m) => { mouse_event = Some(*m); }
                 _ => {}
+            }
+
+            while event::poll(std::time::Duration::ZERO)? {
+                match event::read()? {
+                    Event::Key(k) => { key_event = Some(k); break; }
+                    Event::Mouse(m) => { mouse_event = Some(m); }
+                    _ => {}
+                }
+            }
+
+            if let Some(key) = key_event {
+                if handle_key(app, key)? { break; }
+            } else if let Some(mouse) = mouse_event {
+                handle_mouse(app, mouse);
             }
         }
 

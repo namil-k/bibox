@@ -7,7 +7,7 @@
 [![Crates.io](https://img.shields.io/crates/v/bibox)](https://crates.io/crates/bibox)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**Using AI agents (OpenClaw) to search and summarize papers?**
+**Using AI agents (Claude, OpenClaw, Hermes) to search and summarize papers?**
 **Let them manage your bibliography and notes too.**
 **You just browse the TUI. bibox makes it work.**
 
@@ -28,6 +28,7 @@ For humans: browse and edit in the TUI. For agents: manage entries and notes thr
 - **Smart import** - Drop a PDF and bibox extracts the DOI, fetches metadata from Crossref, and files it automatically
 - **Multiple sources** - Add entries via PDF, DOI, ISBN, arXiv ID, URL, or title search
 - **Three-panel TUI** - Collections, entries, and preview (info / notes / PDF) side by side
+- **Mouse support** - Click to select entries/collections, scroll wheel, right-click context menu, click preview tabs
 - **Vim-style navigation** - `hjkl`, `gg`/`G`, `{n}j`, `Ctrl+d/u`, multi-select with `Space`
 - **Fetch & refresh** - Press `f` to pull metadata from Crossref, preview changes, pick which fields to update
 - **Undo/redo** - `Ctrl+z`/`Ctrl+y` with in-memory snapshots
@@ -151,9 +152,14 @@ bibox
 | `N` | Edit note in `$EDITOR` |
 | `Ctrl+z` | Undo |
 | `Ctrl+y` | Redo |
-| `,` | Settings (line numbers, panel ratio, citekey format, export dirs, git sync) |
+| `,` | Settings (line numbers, panel ratio, citekey format, export dirs, PDF storage, git sync) |
 | `?` | Help |
-| `q`/`Esc` | Quit |
+| `q` | Quit |
+| `Esc` | Clear selection (or quit if nothing selected) |
+| **Mouse** | |
+| Left click | Select entry/collection, switch panel focus, click preview tabs |
+| Right click | Context menu (open, export, delete, etc.) |
+| Scroll wheel | Navigate entries/collections, scroll preview |
 
 ## CLI
 
@@ -348,12 +354,16 @@ bibox init ~/bibox
 ├── pdfs/         # PDF files
 └── notes/        # Markdown notes
 
-# Sync with Git
+# Sync with Git (db + notes only, PDFs stored separately)
 cd ~/bibox && git init && git add . && git commit -m "init"
-git remote add origin git@github.com:you/bibox-library.git
-git push -u origin master
 
 # Or use the TUI: press , → Git → Enter to check status → Enter to sync
+
+# Store PDFs in iCloud, Google Drive, Dropbox, etc.
+# Add to ~/.config/bibox/config.toml:
+pdf_dir = "~/Library/Mobile Documents/com~apple~CloudDocs/bibox-pdfs"  # iCloud
+# pdf_dir = "~/Google Drive/bibox-pdfs"                                # Google Drive
+# pdf_dir = "~/Dropbox/bibox-pdfs"                                     # Dropbox
 ```
 
 ## Settings
@@ -363,10 +373,12 @@ Press `,` in the TUI, or run `bibox config` to see all current settings and path
 ```toml
 line_numbers = "absolute"              # absolute, relative, none
 panel_ratio = [2, 4, 4]               # left : center : right (sum = 10)
+natural_scroll = false                 # true for macOS-style natural scrolling
 citekey_format = "{author}{year}{title}" # {author}, {year}, {title} variables
 bib_export_dir = "."                   # BibTeX export location
 export_dir = "~/Downloads"             # Other exports location
 home = "~/bibox"                       # Portable home (set by bibox init)
+pdf_dir = "~/iCloud/bibox-pdfs"        # Separate PDF storage (iCloud, Google Drive, etc.)
 ```
 
 ## AI Agent Integration
