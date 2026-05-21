@@ -1,6 +1,6 @@
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseEventKind, MouseButton},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -41,6 +41,22 @@ impl PreviewMode {
             PreviewMode::Info => PreviewMode::Note,
             PreviewMode::Note => PreviewMode::Pdf,
             PreviewMode::Pdf => PreviewMode::Info,
+        }
+    }
+
+    fn next_tab(self) -> Option<Self> {
+        match self {
+            PreviewMode::Info => Some(PreviewMode::Note),
+            PreviewMode::Note => Some(PreviewMode::Pdf),
+            PreviewMode::Pdf => None,
+        }
+    }
+
+    fn prev_tab(self) -> Option<Self> {
+        match self {
+            PreviewMode::Info => None,
+            PreviewMode::Note => Some(PreviewMode::Info),
+            PreviewMode::Pdf => Some(PreviewMode::Note),
         }
     }
 
@@ -281,6 +297,8 @@ pub struct App {
     git_fetch_result: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     git_syncing: bool,
     git_sync_result: std::sync::Arc<std::sync::Mutex<Option<Result<String, String>>>>,
+    // Panel areas for mouse hit-testing
+    panel_areas: [Rect; 3],
 }
 
 impl App {
@@ -344,6 +362,7 @@ impl App {
             git_fetch_result: std::sync::Arc::new(std::sync::Mutex::new(None)),
             git_syncing: false,
             git_sync_result: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            panel_areas: [Rect::default(); 3],
         })
     }
 
@@ -772,6 +791,8 @@ fn draw(f: &mut Frame, app: &mut App) {
         ])
         .split(outer[0]);
 
+    app.panel_areas = [panels[0], panels[1], panels[2]];
+
     draw_collections_panel(f, app, panels[0]);
     draw_entries_panel(f, app, panels[1]);
     draw_preview_panel(f, app, panels[2]);
@@ -868,20 +889,30 @@ fn draw_collections_panel(f: &mut Frame, app: &App, area: Rect) {
         items.push(ListItem::new(format!("{}{}{} ({})", indent, connector, label, count)));
     }
 
+    let title = if focused {
+        Line::from(vec![
+            Span::styled(" ● ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled("Collections ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        ])
+    } else {
+        Line::from(Span::styled(" Collections ", Style::default().fg(Color::DarkGray)))
+    };
+
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(border_style)
-        .title(" Collections ");
+        .title(title);
+
+    let highlight_style = if focused {
+        Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+    };
 
     let list = List::new(items)
         .block(block)
-        .highlight_style(
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("> ");
+        .highlight_style(highlight_style)
+        .highlight_symbol(if focused { "▸ " } else { "  " });
 
     let mut state = app.col_list_state.clone();
     f.render_stateful_widget(list, area, &mut state);
@@ -948,12 +979,21 @@ fn draw_entries_panel(f: &mut Frame, app: &mut App, area: Rect) {
     }).collect();
 
     let sel_count = app.selected_keys.len();
-    let title = if !app.search_query.is_empty() {
-        format!(" Search: {} ({}) ", app.search_query, app.filtered.len())
+    let title_text = if !app.search_query.is_empty() {
+        format!("Search: {} ({}) ", app.search_query, app.filtered.len())
     } else if sel_count > 0 {
-        format!(" Entries ({}) — {} selected ", app.filtered.len(), sel_count)
+        format!("Entries ({}) - {} selected ", app.filtered.len(), sel_count)
     } else {
-        format!(" Entries ({}) ", app.filtered.len())
+        format!("Entries ({}) ", app.filtered.len())
+    };
+
+    let title = if focused {
+        Line::from(vec![
+            Span::styled(" ● ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(title_text, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        ])
+    } else {
+        Line::from(Span::styled(format!(" {}", title_text), Style::default().fg(Color::DarkGray)))
     };
 
     let block = Block::default()
@@ -961,14 +1001,16 @@ fn draw_entries_panel(f: &mut Frame, app: &mut App, area: Rect) {
         .border_style(border_style)
         .title(title);
 
+    let highlight_style = if focused {
+        Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().add_modifier(Modifier::BOLD)
+    };
+
     let list = List::new(items)
         .block(block)
-        .highlight_style(
-            Style::default()
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("> ");
+        .highlight_style(highlight_style)
+        .highlight_symbol(if focused { "▸ " } else { "  " });
 
     f.render_stateful_widget(list, area, &mut app.list_state);
 }
@@ -994,7 +1036,12 @@ fn draw_preview_panel(f: &mut Frame, app: &mut App, area: Rect) {
         }
     }).collect();
 
-    let mut title_spans = vec![Span::raw(" ")];
+    let mut title_spans = vec![];
+    if focused {
+        title_spans.push(Span::styled(" ● ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
+    } else {
+        title_spans.push(Span::raw(" "));
+    }
     for (i, s) in tab_spans.into_iter().enumerate() {
         title_spans.push(s);
         if i < modes.len() - 1 {
@@ -1735,18 +1782,28 @@ fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
 
         // Panel navigation
         KeyCode::Char('h') | KeyCode::Left => {
-            app.focus = match app.focus {
-                Panel::Collections => Panel::Collections,
-                Panel::Entries => Panel::Collections,
-                Panel::Preview => Panel::Entries,
-            };
+            match app.focus {
+                Panel::Collections => {}
+                Panel::Entries => { app.focus = Panel::Collections; }
+                Panel::Preview => {
+                    if let Some(prev) = app.preview_mode.prev_tab() {
+                        app.preview_mode = prev;
+                    } else {
+                        app.focus = Panel::Entries;
+                    }
+                }
+            }
         }
         KeyCode::Char('l') | KeyCode::Right => {
-            app.focus = match app.focus {
-                Panel::Collections => Panel::Entries,
-                Panel::Entries => Panel::Preview,
-                Panel::Preview => Panel::Preview,
-            };
+            match app.focus {
+                Panel::Collections => { app.focus = Panel::Entries; }
+                Panel::Entries => { app.focus = Panel::Preview; }
+                Panel::Preview => {
+                    if let Some(next) = app.preview_mode.next_tab() {
+                        app.preview_mode = next;
+                    }
+                }
+            }
         }
 
         // Vertical movement with count
@@ -2866,8 +2923,29 @@ fn run_loop(
         terminal.draw(|f| draw(f, app))?;
 
         if event::poll(std::time::Duration::from_millis(16))? {
-            if let Event::Key(key) = event::read()? {
-                if handle_key(app, key)? { break; }
+            match event::read()? {
+                Event::Key(key) => {
+                    if handle_key(app, key)? { break; }
+                }
+                Event::Mouse(mouse) => {
+                    if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+                        let col = mouse.column;
+                        let row = mouse.row;
+                        for (i, area) in app.panel_areas.iter().enumerate() {
+                            if col >= area.x && col < area.x + area.width
+                                && row >= area.y && row < area.y + area.height
+                            {
+                                app.focus = match i {
+                                    0 => Panel::Collections,
+                                    1 => Panel::Entries,
+                                    _ => Panel::Preview,
+                                };
+                                break;
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
         }
 
