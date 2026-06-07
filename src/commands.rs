@@ -1103,6 +1103,32 @@ pub fn cmd_uncollect(id_or_key: String, collection: String, config: &Config) -> 
 
 // ── import ───────────────────────────────────────────────────────────────────
 
+/// BibTeX fields that reference managers (Zotero/Mendeley/JabRef/BibDesk) emit
+/// for their own bookkeeping. Dropping these silently is fine — warning about
+/// them would just be noise. Names are lowercase to match parse_bib_fields.
+const BIBTEX_IGNORED: &[&str] = &[
+    "file", "timestamp", "date-added", "date-modified",
+    "mendeley-tags", "owner", "groups", "__markedentry",
+];
+
+/// RIS provider/tooling tags that are not bibliographically meaningful here.
+/// Tags stay uppercase, as they appear in the .ris file.
+const RIS_IGNORED: &[&str] = &["DB", "DP", "M3", "Y2"];
+
+/// From the parser's record of unmapped fields, return the sorted unique names
+/// worth warning the user about — excluding the known cruft in `ignored`.
+/// (BTreeMap iteration is already sorted, so the result is deterministic.)
+fn warnable_unmapped(
+    unmapped: &std::collections::BTreeMap<String, usize>,
+    ignored: &[&str],
+) -> Vec<String> {
+    unmapped
+        .keys()
+        .filter(|k| !ignored.contains(&k.as_str()))
+        .cloned()
+        .collect()
+}
+
 pub fn cmd_import(file: PathBuf, to: Option<String>, config: &Config) -> Result<()> {
     let db_path = db_path_from_config(config);
     let mut db = load_db(&db_path)?;
@@ -1115,12 +1141,12 @@ pub fn cmd_import(file: PathBuf, to: Option<String>, config: &Config) -> Result<
     let mut skipped: Vec<String> = vec![];
 
     let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-    let entries = match ext.as_str() {
+    let parsed = match ext.as_str() {
         "ris" => parse_ris(&content),
         _ => parse_bibtex(&content),
     };
 
-    for mut raw in entries {
+    for mut raw in parsed.entries {
         let entry_type: EntryType = raw.entry_type.parse().unwrap_or(EntryType::Misc);
 
         let authors: Vec<String> = raw
@@ -1252,6 +1278,17 @@ pub fn cmd_import(file: PathBuf, to: Option<String>, config: &Config) -> Result<
         for s in &skipped {
             println!("  - {}", s);
         }
+    }
+
+    // Warn about fields the parser saw but could not map (e.g. address, eprint),
+    // filtering out known reference-manager cruft to avoid noise.
+    let ignored: &[&str] = if ext == "ris" { RIS_IGNORED } else { BIBTEX_IGNORED };
+    let unmapped_names = warnable_unmapped(&parsed.unmapped, ignored);
+    if !unmapped_names.is_empty() {
+        println!(
+            "{}",
+            config.msgs.unmapped_fields_warning(unmapped_names.len(), &unmapped_names.join(", "))
+        );
     }
 
     Ok(())
@@ -2713,8 +2750,17 @@ struct RawBibEntry {
     keywords: Option<String>,
 }
 
-fn parse_bibtex(content: &str) -> Vec<RawBibEntry> {
+/// Result of parsing an import file: the entries plus a record of fields/tags
+/// the parser did not map to a known column (name -> occurrence count).
+/// BTreeMap keeps the names sorted for deterministic, testable output.
+struct ParsedEntries {
+    entries: Vec<RawBibEntry>,
+    unmapped: std::collections::BTreeMap<String, usize>,
+}
+
+fn parse_bibtex(content: &str) -> ParsedEntries {
     let mut entries = vec![];
+    let mut unmapped: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     let re_entry = regex::Regex::new(r"@(\w+)\s*\{\s*([^,\s]*)\s*,").unwrap();
 
     let mut pos = 0;
@@ -2791,7 +2837,7 @@ fn parse_bibtex(content: &str) -> Vec<RawBibEntry> {
                 "month"        => raw.month = Some(value),
                 "abstract"  => raw.abstract_text = Some(decode_latex(&value)),
                 "keywords"  => raw.keywords  = Some(value),
-                _ => {}
+                _ => { *unmapped.entry(field.clone()).or_insert(0) += 1; }
             }
         }
 
@@ -2799,11 +2845,12 @@ fn parse_bibtex(content: &str) -> Vec<RawBibEntry> {
         pos = body_start + body.len();
     }
 
-    entries
+    ParsedEntries { entries, unmapped }
 }
 
-fn parse_ris(content: &str) -> Vec<RawBibEntry> {
+fn parse_ris(content: &str) -> ParsedEntries {
     let mut entries = vec![];
+    let mut unmapped: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     let mut current: Option<RawBibEntry> = None;
     let mut authors: Vec<String> = vec![];
     let mut keywords: Vec<String> = vec![];
@@ -2891,7 +2938,7 @@ fn parse_ris(content: &str) -> Vec<RawBibEntry> {
                         "ET" => entry.edition = Some(value),
                         "DA" => if entry.month.is_none() { entry.month = Some(value); },
                         "ID" => entry.key = Some(value),
-                        _ => {}
+                        _ => { *unmapped.entry(tag.to_string()).or_insert(0) += 1; }
                     }
                 }
             }
@@ -2910,7 +2957,7 @@ fn parse_ris(content: &str) -> Vec<RawBibEntry> {
         entries.push(entry);
     }
 
-    entries
+    ParsedEntries { entries, unmapped }
 }
 
 /// Strip LaTeX-style curly braces used for case preservation: {Word} → Word.
@@ -4214,7 +4261,7 @@ KW  - transformer
 KW  - attention
 ER  -
 ";
-        let entries = parse_ris(ris);
+        let entries = parse_ris(ris).entries;
         assert_eq!(entries.len(), 1);
         let e = &entries[0];
         assert_eq!(e.entry_type, "article");
@@ -4238,7 +4285,7 @@ UR  - https://example.com
 N1  - Accessed 2024-01-15
 ER  -
 ";
-        let entries = parse_ris(ris);
+        let entries = parse_ris(ris).entries;
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].entry_type, "misc");
         assert_eq!(entries[0].url.as_deref(), Some("https://example.com"));
@@ -4261,7 +4308,7 @@ PY  - 2021
 PB  - Publisher X
 ER  -
 ";
-        let entries = parse_ris(ris);
+        let entries = parse_ris(ris).entries;
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].entry_type, "article");
         assert_eq!(entries[1].entry_type, "book");
@@ -4284,10 +4331,70 @@ AU  - Lee, J
 PY  - 2025
 ER  -
 ";
-        let entries = parse_ris(ris);
+        let entries = parse_ris(ris).entries;
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].entry_type, "phdthesis");
         assert_eq!(entries[0].publisher.as_deref(), Some("MIT"));
         assert_eq!(entries[1].entry_type, "inproceedings");
+    }
+
+    #[test]
+    fn parse_bibtex_reports_unmapped_fields() {
+        let bib = "\
+@article{key1,
+  title = {A Title},
+  author = {Doe, Jane},
+  year = {2020},
+  address = {New York},
+  eprint = {1234.5678},
+}
+";
+        let parsed = parse_bibtex(bib);
+        assert_eq!(parsed.entries.len(), 1);
+        // Unknown fields are recorded with occurrence counts.
+        assert_eq!(parsed.unmapped.get("address"), Some(&1));
+        assert_eq!(parsed.unmapped.get("eprint"), Some(&1));
+        // Known fields must not be reported as unmapped.
+        assert_eq!(parsed.unmapped.get("title"), None);
+        assert_eq!(parsed.unmapped.get("author"), None);
+    }
+
+    #[test]
+    fn parse_ris_reports_unmapped_tags() {
+        let ris = "\
+TY  - JOUR
+TI  - Paper
+AU  - Doe, J
+PY  - 2020
+CY  - New York
+AD  - 123 Main St
+ER  -
+";
+        let parsed = parse_ris(ris);
+        assert_eq!(parsed.entries.len(), 1);
+        // Unknown RIS tags are recorded (tags stay uppercase, as in the file).
+        assert_eq!(parsed.unmapped.get("CY"), Some(&1));
+        assert_eq!(parsed.unmapped.get("AD"), Some(&1));
+        // Known tags must not be reported.
+        assert_eq!(parsed.unmapped.get("TI"), None);
+    }
+
+    #[test]
+    fn warnable_unmapped_filters_denylisted_cruft() {
+        let mut m: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        m.insert("file".into(), 2);        // denylisted cruft
+        m.insert("eprint".into(), 1);      // real info worth warning
+        m.insert("address".into(), 1);     // real info worth warning
+        let names = warnable_unmapped(&m, BIBTEX_IGNORED);
+        // Cruft removed, remaining names sorted alphabetically.
+        assert_eq!(names, vec!["address".to_string(), "eprint".to_string()]);
+    }
+
+    #[test]
+    fn warnable_unmapped_empty_when_all_cruft() {
+        let mut m: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        m.insert("file".into(), 1);
+        m.insert("timestamp".into(), 1);
+        assert!(warnable_unmapped(&m, BIBTEX_IGNORED).is_empty());
     }
 }

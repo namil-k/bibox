@@ -539,6 +539,13 @@ impl Msgs {
         }
     }
 
+    pub fn unmapped_fields_warning(&self, n: usize, names: &str) -> String {
+        match self.lang {
+            Lang::En => format!("⚠ {} unmapped field(s) ignored: {}", n, names),
+            Lang::Ko => format!("⚠ 매핑 안 된 필드 {}개 무시됨: {}", n, names),
+        }
+    }
+
     pub fn zip_created(&self, path: &str, n: usize) -> String {
         match self.lang {
             Lang::En => format!("ZIP created: {} ({} files)", path, n),
