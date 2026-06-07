@@ -42,7 +42,7 @@ fn parse_year(publish_date: &str) -> Option<u32> {
     // Try to find a 4-digit year anywhere in the string
     for part in publish_date.split_whitespace() {
         if let Ok(y) = part.trim_matches(',').parse::<u32>() {
-            if y >= 1000 && y <= 9999 {
+            if (1000..=9999).contains(&y) {
                 return Some(y);
             }
         }

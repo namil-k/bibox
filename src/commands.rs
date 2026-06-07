@@ -544,12 +544,12 @@ pub async fn cmd_add(
             )
         })?;
 
-        if src_path != &dest && !src_path.starts_with(&config.bibox_dir) {
-            if temp_pdf_path.as_deref()
+        if src_path != &dest
+            && !src_path.starts_with(&config.bibox_dir)
+            && temp_pdf_path.as_deref()
                 != Some(std::env::temp_dir().join("bibox_download.pdf").as_path())
-            {
-                std::fs::remove_file(src_path).ok();
-            }
+        {
+            std::fs::remove_file(src_path).ok();
         }
 
         println!(
@@ -1891,7 +1891,7 @@ pub fn cmd_sync(yes: bool, json: bool, config: &Config) -> Result<()> {
     // ── Detect externally renamed files via DOI matching ──
     // For each missing entry that has a DOI, scan untracked files for a DOI match.
     let missing_with_doi: Vec<(String, String)> = db.entries.iter()
-        .filter(|e| e.file_path.as_ref().map_or(false, |fp| missing.contains(fp)))
+        .filter(|e| e.file_path.as_ref().is_some_and(|fp| missing.contains(fp)))
         .filter_map(|e| {
             e.doi.as_ref().map(|doi| (e.file_path.as_ref().unwrap().clone(), doi.to_lowercase()))
         })
@@ -2267,11 +2267,11 @@ pub fn cmd_modify(
     }
 
     // 6. Confirm
-    if !yes {
-        if !prompt_confirm(&format!("Apply to {} entries?", matching_indices.len())) {
-            println!("Aborted.");
-            return Ok(());
-        }
+    if !yes
+        && !prompt_confirm(&format!("Apply to {} entries?", matching_indices.len()))
+    {
+        println!("Aborted.");
+        return Ok(());
     }
 
     // 7. Apply assignments
@@ -3772,7 +3772,7 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
             issues.push(Issue {
                 kind: "bad_citekey".into(),
                 key: Some(e.bibtex_key.clone()),
-                detail: format!("Citekey contains non-ASCII or special chars"),
+                detail: "Citekey contains non-ASCII or special chars".to_string(),
                 fixable: true,
             });
         }
@@ -3889,7 +3889,7 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
             ("editor",    e.editor.as_deref()),
         ];
         for (name, val) in &fields {
-            if val.map(|s| has_latex_escapes(s)).unwrap_or(false) {
+            if val.map(has_latex_escapes).unwrap_or(false) {
                 affected.push(name);
             }
         }
@@ -4010,7 +4010,7 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
             "dirty_title"     => ("BibTeX braces in text",   "--fix strips braces"),
             "latex_escape"    => ("LaTeX escapes in text",   "--fix decodes to Unicode"),
             "orphaned_note"   => ("Orphaned notes",          "Delete manually or re-add entry"),
-            _                 => (kind.as_ref(), ""),
+            _                 => (*kind, ""),
         };
         let fixable = group.iter().any(|i| i.fixable);
         let tag = if fixable { "FIX " } else { "WARN" };

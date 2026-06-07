@@ -894,7 +894,7 @@ fn draw_collections_panel(f: &mut Frame, app: &App, area: Rect) {
     // Tree-style collection items: indent by depth, show only the last segment as label
     for col in &app.collections {
         let depth = col.matches('/').count();
-        let label = col.split('/').last().unwrap_or(col.as_str());
+        let label = col.split('/').next_back().unwrap_or(col.as_str());
         let prefix_str = format!("{}/", col);
         let count = app.entries.iter().filter(|e| {
             e.collections.iter().any(|c| c == col || c.starts_with(&prefix_str))
@@ -1727,10 +1727,10 @@ fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
 
     const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     let git_label = if app.git_fetching {
-        let frame = SPINNER_FRAMES[(app.spinner_tick as usize / 3) % SPINNER_FRAMES.len()];
+        let frame = SPINNER_FRAMES[(app.spinner_tick / 3) % SPINNER_FRAMES.len()];
         format!("{} checking...", frame)
     } else if app.git_syncing {
-        let frame = SPINNER_FRAMES[(app.spinner_tick as usize / 3) % SPINNER_FRAMES.len()];
+        let frame = SPINNER_FRAMES[(app.spinner_tick / 3) % SPINNER_FRAMES.len()];
         format!("{} syncing...", frame)
     } else {
         app.git_status_cache.clone()
@@ -2233,11 +2233,7 @@ fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
             if let Some(entry) = app.selected_entry() {
                 let url = if let Some(ref doi) = entry.doi {
                     Some(format!("https://doi.org/{}", doi))
-                } else if let Some(ref u) = entry.url {
-                    Some(u.clone())
-                } else {
-                    None
-                };
+                } else { entry.url.clone() };
                 if let Some(url) = url {
                     #[cfg(target_os = "macos")]
                     let _ = std::process::Command::new("open").arg(&url).spawn();
@@ -2453,7 +2449,7 @@ fn handle_confirm(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool
                     #[cfg(not(target_os = "macos"))]
                     let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
                     app.mode = Mode::Message(
-                        format!("Opened in browser. Download the PDF, then use:\nbibox edit <key> --attach-pdf ~/Downloads/<file>.pdf")
+                        "Opened in browser. Download the PDF, then use:\nbibox edit <key> --attach-pdf ~/Downloads/<file>.pdf".to_string()
                     );
                 }
                 _ => {}

@@ -46,36 +46,33 @@ fn run_select(
         render(items, *selected, stdout)?;
 
         // Handle input
-        match event::read()? {
-            Event::Key(key_event) => {
-                match (key_event.code, key_event.modifiers) {
-                    (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
-                        if *selected > 0 {
-                            *selected -= 1;
-                        }
+        if let Event::Key(key_event) = event::read()? {
+            match (key_event.code, key_event.modifiers) {
+                (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                    if *selected > 0 {
+                        *selected -= 1;
                     }
-                    (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
-                        if *selected < items.len() - 1 {
-                            *selected += 1;
-                        }
-                    }
-                    (KeyCode::Enter, _) => {
-                        // Clear the rendered list before returning
-                        clear_lines(items.len() + 2, stdout)?;
-                        return Ok(Some(items[*selected].key.clone()));
-                    }
-                    (KeyCode::Esc, _) | (KeyCode::Char('q'), KeyModifiers::NONE) => {
-                        clear_lines(items.len() + 2, stdout)?;
-                        return Ok(None);
-                    }
-                    (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                        clear_lines(items.len() + 2, stdout)?;
-                        return Ok(None);
-                    }
-                    _ => {}
                 }
+                (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                    if *selected < items.len() - 1 {
+                        *selected += 1;
+                    }
+                }
+                (KeyCode::Enter, _) => {
+                    // Clear the rendered list before returning
+                    clear_lines(items.len() + 2, stdout)?;
+                    return Ok(Some(items[*selected].key.clone()));
+                }
+                (KeyCode::Esc, _) | (KeyCode::Char('q'), KeyModifiers::NONE) => {
+                    clear_lines(items.len() + 2, stdout)?;
+                    return Ok(None);
+                }
+                (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                    clear_lines(items.len() + 2, stdout)?;
+                    return Ok(None);
+                }
+                _ => {}
             }
-            _ => {}
         }
     }
 }

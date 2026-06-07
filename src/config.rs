@@ -6,15 +6,14 @@ use crate::i18n::Msgs;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum LineNumbers {
+    #[default]
     Absolute,
     Relative,
     None,
 }
 
-impl Default for LineNumbers {
-    fn default() -> Self { LineNumbers::Absolute }
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
