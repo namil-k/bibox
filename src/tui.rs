@@ -326,17 +326,32 @@ pub struct App {
     context_menu: ContextMenuState,
 }
 
+/// Collect every collection path referenced by `entries`, sorted and deduplicated.
+/// The result is the row list for the Collections panel (index 0 = "All" is added by the caller).
+fn collection_paths(entries: &[Entry]) -> Vec<String> {
+    let mut col_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for e in entries {
+        for c in &e.collections {
+            // Insert every ancestor prefix ("gym" for "gym/seed", "digest" and
+            // "digest/2026" for "digest/2026/04"). A parent with no direct entries
+            // would otherwise have no row, and its indented children would render
+            // under whichever top-level row happens to sort just before them.
+            for (i, _) in c.match_indices('/') {
+                col_set.insert(c[..i].to_string());
+            }
+            col_set.insert(c.clone());
+        }
+    }
+    col_set.into_iter().collect()
+}
+
 impl App {
     pub fn new(config: Config) -> Result<Self> {
         let db_path = crate::config::resolve_db_path(&config);
         let db = load_db(&db_path)?;
         let entries = db.entries;
 
-        let mut col_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        for e in &entries {
-            for c in &e.collections { col_set.insert(c.clone()); }
-        }
-        let collections: Vec<String> = col_set.into_iter().collect();
+        let collections = collection_paths(&entries);
 
         let filtered: Vec<usize> = (0..entries.len()).collect();
         let mut list_state = ListState::default();
@@ -608,11 +623,7 @@ impl App {
     }
 
     fn rebuild_collections(&mut self) {
-        let mut col_set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        for e in &self.entries {
-            for c in &e.collections { col_set.insert(c.clone()); }
-        }
-        self.collections = col_set.into_iter().collect();
+        self.collections = collection_paths(&self.entries);
         let sel = self.col_list_state.selected().unwrap_or(0);
         if sel >= self.col_count() {
             self.col_list_state.select(Some(0));
@@ -3525,4 +3536,76 @@ fn run_fetch_pdf(entry: &Entry, bibox_dir: &std::path::Path) -> Result<(String, 
     std::fs::copy(&tmp, &dest)?;
     let _ = std::fs::remove_file(&tmp);
     Ok((filename, dest.to_string_lossy().to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::collection_paths;
+    use crate::models::{Entry, EntryType};
+
+    fn entry_in(collections: &[&str]) -> Entry {
+        Entry {
+            id: "id".to_string(),
+            bibtex_key: "key".to_string(),
+            entry_type: EntryType::Article,
+            title: None,
+            author: vec![],
+            year: None,
+            journal: None,
+            volume: None,
+            number: None,
+            pages: None,
+            publisher: None,
+            editor: None,
+            edition: None,
+            isbn: None,
+            booktitle: None,
+            doi: None,
+            url: None,
+            abstract_text: None,
+            tags: vec![],
+            howpublished: None,
+            month: None,
+            note: None,
+            collections: collections.iter().map(|s| s.to_string()).collect(),
+            file_path: None,
+            created_at: String::new(),
+            updated_at: None,
+        }
+    }
+
+    #[test]
+    fn collection_paths_synthesizes_missing_parent_row() {
+        let entries = vec![
+            entry_in(&["gym/seed"]),
+            entry_in(&["gym/method"]),
+            entry_in(&["displays-2026"]),
+            entry_in(&["big"]),
+        ];
+        assert_eq!(
+            collection_paths(&entries),
+            vec!["big", "displays-2026", "gym", "gym/method", "gym/seed"]
+        );
+    }
+
+    #[test]
+    fn collection_paths_synthesizes_every_ancestor_of_deep_path() {
+        let entries = vec![entry_in(&["digest/2026/04"])];
+        assert_eq!(
+            collection_paths(&entries),
+            vec!["digest", "digest/2026", "digest/2026/04"]
+        );
+    }
+
+    #[test]
+    fn collection_paths_does_not_duplicate_parent_that_has_direct_entries() {
+        let entries = vec![entry_in(&["gym"]), entry_in(&["gym/seed"])];
+        assert_eq!(collection_paths(&entries), vec!["gym", "gym/seed"]);
+    }
+
+    #[test]
+    fn collection_paths_is_empty_when_no_entry_has_a_collection() {
+        let entries = vec![entry_in(&[]), entry_in(&[])];
+        assert_eq!(collection_paths(&entries), Vec::<String>::new());
+    }
 }
