@@ -41,9 +41,12 @@ arboard = "3"
 regex = "1"
 scraper = "0.22"
 urlencoding = "2"
-zip = "2"
+zip = { version = "8", default-features = false, features = ["deflate", "time"] }
 pulldown-cmark = { version = "0.13.3", optional = true }
 anydoc = "0.2"
 
 [dev-dependencies]
 flate2 = "1"
+
+[profile.release]
+strip = true
