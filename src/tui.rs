@@ -1417,6 +1417,25 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(status_widget, area);
 }
 
+/// Split a batch of drained terminal events into the keystrokes to replay and the
+/// single mouse event worth acting on.
+///
+/// Mouse scrolls arrive faster than they can be drawn, so only the newest one
+/// matters. Keystrokes are the opposite: every one is meaningful and the order is
+/// the user's typing, so they must all survive.
+fn coalesce_events(events: &[Event]) -> (Vec<crossterm::event::KeyEvent>, Option<crossterm::event::MouseEvent>) {
+    let mut keys = Vec::new();
+    let mut mouse = None;
+    for ev in events {
+        match ev {
+            Event::Key(k) => keys.push(*k),
+            Event::Mouse(m) => mouse = Some(*m),
+            _ => {}
+        }
+    }
+    (keys, mouse)
+}
+
 fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)
@@ -3238,29 +3257,24 @@ fn run_loop(
         if event::poll(std::time::Duration::from_millis(16))? {
             let ev = event::read()?;
 
-            // Drain all pending events to avoid input lag from buffered mouse scrolls.
-            // Key events get priority: if any key event is pending, process it immediately.
-            let mut key_event = None;
-            let mut mouse_event = None;
-
-            match &ev {
-                Event::Key(k) => { key_event = Some(*k); }
-                Event::Mouse(m) => { mouse_event = Some(*m); }
-                _ => {}
-            }
-
+            // Drain pending events to avoid input lag from buffered mouse scrolls.
+            let mut batch = vec![ev];
             while event::poll(std::time::Duration::ZERO)? {
-                match event::read()? {
-                    Event::Key(k) => { key_event = Some(k); break; }
-                    Event::Mouse(m) => { mouse_event = Some(m); }
-                    _ => {}
-                }
+                batch.push(event::read()?);
             }
 
-            if let Some(key) = key_event {
-                if handle_key(app, key)? { break; }
-            } else if let Some(mouse) = mouse_event {
-                handle_mouse(app, mouse);
+            let (keys, mouse_event) = coalesce_events(&batch);
+
+            if keys.is_empty() {
+                if let Some(mouse) = mouse_event {
+                    handle_mouse(app, mouse);
+                }
+            } else {
+                let mut quit = false;
+                for key in keys {
+                    if handle_key(app, key)? { quit = true; break; }
+                }
+                if quit { break; }
             }
         }
 
@@ -3572,6 +3586,52 @@ mod tests {
             created_at: String::new(),
             updated_at: None,
         }
+    }
+
+    fn key(c: char) -> crossterm::event::Event {
+        crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char(c),
+            crossterm::event::KeyModifiers::NONE,
+        ))
+    }
+
+    fn scroll(row: u16) -> crossterm::event::Event {
+        crossterm::event::Event::Mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::ScrollDown,
+            column: 0,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        })
+    }
+
+    #[test]
+    fn coalesce_events_keeps_every_keystroke_in_order() {
+        let batch = vec![key('c'), key('o'), key('p'), key('y')];
+        let (keys, _) = super::coalesce_events(&batch);
+        let typed: String = keys
+            .iter()
+            .filter_map(|k| match k.code {
+                crossterm::event::KeyCode::Char(c) => Some(c),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(typed, "copy");
+    }
+
+    #[test]
+    fn coalesce_events_keeps_keys_that_arrive_alongside_mouse_scrolls() {
+        let batch = vec![scroll(1), key('a'), scroll(2), key('b')];
+        let (keys, mouse) = super::coalesce_events(&batch);
+        assert_eq!(keys.len(), 2);
+        assert_eq!(mouse.map(|m| m.row), Some(2));
+    }
+
+    #[test]
+    fn coalesce_events_collapses_mouse_scrolls_to_the_newest() {
+        let batch = vec![scroll(1), scroll(2), scroll(3)];
+        let (keys, mouse) = super::coalesce_events(&batch);
+        assert!(keys.is_empty());
+        assert_eq!(mouse.map(|m| m.row), Some(3));
     }
 
     #[test]
