@@ -75,6 +75,18 @@ fn print_entry_block(entry: &Entry, config: &Config) {
 
 // ── add ─────────────────────────────────────────────────────────────────────
 
+/// Error to report when `add` ends up with nothing to look up.
+///
+/// A `--url` that could not be resolved must not be reported as a missing
+/// `--url`: most publishers block automated requests, so the failure is
+/// expected and the user needs to know which fallback to reach for.
+fn missing_input_message(msgs: &crate::i18n::Msgs, url: Option<&str>, reason: Option<&str>) -> String {
+    match url {
+        Some(u) => msgs.url_resolve_failed(u, reason),
+        None => msgs.no_file_or_doi().to_string(),
+    }
+}
+
 pub async fn cmd_add(
     file: Option<PathBuf>,
     to: Option<String>,
@@ -177,6 +189,7 @@ pub async fn cmd_add(
     // ── --url: resolve URL to DOI or metadata ──
     // If resolve fails, the URL is preserved for manual/misc entry
     let mut url_preserved: Option<String> = None;
+    let mut url_resolve_error: Option<String> = None;
     if let Some(ref url) = url_arg {
         match crate::url_resolver::resolve_url(url).await {
             Ok(crate::url_resolver::ResolvedUrl::Doi(doi)) => {
@@ -253,8 +266,10 @@ pub async fn cmd_add(
                 }
                 return Ok(());
             }
-            Err(_) => {
-                // URL resolution failed — preserve URL for manual/misc entry
+            Err(e) => {
+                // URL resolution failed — keep the reason so the final error can
+                // explain it, and preserve the URL for a manual/misc entry.
+                url_resolve_error = Some(e.to_string());
                 url_preserved = Some(url.clone());
             }
         }
@@ -415,7 +430,14 @@ pub async fn cmd_add(
                 }
             }
         } else {
-            anyhow::bail!("{}", config.msgs.no_file_or_doi());
+            anyhow::bail!(
+                "{}",
+                missing_input_message(
+                    &config.msgs,
+                    url_arg.as_deref(),
+                    url_resolve_error.as_deref(),
+                )
+            );
         }
     } else {
         // File provided: extract DOI from PDF (unless --doi given)
@@ -4396,5 +4418,47 @@ ER  -
         m.insert("file".into(), 1);
         m.insert("timestamp".into(), 1);
         assert!(warnable_unmapped(&m, BIBTEX_IGNORED).is_empty());
+    }
+
+    #[test]
+    fn missing_input_message_is_generic_when_no_url_was_given() {
+        let msgs = crate::i18n::Msgs::new("en");
+        assert_eq!(missing_input_message(&msgs, None, None), msgs.no_file_or_doi());
+    }
+
+    #[test]
+    fn missing_input_message_names_the_url_that_failed() {
+        let msgs = crate::i18n::Msgs::new("en");
+        let url = "https://ieeexplore.ieee.org/document/9412676";
+        let out = missing_input_message(&msgs, Some(url), None);
+        assert!(out.contains(url), "message should name the URL, got: {out}");
+        assert_ne!(
+            out,
+            msgs.no_file_or_doi(),
+            "a failed --url must not be reported as a missing --url"
+        );
+    }
+
+    #[test]
+    fn missing_input_message_carries_the_underlying_reason() {
+        let msgs = crate::i18n::Msgs::new("en");
+        let out = missing_input_message(
+            &msgs,
+            Some("https://www.sciencedirect.com/science/article/pii/S0042698901001745"),
+            Some("HTTP status 403 Forbidden"),
+        );
+        assert!(out.contains("403"), "message should carry the reason, got: {out}");
+    }
+
+    #[test]
+    fn missing_input_message_is_localized() {
+        let ko = crate::i18n::Msgs::new("ko");
+        let url = "https://opg.optica.org/josaa/abstract.cfm?uri=josaa-1-1-1";
+        let out = missing_input_message(&ko, Some(url), None);
+        assert!(out.contains(url));
+        assert!(
+            !out.is_ascii(),
+            "Korean locale should not fall back to the English string, got: {out}"
+        );
     }
 }

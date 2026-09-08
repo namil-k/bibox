@@ -144,7 +144,7 @@ pub(crate) async fn fetch_and_parse_meta(url: &str) -> Result<ResolvedUrl> {
         }));
     }
 
-    bail!("Could not extract metadata from URL. Try --doi or --search instead.");
+    bail!("No citation metadata found in the page");
 }
 
 fn get_meta_content(doc: &Html, name: &str) -> Option<String> {

@@ -351,6 +351,19 @@ impl Msgs {
         }
     }
 
+    pub fn url_resolve_failed(&self, url: &str, reason: Option<&str>) -> String {
+        match self.lang {
+            Lang::En => {
+                let detail = reason.map(|r| format!("\nReason: {}", r)).unwrap_or_default();
+                format!("Could not get a DOI from {}{}\nMany publishers block automated requests, so the page cannot be read directly. Supply the DOI with --doi, look the paper up with --search, or record it manually with --title.", url, detail)
+            }
+            Lang::Ko => {
+                let detail = reason.map(|r| format!("\n이유: {}", r)).unwrap_or_default();
+                format!("{}에서 DOI를 얻지 못했습니다.{}\n상당수 출판사가 자동 요청을 차단해 페이지를 직접 읽을 수 없습니다. --doi로 DOI를 지정하거나, --search로 논문을 검색하거나, --title로 수동 기록하세요.", url, detail)
+            }
+        }
+    }
+
     pub fn oa_found(&self, source: &str) -> String {
         match self.lang {
             Lang::En => format!("  Open access PDF found. (source: {})", source),
