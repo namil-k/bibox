@@ -296,6 +296,10 @@ pub struct App {
     search_picker: Option<SearchResultPickerState>,
     file_picker_state: Option<ratatree::FilePickerState>,
     spinner_tick: usize,
+    // Help overlay
+    help_query: String,
+    help_filtering: bool,
+    help_scroll: usize,
     // Sort
     sort_by: SortCriterion,
     sort_ascending: bool,
@@ -404,6 +408,9 @@ impl App {
             git_syncing: false,
             git_sync_result: std::sync::Arc::new(std::sync::Mutex::new(None)),
             panel_areas: [Rect::default(); 3],
+            help_query: String::new(),
+            help_filtering: false,
+            help_scroll: 0,
             context_menu: ContextMenuState { x: 0, y: 0, index: 0 },
         })
     }
@@ -866,7 +873,7 @@ fn draw(f: &mut Frame, app: &mut App) {
             let text = format!("{} {}", spinner, msg);
             draw_message_popup(f, &text, size);
         }
-        Mode::Help => draw_help_popup(f, size),
+        Mode::Help => draw_help_popup(f, app, size),
         Mode::SortMenu => draw_sort_popup(f, app, size),
         Mode::CollectionPicker | Mode::TagEditor => {
             if let Some(ref picker) = app.picker {
@@ -1513,46 +1520,182 @@ fn draw_message_popup(f: &mut Frame, msg: &str, area: Rect) {
     f.render_widget(text, popup_area);
 }
 
-fn draw_help_popup(f: &mut Frame, area: Rect) {
-    let popup_area = centered_rect(80, 28, area);
+/// One keyboard shortcut as data, so the help screen can be searched and tested
+/// rather than being a block of hardcoded prose that drifts from the handlers.
+struct Binding {
+    keys: &'static str,
+    action: &'static str,
+    desc: &'static str,
+}
+
+struct HelpSection {
+    title: &'static str,
+    bindings: &'static [Binding],
+}
+
+const HELP: &[HelpSection] = &[
+    HelpSection {
+        title: "Navigation",
+        bindings: &[
+            Binding { keys: "h  ←", action: "Focus left", desc: "Move focus one panel left, or step back a preview tab" },
+            Binding { keys: "l  →", action: "Focus right", desc: "Move focus one panel right, or step forward a preview tab" },
+            Binding { keys: "j  ↓", action: "Down", desc: "Move down one line in the focused panel" },
+            Binding { keys: "k  ↑", action: "Up", desc: "Move up one line in the focused panel" },
+            Binding { keys: "{n}j", action: "Down n lines", desc: "Type a count before j or k to repeat it, as in 5j" },
+            Binding { keys: "gg", action: "Top", desc: "Jump to the first item in the focused panel" },
+            Binding { keys: "G", action: "Bottom", desc: "Jump to the last item in the focused panel" },
+            Binding { keys: "H", action: "Screen top", desc: "Jump near the top of the visible entry list" },
+            Binding { keys: "M", action: "Screen middle", desc: "Jump to the middle of the entry list" },
+            Binding { keys: "L", action: "Screen bottom", desc: "Jump near the bottom of the visible entry list" },
+            Binding { keys: "C-d", action: "Half page down", desc: "Scroll the focused panel down half a screen" },
+            Binding { keys: "C-u", action: "Half page up", desc: "Scroll the focused panel up half a screen" },
+            Binding { keys: "Tab", action: "Preview tab", desc: "Cycle the preview panel between Info, Note and PDF" },
+        ],
+    },
+    HelpSection {
+        title: "Selection",
+        bindings: &[
+            Binding { keys: "Space", action: "Toggle select", desc: "Select or deselect the current entry, then move down" },
+            Binding { keys: "V", action: "Select all", desc: "Select every visible entry, or clear if all are selected" },
+            Binding { keys: "Esc", action: "Clear selection", desc: "Drop the current selection, or quit when nothing is selected" },
+        ],
+    },
+    HelpSection {
+        title: "Entry actions",
+        bindings: &[
+            Binding { keys: "o", action: "Open PDF", desc: "Open the attached PDF, or offer to fetch one when missing" },
+            Binding { keys: "w", action: "Open web page", desc: "Open the entry DOI or URL in the default browser" },
+            Binding { keys: "f", action: "Fetch metadata", desc: "Look the entry up by DOI, or search by title when it has none" },
+            Binding { keys: "A", action: "Attach PDF", desc: "Pick a PDF from disk and attach it to the current entry" },
+            Binding { keys: "y", action: "Copy citekey", desc: "Copy the BibTeX citation key to the system clipboard" },
+            Binding { keys: "N", action: "Edit note", desc: "Open the entry Markdown note in $EDITOR" },
+            Binding { keys: "e", action: "Export menu", desc: "Export the selection as BibTeX, PDFs or a zip archive" },
+            Binding { keys: "d", action: "Delete entry", desc: "Delete the current entry after a confirmation prompt" },
+        ],
+    },
+    HelpSection {
+        title: "Editing",
+        bindings: &[
+            Binding { keys: "c", action: "Collections", desc: "Add or remove the entry from collections" },
+            Binding { keys: "t", action: "Tags", desc: "Edit the tags attached to the entry" },
+            Binding { keys: "C-z", action: "Undo", desc: "Undo the last change to the library" },
+            Binding { keys: "C-y", action: "Redo", desc: "Redo the change that was last undone" },
+        ],
+    },
+    HelpSection {
+        title: "Search and sort",
+        bindings: &[
+            Binding { keys: "/", action: "Search", desc: "Filter entries by title, author, key or tag; filters collections when that panel has focus" },
+            Binding { keys: "s", action: "Sort menu", desc: "Choose the sort field and toggle ascending or descending order" },
+        ],
+    },
+    HelpSection {
+        title: "Application",
+        bindings: &[
+            Binding { keys: "`  ~  F1  ?", action: "Help", desc: "Open this help screen" },
+            Binding { keys: ",", action: "Settings", desc: "Open the settings screen" },
+            Binding { keys: "q", action: "Quit", desc: "Leave bibox" },
+            Binding { keys: "C-c", action: "Quit", desc: "Leave bibox immediately" },
+        ],
+    },
+];
+
+/// Rows matching `query`, paired with the title of the section they came from.
+/// An empty query returns every binding. Matching is case-insensitive across the
+/// key, the action name and the description, so "copy" finds a binding whose
+/// description mentions copying even when the key name says nothing about it.
+fn filter_bindings(sections: &'static [HelpSection], query: &str) -> Vec<(&'static str, &'static Binding)> {
+    let q = query.trim().to_lowercase();
+    sections
+        .iter()
+        .flat_map(|section| section.bindings.iter().map(move |b| (section.title, b)))
+        .filter(|(_, b)| {
+            q.is_empty()
+                || b.keys.to_lowercase().contains(&q)
+                || b.action.to_lowercase().contains(&q)
+                || b.desc.to_lowercase().contains(&q)
+        })
+        .collect()
+}
+
+fn draw_help_popup(f: &mut Frame, app: &App, area: Rect) {
+    let height = area.height.saturating_sub(4).max(10);
+    let popup_area = centered_rect(90, height, area);
     f.render_widget(Clear, popup_area);
 
-    let help_text = vec![
-        Line::from(Span::styled("bibox — Keyboard Shortcuts", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
-        Line::from(""),
-        Line::from(Span::styled("Navigation", Style::default().fg(Color::Cyan))),
-        Line::from("  h/←   Focus left panel    l/→   Focus right panel"),
-        Line::from("  j/↓   Move down           k/↑   Move up"),
-        Line::from("  gg    Jump to top          G     Jump to bottom"),
-        Line::from("  H/M/L Screen top/mid/bot   {n}j  Move n lines"),
-        Line::from("  C-d   Half page down       C-u   Half page up"),
-        Line::from("  Tab   Switch preview mode (Info / Note / PDF)"),
-        Line::from(""),
-        Line::from(Span::styled("Selection", Style::default().fg(Color::Cyan))),
-        Line::from("  Space Toggle select         V     Select/deselect all"),
-        Line::from("  Esc   Clear selection"),
-        Line::from(""),
-        Line::from(Span::styled("Actions", Style::default().fg(Color::Cyan))),
-        Line::from("  f     Fetch metadata        o     Open PDF / fetch"),
-        Line::from("  y     Copy citekey          w     Open web page"),
-        Line::from("  A     Attach PDF            e     Export menu"),
-        Line::from("  d     Delete entry          N     Edit note ($EDITOR)"),
-        Line::from(""),
-        Line::from(Span::styled("Edit", Style::default().fg(Color::Cyan))),
-        Line::from("  c     Manage collections    t     Edit tags"),
-        Line::from("  s     Sort menu             C-z   Undo    C-y  Redo"),
-        Line::from(""),
-        Line::from(Span::styled("Other", Style::default().fg(Color::Cyan))),
-        Line::from("  /     Search                q     Quit"),
-        Line::from("  ,     Settings              ?     This help"),
-        Line::from(""),
-        Line::from(Span::styled("Press ? or Esc to close", Style::default().fg(Color::DarkGray))),
-    ];
+    let rows = filter_bindings(HELP, &app.help_query);
 
-    let popup = Paragraph::new(help_text)
-        .block(Block::default().borders(Borders::ALL).title(" Help "))
-        .wrap(ratatui::widgets::Wrap { trim: false });
-    f.render_widget(popup, popup_area);
+    // Section headers are inserted between groups, so the row list the user sees
+    // is longer than the binding list that was filtered.
+    let mut lines: Vec<Line> = Vec::new();
+    let mut last_section: Option<&str> = None;
+    for (section, b) in &rows {
+        if last_section != Some(*section) {
+            if last_section.is_some() { lines.push(Line::from("")); }
+            lines.push(Line::from(Span::styled(
+                format!(" {}", section),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )));
+            last_section = Some(*section);
+        }
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {:<13}", b.keys), Style::default().fg(Color::Yellow)),
+            Span::styled(format!("{:<17}", b.action), Style::default().fg(Color::White)),
+            Span::styled(b.desc.to_string(), Style::default().fg(Color::DarkGray)),
+        ]));
+    }
+    if rows.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  (no shortcut matches this filter)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    let title = if app.help_query.is_empty() {
+        format!(" Help  ({} shortcuts) ", rows.len())
+    } else {
+        format!(" Help  ({} of {} shortcuts) ", rows.len(), HELP.iter().map(|s| s.bindings.len()).sum::<usize>())
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(Span::styled(title, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(inner);
+
+    // Clamp here as well as in the handler: the handler does not know the viewport
+    // height, so it can only stop the offset from running past the last row.
+    let visible = chunks[0].height as usize;
+    let max_scroll = lines.len().saturating_sub(visible);
+    let scroll = app.help_scroll.min(max_scroll);
+
+    let body: Vec<Line> = lines.into_iter().skip(scroll).collect();
+    f.render_widget(Paragraph::new(body), chunks[0]);
+
+    let footer = if app.help_filtering {
+        Line::from(vec![
+            Span::styled(" Filter: ", Style::default().fg(Color::Yellow)),
+            Span::styled(app.help_query.clone(), Style::default().fg(Color::White)),
+            Span::styled("▌", Style::default().fg(Color::Yellow)),
+        ])
+    } else if !app.help_query.is_empty() {
+        Line::from(vec![
+            Span::styled(" Filter: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(app.help_query.clone(), Style::default().fg(Color::White)),
+            Span::styled("   Esc clear   / edit   j/k scroll   q close", Style::default().fg(Color::DarkGray)),
+        ])
+    } else {
+        Line::from(Span::styled(
+            " / filter    j/k ↑/↓ scroll    C-d/C-u half page    g/G top/bottom    Esc or q close",
+            Style::default().fg(Color::DarkGray),
+        ))
+    };
+    f.render_widget(Paragraph::new(footer), chunks[1]);
 }
 
 fn draw_sort_popup(f: &mut Frame, app: &App, area: Rect) {
@@ -2329,7 +2472,12 @@ fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
             }
         }
 
-        KeyCode::Char('?') => { app.mode = Mode::Help; }
+        KeyCode::Char('?') | KeyCode::Char('`') | KeyCode::Char('~') | KeyCode::F(1) => {
+            app.help_query.clear();
+            app.help_filtering = false;
+            app.help_scroll = 0;
+            app.mode = Mode::Help;
+        }
 
         // Edit note in $EDITOR
         KeyCode::Char('N') => {
@@ -2492,8 +2640,52 @@ fn handle_confirm(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool
 }
 
 fn handle_help(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
+    let total_rows = filter_bindings(HELP, &app.help_query).len();
+    let max_scroll = total_rows.saturating_sub(1);
+
+    if app.help_filtering {
+        match key.code {
+            KeyCode::Esc => {
+                app.help_query.clear();
+                app.help_filtering = false;
+                app.help_scroll = 0;
+            }
+            KeyCode::Enter => { app.help_filtering = false; }
+            KeyCode::Backspace => { app.help_query.pop(); app.help_scroll = 0; }
+            KeyCode::Char(c) => { app.help_query.push(c); app.help_scroll = 0; }
+            _ => {}
+        }
+        return Ok(false);
+    }
+
     match key.code {
-        KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') => { app.mode = Mode::Normal; }
+        KeyCode::Char('/') => { app.help_filtering = true; }
+        KeyCode::Char('j') | KeyCode::Down => {
+            app.help_scroll = (app.help_scroll + 1).min(max_scroll);
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            app.help_scroll = app.help_scroll.saturating_sub(1);
+        }
+        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.help_scroll = (app.help_scroll + 10).min(max_scroll);
+        }
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.help_scroll = app.help_scroll.saturating_sub(10);
+        }
+        KeyCode::Char('g') | KeyCode::Home => { app.help_scroll = 0; }
+        KeyCode::Char('G') | KeyCode::End => { app.help_scroll = max_scroll; }
+        // Esc clears an active filter first, and only closes once there is none.
+        KeyCode::Esc if !app.help_query.is_empty() => {
+            app.help_query.clear();
+            app.help_scroll = 0;
+        }
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?')
+        | KeyCode::Char('`') | KeyCode::Char('~') | KeyCode::F(1) => {
+            app.help_query.clear();
+            app.help_filtering = false;
+            app.help_scroll = 0;
+            app.mode = Mode::Normal;
+        }
         _ => {}
     }
     Ok(false)
@@ -3632,6 +3824,49 @@ mod tests {
         let (keys, mouse) = super::coalesce_events(&batch);
         assert!(keys.is_empty());
         assert_eq!(mouse.map(|m| m.row), Some(3));
+    }
+
+    fn total_bindings() -> usize {
+        super::HELP.iter().map(|s| s.bindings.len()).sum()
+    }
+
+    #[test]
+    fn filter_bindings_returns_everything_for_an_empty_query() {
+        let rows = super::filter_bindings(super::HELP, "");
+        assert_eq!(rows.len(), total_bindings());
+    }
+
+    #[test]
+    fn filter_bindings_matches_on_the_key_name() {
+        // "gg" also appears inside "Toggle"/"toggle" in two descriptions, which is
+        // correct for a substring search, so assert the key row is found rather
+        // than pinning an exact count.
+        let rows = super::filter_bindings(super::HELP, "gg");
+        let top = rows.iter().find(|(_, b)| b.keys == "gg").expect("gg binding should be found");
+        assert_eq!(top.1.action, "Top");
+        assert_eq!(top.0, "Navigation");
+    }
+
+    #[test]
+    fn filter_bindings_matches_text_that_only_appears_in_the_description() {
+        // "clipboard" appears in no key and no action name, only in a description.
+        let rows = super::filter_bindings(super::HELP, "clipboard");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1.action, "Copy citekey");
+    }
+
+    #[test]
+    fn filter_bindings_ignores_case() {
+        let upper = super::filter_bindings(super::HELP, "UNDO");
+        let lower = super::filter_bindings(super::HELP, "undo");
+        assert!(!upper.is_empty());
+        assert_eq!(upper.len(), lower.len());
+    }
+
+    #[test]
+    fn filter_bindings_returns_nothing_when_no_row_matches() {
+        let rows = super::filter_bindings(super::HELP, "zzzznotakey");
+        assert!(rows.is_empty());
     }
 
     #[test]
