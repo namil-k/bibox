@@ -95,17 +95,17 @@ struct ContextMenuState {
 }
 
 impl ContextMenuState {
-    const ITEMS: &'static [(&'static str, &'static str, char)] = &[
-        ("Open PDF",    "o", 'o'),
-        ("Web",         "w", 'w'),
-        ("Copy Key",    "y", 'y'),
-        ("Collect",     "c", 'c'),
-        ("Tag",         "t", 't'),
-        ("Note",        "N", 'N'),
-        ("Export",      "e", 'e'),
-        ("Fetch Meta",  "f", 'f'),
-        ("Sort",        "s", 's'),
-        ("Delete",      "d", 'd'),
+    const ITEMS: &'static [(&'static str, Action)] = &[
+        ("Open PDF",   Action::OpenPdf),
+        ("Web",        Action::OpenWeb),
+        ("Copy Key",   Action::CopyCitekey),
+        ("Collect",    Action::Collections),
+        ("Tag",        Action::Tags),
+        ("Note",       Action::EditNote),
+        ("Export",     Action::ExportMenu),
+        ("Fetch Meta", Action::FetchMetadata),
+        ("Sort",       Action::SortMenu),
+        ("Delete",     Action::Delete),
     ];
 }
 
@@ -1467,6 +1467,18 @@ fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 
+/// 메뉴에 표시할 단축키. 엔트리 레이어에서 이 액션에 걸린 첫 바인딩을 역조회한다.
+/// 사용자가 리맵했으면 리맵한 키가 그대로 나온다.
+fn shortcut_hint(keymap: &Keymap, action: Action) -> String {
+    keymap
+        .entries
+        .bindings
+        .iter()
+        .find(|b| b.actions.len() == 1 && b.actions[0] == action)
+        .map(|b| b.keys.iter().map(|k| crate::keymap::render_key(*k)).collect::<Vec<_>>().join(""))
+        .unwrap_or_default()
+}
+
 fn draw_context_menu(f: &mut Frame, app: &App, screen: Rect) {
     let items = ContextMenuState::ITEMS;
     let menu_w: u16 = 20;
@@ -1486,7 +1498,8 @@ fn draw_context_menu(f: &mut Frame, app: &App, screen: Rect) {
     let area = Rect::new(x, y, menu_w, menu_h);
     f.render_widget(Clear, area);
 
-    let list_items: Vec<ListItem> = items.iter().enumerate().map(|(i, (label, key, _))| {
+    let list_items: Vec<ListItem> = items.iter().enumerate().map(|(i, (label, action))| {
+        let key = shortcut_hint(&app.keymap, *action);
         let style = if i == app.context_menu.index {
             Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
         } else {
@@ -2134,7 +2147,11 @@ fn handle_context_menu(app: &mut App, key: crossterm::event::KeyEvent) -> Result
             execute_context_action(app, idx);
         }
         KeyCode::Char(c) => {
-            if let Some(idx) = ContextMenuState::ITEMS.iter().position(|(_, _, k)| *k == c) {
+            let pressed = crate::keymap::render_key(KeyPress::new(KeyCode::Char(c), KeyModifiers::NONE));
+            if let Some(idx) = ContextMenuState::ITEMS
+                .iter()
+                .position(|(_, a)| shortcut_hint(&app.keymap, *a) == pressed)
+            {
                 execute_context_action(app, idx);
             }
         }
@@ -2145,15 +2162,8 @@ fn handle_context_menu(app: &mut App, key: crossterm::event::KeyEvent) -> Result
 
 fn execute_context_action(app: &mut App, idx: usize) {
     app.mode = Mode::Normal;
-    let key_char = match ContextMenuState::ITEMS.get(idx) {
-        Some((_, _, c)) => *c,
-        None => return,
-    };
-    let fake_key = crossterm::event::KeyEvent::new(
-        KeyCode::Char(key_char),
-        KeyModifiers::NONE,
-    );
-    let _ = handle_normal(app, fake_key);
+    let Some((_, action)) = ContextMenuState::ITEMS.get(idx) else { return };
+    let _ = execute(app, *action, ExecCtx { count: 1 });
 }
 
 /// 액션 하나를 실행한다. 바디는 옛 `handle_normal`의 32갈래에서 그대로 옮겨 왔다.
@@ -3986,5 +3996,31 @@ mod tests {
         let down: Vec<&super::HelpRow> = rows.iter().filter(|r| r.action == "EntryDown").collect();
         assert_eq!(down.len(), 1, "EntryDown should occupy one row");
         assert_eq!(down[0].keys, "j  <Down>");
+    }
+
+    #[test]
+    fn context_menu_items_carry_actions_not_characters() {
+        let actions: Vec<Action> = super::ContextMenuState::ITEMS.iter().map(|(_, a)| *a).collect();
+        assert!(actions.contains(&Action::OpenPdf));
+        assert!(actions.contains(&Action::Delete));
+        assert_eq!(actions.len(), 10);
+    }
+
+    #[test]
+    fn shortcut_hint_reads_the_active_keymap() {
+        assert_eq!(super::shortcut_hint(&default_keymap(), Action::OpenPdf), "o");
+    }
+
+    #[test]
+    fn shortcut_hint_follows_a_remapped_key() {
+        // 이 역조회가 없으면 사용자가 o를 리맵했을 때 메뉴가 옛 키를 계속 보여주고,
+        // 위조된 KeyEvent 방식이었다면 조용히 다른 동작을 실행했다.
+        let mut km = default_keymap();
+        km.entries.bindings.insert(0, KmBinding {
+            keys: vec![parse_key("P").unwrap()],
+            actions: vec![Action::OpenPdf],
+            desc: None,
+        });
+        assert_eq!(super::shortcut_hint(&km, Action::OpenPdf), "P");
     }
 }
