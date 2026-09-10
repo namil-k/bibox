@@ -16,7 +16,7 @@ use std::io;
 
 use crate::bibtex::entry_to_filename;
 use crate::config::Config;
-use crate::keymap::{Action, ExecCtx, Flow};
+use crate::keymap::{default_keymap, resolve, Action, ExecCtx, Flow, KeyPress, Keymap, LayerId, Resolution};
 use crate::models::Entry;
 use crate::storage::{find_by_key_mut, load_db, save_db};
 
@@ -309,8 +309,10 @@ pub struct App {
     prev_sort_ascending: bool,
     // Picker
     picker: Option<ChecklistPicker>,
-    // Vim key buffer (for gg, {number}j etc.)
-    key_buf: String,
+    // 시퀀스 대기 상태(gg 등)와 숫자 접두사 버퍼. 판단은 keymap::resolve가 한다.
+    pending: Vec<KeyPress>,
+    count_buf: String,
+    keymap: Keymap,
     // Undo/Redo stacks (DB snapshots)
     undo_stack: Vec<Vec<Entry>>,
     redo_stack: Vec<Vec<Entry>>,
@@ -396,7 +398,9 @@ impl App {
             prev_sort_by: SortCriterion::Created,
             prev_sort_ascending: false,
             picker: None,
-            key_buf: String::new(),
+            pending: Vec::new(),
+            count_buf: String::new(),
+            keymap: default_keymap(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             selected_keys: std::collections::HashSet::new(),
@@ -2491,121 +2495,59 @@ fn execute(app: &mut App, action: Action, ctx: ExecCtx) -> Result<Flow> {
     Ok(Flow::Continue)
 }
 
-/// `execute`를 부르고 종료 여부만 돌려준다.
-fn dispatch(app: &mut App, action: Action, count: usize) -> Result<bool> {
-    Ok(execute(app, action, ExecCtx { count })? == Flow::Quit)
+fn layer_for(focus: Panel) -> LayerId {
+    match focus {
+        Panel::Collections => LayerId::Collections,
+        Panel::Entries => LayerId::Entries,
+        Panel::Preview => LayerId::Preview,
+    }
 }
 
 fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
-    // ── Key buffer for vim motions (digits + g) ──
-    match key.code {
-        KeyCode::Char(c @ '0'..='9') => {
-            // Only buffer digits if we already have digits or it's not '0' at start
-            if !app.key_buf.is_empty() || c != '0' {
-                app.key_buf.push(c);
-                return Ok(false);
-            }
+    // ① 숫자 접두사. 키맵 바깥의 고정 전처리기다. 접두사이므로 시퀀스 대기
+    //    중에는 받지 않는다. 맨 앞의 '0'은 카운트가 아니라 바인딩 가능한 키다.
+    if let KeyCode::Char(c @ '0'..='9') = key.code {
+        if app.pending.is_empty()
+            && key.modifiers == KeyModifiers::NONE
+            && (!app.count_buf.is_empty() || c != '0')
+        {
+            app.count_buf.push(c);
+            return Ok(false);
         }
-        KeyCode::Char('g') => {
-            if app.key_buf == "g" {
-                // gg → go to top
-                let action = match app.focus {
-                    Panel::Collections => Action::CollectionTop,
-                    Panel::Entries => Action::EntryTop,
-                    Panel::Preview => Action::PreviewTop,
-                };
-                app.key_buf.clear();
-                if dispatch(app, action, 1)? { return Ok(true); }
-                return Ok(false);
-            } else if app.key_buf.is_empty() {
-                app.key_buf.push('g');
-                return Ok(false);
-            }
-        }
-        _ => {}
     }
 
-    // Parse count from buffer
-    let count: usize = app.key_buf.chars().take_while(|c| c.is_ascii_digit())
-        .collect::<String>().parse().unwrap_or(1);
-    app.key_buf.clear();
+    let count: usize = app.count_buf.parse().unwrap_or(1);
 
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    let quit = match key.code {
-        KeyCode::Char('q') => dispatch(app, Action::Quit, count)?,
-        KeyCode::Esc => dispatch(app, Action::Cancel, count)?,
-        KeyCode::Char('c') if ctrl => dispatch(app, Action::Quit, count)?,
-        KeyCode::Char('z') if ctrl => dispatch(app, Action::Undo, count)?,
-        KeyCode::Char('y') if ctrl => dispatch(app, Action::Redo, count)?,
+    // ② 시퀀스 해석
+    let press = KeyPress::new(key.code, key.modifiers);
+    let resolution = resolve(app.keymap.layer(layer_for(app.focus)), &app.pending, press);
 
-        KeyCode::Char('h') | KeyCode::Left => match app.focus {
-            Panel::Collections => false,
-            Panel::Entries => dispatch(app, Action::FocusCollections, count)?,
-            Panel::Preview => dispatch(app, Action::PrevTabOrFocusEntries, count)?,
-        },
-        KeyCode::Char('l') | KeyCode::Right => match app.focus {
-            Panel::Collections => dispatch(app, Action::FocusEntries, count)?,
-            Panel::Entries => dispatch(app, Action::FocusPreview, count)?,
-            Panel::Preview => dispatch(app, Action::NextTab, count)?,
-        },
-        KeyCode::Char('j') | KeyCode::Down => match app.focus {
-            Panel::Collections => dispatch(app, Action::CollectionDown, count)?,
-            Panel::Entries => dispatch(app, Action::EntryDown, count)?,
-            Panel::Preview => dispatch(app, Action::PreviewScrollDown, count)?,
-        },
-        KeyCode::Char('k') | KeyCode::Up => match app.focus {
-            Panel::Collections => dispatch(app, Action::CollectionUp, count)?,
-            Panel::Entries => dispatch(app, Action::EntryUp, count)?,
-            Panel::Preview => dispatch(app, Action::PreviewScrollUp, count)?,
-        },
-        KeyCode::Char('G') => match app.focus {
-            Panel::Collections => dispatch(app, Action::CollectionBottom, count)?,
-            Panel::Entries => dispatch(app, Action::EntryBottom, count)?,
-            Panel::Preview => dispatch(app, Action::PreviewBottom, count)?,
-        },
-        KeyCode::Char('d') if ctrl => match app.focus {
-            Panel::Collections => dispatch(app, Action::CollectionHalfPageDown, count)?,
-            Panel::Entries => dispatch(app, Action::EntryHalfPageDown, count)?,
-            Panel::Preview => dispatch(app, Action::PreviewHalfPageDown, count)?,
-        },
-        KeyCode::Char('u') if ctrl => match app.focus {
-            Panel::Collections => dispatch(app, Action::CollectionHalfPageUp, count)?,
-            Panel::Entries => dispatch(app, Action::EntryHalfPageUp, count)?,
-            Panel::Preview => dispatch(app, Action::PreviewHalfPageUp, count)?,
-        },
-
-        KeyCode::Char('H') if app.focus == Panel::Entries => dispatch(app, Action::EntryScreenTop, count)?,
-        KeyCode::Char('M') if app.focus == Panel::Entries => dispatch(app, Action::EntryScreenMiddle, count)?,
-        KeyCode::Char('L') if app.focus == Panel::Entries => dispatch(app, Action::EntryScreenBottom, count)?,
-
-        // 오늘 Space는 카운트를 버린다. 이 태스크는 동작을 보존하므로 1을 넘긴다.
-        KeyCode::Char(' ') if app.focus == Panel::Entries => {
-            dispatch(app, Action::ToggleSelect, 1)? || dispatch(app, Action::EntryDown, 1)?
+    match resolution {
+        Resolution::Pending => {
+            app.pending.push(press);
         }
-        KeyCode::Char('V') if app.focus == Panel::Entries => dispatch(app, Action::SelectAll, count)?,
-
-        KeyCode::Tab => dispatch(app, Action::NextPreviewTab, count)?,
-        KeyCode::Char('/') => dispatch(app, Action::Search, count)?,
-        KeyCode::Char('y') => dispatch(app, Action::CopyCitekey, count)?,
-        KeyCode::Char('o') => dispatch(app, Action::OpenPdf, count)?,
-        KeyCode::Char('w') => dispatch(app, Action::OpenWeb, count)?,
-        KeyCode::Char('f') => dispatch(app, Action::FetchMetadata, count)?,
-        KeyCode::Char('e') => dispatch(app, Action::ExportMenu, count)?,
-        KeyCode::Char('d') => dispatch(app, Action::Delete, count)?,
-        KeyCode::Char('?') | KeyCode::Char('`') | KeyCode::Char('~') | KeyCode::F(1) => {
-            dispatch(app, Action::Help, count)?
+        Resolution::Unbound => {
+            app.pending.clear();
+            app.count_buf.clear();
         }
-        KeyCode::Char('N') => dispatch(app, Action::EditNote, count)?,
-        KeyCode::Char('s') => dispatch(app, Action::SortMenu, count)?,
-        KeyCode::Char('c') => dispatch(app, Action::Collections, count)?,
-        KeyCode::Char('t') => dispatch(app, Action::Tags, count)?,
-        KeyCode::Char('A') => dispatch(app, Action::AttachPdf, count)?,
-        KeyCode::Char(',') => dispatch(app, Action::Settings, count)?,
-        KeyCode::Enter => dispatch(app, Action::Noop, count)?,
+        Resolution::Run(actions) => {
+            app.pending.clear();
+            app.count_buf.clear();
 
-        _ => false,
-    };
-    Ok(quit)
+            // ③ 실행. 배열은 순서대로 돌고, 종료나 모드 전환에서 중단한다.
+            for action in actions {
+                if execute(app, action, ExecCtx { count })? == Flow::Quit {
+                    return Ok(true);
+                }
+                if !matches!(app.mode, Mode::Normal) {
+                    break;
+                }
+            }
+            // 포커스가 바뀌면 레이어가 바뀌므로 대기 중 접두사의 의미가 사라진다.
+            app.pending.clear();
+        }
+    }
+    Ok(false)
 }
 
 fn handle_search(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
