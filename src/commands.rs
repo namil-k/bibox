@@ -4008,6 +4008,18 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
         }).unwrap_or(0)
     } else { 0 };
 
+    // ── 키맵 검증 ────────────────────────────────────────────────────────────
+    let km_report = crate::keymap::load_keymap();
+    for p in km_report.errors.iter().chain(km_report.warnings.iter()) {
+        issues.push(Issue {
+            kind: "keymap_problem".into(),
+            key: None,
+            // 앞 들여쓰기는 doctor의 상세 절에서 다시 붙으므로 여기서 뗀다.
+            detail: config.msgs.keymap_problem(p).trim_start().to_string(),
+            fixable: false,
+        });
+    }
+
     // ── Output (JSON) ────────────────────────────────────────────────────────
     if json {
         let result = serde_json::json!({
@@ -4041,6 +4053,7 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
         ("dirty_title",     "No BibTeX braces in text",      "entries with {} in text"),
         ("latex_escape",    "No LaTeX escapes in text",      "entries with LaTeX escapes"),
         ("orphaned_note",   "No orphaned notes",             "orphaned notes"),
+        ("keymap_problem",  "keymap.toml is valid",          "keymap.toml problems"),
     ];
 
     println!("  --- Checks {}", "-".repeat(44));
@@ -4065,7 +4078,7 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
 
     // Detail sections for each issue kind that has problems
     let kinds = ["malformed_entry", "bad_citekey", "duplicate_key", "missing_pdf", "orphaned_pdf",
-                  "missing_title", "dirty_title", "latex_escape", "orphaned_note"];
+                  "missing_title", "dirty_title", "latex_escape", "orphaned_note", "keymap_problem"];
     for kind in &kinds {
         let group: Vec<&Issue> = issues.iter().filter(|i| i.kind == *kind).collect();
         if group.is_empty() { continue; }
