@@ -808,9 +808,11 @@ fn draw(f: &mut Frame, app: &mut App) {
     let size = f.area();
 
     // Main layout: content | status bar
+    // 바를 끄면 그 한 줄을 패널에 돌려준다. 빈 줄로 남기지 않는다.
+    let status_bar_height = if app.config.status_bar { 1 } else { 0 };
     let outer = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .constraints([Constraint::Min(3), Constraint::Length(status_bar_height)])
         .split(size);
 
     // 3-panel horizontal: collections | entries | preview
@@ -831,7 +833,9 @@ fn draw(f: &mut Frame, app: &mut App) {
     draw_collections_panel(f, app, panels[0]);
     draw_entries_panel(f, app, panels[1]);
     draw_preview_panel(f, app, panels[2]);
-    draw_status_bar(f, app, outer[1]);
+    if app.config.status_bar {
+        draw_status_bar(f, app, outer[1]);
+    }
 
     // File picker takes over full screen
     if let Mode::FilePicker(_) = &app.mode {
@@ -1404,6 +1408,72 @@ fn draw_preview_pdf(f: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
+/// 하단 바 문자열. 키는 전부 활성 키맵에서 역조회하므로 리맵하면 바도 따라 바뀐다.
+///
+/// 도움말 오버레이가 생긴 뒤로 여기에 액션 키를 전부 늘어놓을 이유가 없어졌다.
+/// 하루에 여러 번 쓰는 것만 남기고 나머지는 도움말이 안내한다.
+fn status_bar_text(keymap: &Keymap, focus: Panel) -> String {
+    let layer = keymap.layer(layer_for(focus));
+    let k = |a: Action| shortcut_hint(layer, a);
+
+    // 바인딩이 없는 항목은 통째로 뺀다. 빈 힌트를 남기면 " search"처럼 앞이 빈다.
+    fn push(parts: &mut Vec<String>, hint: String, label: &str) {
+        if !hint.is_empty() {
+            parts.push(format!("{} {}", hint, label));
+        }
+    }
+    /// 화살표 라벨은 키에 붙여 쓴다. "h←collections"가 "h는 왼쪽 컬렉션으로"로 읽힌다.
+    fn push_arrow(parts: &mut Vec<String>, hint: String, label: &str) {
+        if !hint.is_empty() {
+            parts.push(format!("{}{}", hint, label));
+        }
+    }
+    fn push_pair(parts: &mut Vec<String>, down: String, up: String, label: &str) {
+        if !down.is_empty() && !up.is_empty() {
+            parts.push(format!("{}/{} {}", down, up, label));
+        }
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+
+    match focus {
+        Panel::Collections => {
+            push_arrow(&mut parts, k(Action::FocusEntries), "→entries");
+            push_pair(&mut parts, k(Action::CollectionDown), k(Action::CollectionUp), "navigate");
+        }
+        Panel::Entries => {
+            push_arrow(&mut parts, k(Action::FocusCollections), "←collections");
+            push_arrow(&mut parts, k(Action::FocusPreview), "→preview");
+            push_pair(&mut parts, k(Action::EntryDown), k(Action::EntryUp), "navigate");
+        }
+        Panel::Preview => {
+            push_arrow(&mut parts, k(Action::PrevTabOrFocusEntries), "←entries");
+            push(&mut parts, k(Action::NextPreviewTab), "switch mode");
+            push_pair(&mut parts, k(Action::PreviewScrollDown), k(Action::PreviewScrollUp), "scroll");
+        }
+    }
+
+    let navigation = parts.join("  ");
+    parts.clear();
+    for (action, label) in [
+        (Action::Search, "search"),
+        (Action::OpenPdf, "open"),
+        (Action::ExportMenu, "export"),
+        (Action::Help, "help"),
+        (Action::Quit, "quit"),
+    ] {
+        push(&mut parts, k(action), label);
+    }
+    let actions = parts.join("  ");
+
+    match (navigation.is_empty(), actions.is_empty()) {
+        (false, false) => format!("{}  │  {}", navigation, actions),
+        (false, true) => navigation,
+        (true, false) => actions,
+        (true, true) => String::new(),
+    }
+}
+
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let status = match &app.mode {
         Mode::Search => {
@@ -1413,17 +1483,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
                 format!("/ {} (Esc to clear)", app.search_query)
             }
         }
-        _ => {
-            let panel_hint = match app.focus {
-                Panel::Collections => "j/k navigate  l→entries",
-                Panel::Entries => "h←collections  l→preview  j/k navigate",
-                Panel::Preview => "h←entries  Tab switch mode  j/k scroll",
-            };
-            format!(
-                "{}  │  / search  s sort  o open  w web  e export  d delete  c collect  t tag  N note  , settings  ? help  q quit",
-                panel_hint
-            )
-        }
+        _ => status_bar_text(&app.keymap, app.focus),
     };
     let status_widget = Paragraph::new(status).style(Style::default().fg(Color::DarkGray));
     f.render_widget(status_widget, area);
@@ -1467,11 +1527,10 @@ fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 
-/// 메뉴에 표시할 단축키. 엔트리 레이어에서 이 액션에 걸린 첫 바인딩을 역조회한다.
-/// 사용자가 리맵했으면 리맵한 키가 그대로 나온다.
-fn shortcut_hint(keymap: &Keymap, action: Action) -> String {
-    keymap
-        .entries
+/// 이 액션에 걸린 첫 바인딩을 레이어에서 역조회한다. 사용자가 리맵했으면
+/// 리맵한 키가 그대로 나온다. 바인딩이 없으면 빈 문자열이다.
+fn shortcut_hint(layer: &crate::keymap::Layer, action: Action) -> String {
+    layer
         .bindings
         .iter()
         .find(|b| b.actions.len() == 1 && b.actions[0] == action)
@@ -1499,7 +1558,7 @@ fn draw_context_menu(f: &mut Frame, app: &App, screen: Rect) {
     f.render_widget(Clear, area);
 
     let list_items: Vec<ListItem> = items.iter().enumerate().map(|(i, (label, action))| {
-        let key = shortcut_hint(&app.keymap, *action);
+        let key = shortcut_hint(&app.keymap.entries, *action);
         let style = if i == app.context_menu.index {
             Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
         } else {
@@ -1902,6 +1961,7 @@ fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
     let ck_fmt = &app.config.citekey_format;
 
     let scroll_label = if app.config.natural_scroll { "natural" } else { "standard" };
+    let status_bar_label = if app.config.status_bar { "shown" } else { "hidden" };
     let pdf_dir_label = match &app.config.pdf_dir {
         Some(p) => p.display().to_string(),
         None => "(default: home/pdfs/)".into(),
@@ -1911,6 +1971,7 @@ fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
         (format!("Line numbers     [{}]", ln_label), true),
         (format!("Panel ratio      [{}, {}, {}]", ratio[0], ratio[1], ratio[2]), true),
         (format!("Scroll direction [{}]", scroll_label), true),
+        (format!("Status bar       [{}]", status_bar_label), true),
         (format!("Bib export dir   [{}]", bib_dir), true),
         (format!("Export dir       [{}]", exp_dir), true),
         (format!("Citekey format   [{}]", ck_fmt), true),
@@ -2150,7 +2211,7 @@ fn handle_context_menu(app: &mut App, key: crossterm::event::KeyEvent) -> Result
             let pressed = crate::keymap::render_key(KeyPress::new(KeyCode::Char(c), KeyModifiers::NONE));
             if let Some(idx) = ContextMenuState::ITEMS
                 .iter()
-                .position(|(_, a)| shortcut_hint(&app.keymap, *a) == pressed)
+                .position(|(_, a)| shortcut_hint(&app.keymap.entries, *a) == pressed)
             {
                 execute_context_action(app, idx);
             }
@@ -2808,7 +2869,7 @@ fn handle_export_menu(app: &mut App, key: crossterm::event::KeyEvent) -> Result<
 
 fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
     use crate::config::LineNumbers;
-    let num_settings: usize = 9; // 0-6 editable, 7 home (ro), 8 git
+    let num_settings: usize = 10; // 0-7 editable, 8 home (ro), 9 git
 
     let download_dir = dirs::download_dir()
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")));
@@ -2848,22 +2909,23 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
                     };
                 }
                 2 => { app.config.natural_scroll = !app.config.natural_scroll; }
-                3 => {
+                3 => { app.config.status_bar = !app.config.status_bar; }
+                4 => {
                     let cur = &app.config.bib_export_dir;
                     let pos = dir_presets.iter().position(|d| d == cur).unwrap_or(0);
                     app.config.bib_export_dir = dir_presets[(pos + 1) % dir_presets.len()].clone();
                 }
-                4 => {
+                5 => {
                     let cur = &app.config.export_dir;
                     let pos = dir_presets.iter().position(|d| d == cur).unwrap_or(0);
                     app.config.export_dir = dir_presets[(pos + 1) % dir_presets.len()].clone();
                 }
-                5 => {
+                6 => {
                     let presets = crate::config::CITEKEY_PRESETS;
                     let pos = presets.iter().position(|p| *p == app.config.citekey_format).unwrap_or(0);
                     app.config.citekey_format = presets[(pos + 1) % presets.len()].to_string();
                 }
-                6 => {
+                7 => {
                     // Toggle pdf_dir: None -> some cloud presets
                     let cloud_presets = pdf_dir_presets();
                     let cur = app.config.pdf_dir.clone();
@@ -2896,25 +2958,26 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
                     };
                 }
                 2 => { app.config.natural_scroll = !app.config.natural_scroll; }
-                3 => {
+                3 => { app.config.status_bar = !app.config.status_bar; }
+                4 => {
                     let cur = &app.config.bib_export_dir;
                     let pos = dir_presets.iter().position(|d| d == cur).unwrap_or(0);
                     let prev = if pos == 0 { dir_presets.len() - 1 } else { pos - 1 };
                     app.config.bib_export_dir = dir_presets[prev].clone();
                 }
-                4 => {
+                5 => {
                     let cur = &app.config.export_dir;
                     let pos = dir_presets.iter().position(|d| d == cur).unwrap_or(0);
                     let prev = if pos == 0 { dir_presets.len() - 1 } else { pos - 1 };
                     app.config.export_dir = dir_presets[prev].clone();
                 }
-                5 => {
+                6 => {
                     let presets = crate::config::CITEKEY_PRESETS;
                     let pos = presets.iter().position(|p| *p == app.config.citekey_format).unwrap_or(0);
                     let prev = if pos == 0 { presets.len() - 1 } else { pos - 1 };
                     app.config.citekey_format = presets[prev].to_string();
                 }
-                6 => {
+                7 => {
                     let cloud_presets = pdf_dir_presets();
                     let cur = app.config.pdf_dir.clone();
                     let pos = cur.and_then(|c| cloud_presets.iter().position(|p| *p == c));
@@ -2932,8 +2995,8 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
             }
         }
         KeyCode::Enter => {
-            // Dir picker for path settings (3=bib_export_dir, 4=export_dir, 6=pdf_dir, 7=home)
-            if app.settings_idx == 3 {
+            // Dir picker for path settings (4=bib_export_dir, 5=export_dir, 7=pdf_dir, 8=home)
+            if app.settings_idx == 4 {
                 let start = app.config.bib_export_dir.clone();
                 app.file_picker_state = Some(
                     ratatree::FilePickerState::builder()
@@ -2943,7 +3006,7 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
                 );
                 app.mode = Mode::FilePicker(FilePickerContext::BibExportDir);
                 return Ok(false);
-            } else if app.settings_idx == 4 {
+            } else if app.settings_idx == 5 {
                 let start = app.config.export_dir.clone();
                 app.file_picker_state = Some(
                     ratatree::FilePickerState::builder()
@@ -2953,7 +3016,7 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
                 );
                 app.mode = Mode::FilePicker(FilePickerContext::ExportDir);
                 return Ok(false);
-            } else if app.settings_idx == 6 {
+            } else if app.settings_idx == 7 {
                 let start = app.config.pdf_dir.clone()
                     .or_else(|| app.config.home.as_ref().map(|h| crate::config::expand_tilde(h).join("pdfs")))
                     .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")));
@@ -2965,7 +3028,7 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
                 );
                 app.mode = Mode::FilePicker(FilePickerContext::PdfDir);
                 return Ok(false);
-            } else if app.settings_idx == 7 {
+            } else if app.settings_idx == 8 {
                 let start = app.config.home.clone()
                     .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")));
                 app.file_picker_state = Some(
@@ -2976,7 +3039,7 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
                 );
                 app.mode = Mode::FilePicker(FilePickerContext::Home);
                 return Ok(false);
-            } else if app.settings_idx == 8 {
+            } else if app.settings_idx == 9 {
                 if let Some(ref home) = app.config.home {
                     let home = crate::config::expand_tilde(home);
                     if !app.git_status_checked {
@@ -3052,6 +3115,9 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
                 app.config.bib_export_dir = cfg.bib_export_dir;
                 app.config.export_dir = cfg.export_dir;
                 app.config.citekey_format = cfg.citekey_format;
+                // 토글 두 개도 되돌린다. Esc는 취소이므로 저장하지 않은 변경은 남으면 안 된다.
+                app.config.natural_scroll = cfg.natural_scroll;
+                app.config.status_bar = cfg.status_bar;
             }
             app.mode = Mode::Normal;
         }
@@ -3185,6 +3251,7 @@ pub fn run_tui(config: &Config) -> Result<()> {
         export_dir: config.export_dir.clone(),
         citekey_format: config.citekey_format.clone(),
         natural_scroll: config.natural_scroll,
+        status_bar: config.status_bar,
         msgs: crate::i18n::Msgs::new(&config.language),
     };
 
@@ -4008,7 +4075,7 @@ mod tests {
 
     #[test]
     fn shortcut_hint_reads_the_active_keymap() {
-        assert_eq!(super::shortcut_hint(&default_keymap(), Action::OpenPdf), "o");
+        assert_eq!(super::shortcut_hint(&default_keymap().entries, Action::OpenPdf), "o");
     }
 
     #[test]
@@ -4021,6 +4088,55 @@ mod tests {
             actions: vec![Action::OpenPdf],
             desc: None,
         });
-        assert_eq!(super::shortcut_hint(&km, Action::OpenPdf), "P");
+        assert_eq!(super::shortcut_hint(&km.entries, Action::OpenPdf), "P");
+    }
+
+    #[test]
+    fn status_bar_follows_the_default_keymap() {
+        let bar = super::status_bar_text(&default_keymap(), super::Panel::Entries);
+        assert!(bar.contains("j/k navigate"), "got {}", bar);
+        assert!(bar.contains("? help"), "got {}", bar);
+        assert!(bar.contains("q quit"), "got {}", bar);
+    }
+
+    #[test]
+    fn status_bar_follows_a_remapped_key() {
+        // 하드코딩이던 시절 조용히 틀리던 지점이 정확히 여기다.
+        let mut km = default_keymap();
+        km.entries.bindings.insert(0, KmBinding {
+            keys: vec![parse_key("<C-n>").unwrap()],
+            actions: vec![Action::EntryDown],
+            desc: None,
+        });
+        let bar = super::status_bar_text(&km, super::Panel::Entries);
+        assert!(bar.contains("<C-n>/k navigate"), "got {}", bar);
+    }
+
+    #[test]
+    fn status_bar_differs_per_panel() {
+        let km = default_keymap();
+        let entries = super::status_bar_text(&km, super::Panel::Entries);
+        let preview = super::status_bar_text(&km, super::Panel::Preview);
+        assert!(entries.contains("navigate"));
+        assert!(preview.contains("scroll"), "got {}", preview);
+        assert_ne!(entries, preview);
+    }
+
+    #[test]
+    fn status_bar_omits_an_action_that_has_no_binding() {
+        // 사용자가 clear_defaults로 키를 다 비우면 빈 힌트가 남아 "  search"처럼
+        // 앞이 비어 보이면 안 된다.
+        let km = crate::keymap::Keymap {
+            entries: KmLayer { bindings: vec![KmBinding {
+                keys: vec![parse_key("q").unwrap()],
+                actions: vec![Action::Quit],
+                desc: None,
+            }] },
+            ..Default::default()
+        };
+        let bar = super::status_bar_text(&km, super::Panel::Entries);
+        assert!(bar.contains("q quit"), "got {}", bar);
+        assert!(!bar.contains(" search"), "unbound actions must be dropped, got {}", bar);
+        assert!(!bar.contains("  navigate"), "got {}", bar);
     }
 }

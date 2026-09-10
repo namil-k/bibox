@@ -163,6 +163,8 @@ bibox
 
 Press `` ` ``, `~` or `F1` for a searchable list of every key that works in the focused panel. `/` filters it, and the filter matches descriptions too, so typing `clipboard` finds `y`.
 
+The bar at the bottom carries panel navigation and the few actions used many times a day; the help screen covers the rest. Its keys are read from the active keymap, so they follow a remap. Turn it off with `status_bar = false` or from the settings screen, and the row goes back to the panels.
+
 ### Customizing keybindings
 
 Every key is remappable through `keymap.toml`, next to `config.toml`:
@@ -421,6 +423,7 @@ Press `,` in the TUI, or run `bibox config` to see all current settings and path
 line_numbers = "absolute"              # absolute, relative, none
 panel_ratio = [2, 4, 4]               # left : center : right (sum = 10)
 natural_scroll = false                 # true for macOS-style natural scrolling
+status_bar = true                      # hint bar at the bottom; false reclaims that row
 citekey_format = "{author}{year}{title}" # {author}, {year}, {title} variables
 bib_export_dir = "."                   # BibTeX export location
 export_dir = "~/Downloads"             # Other exports location

@@ -57,6 +57,11 @@ pub struct Config {
     /// Natural scrolling (like macOS default): scroll down to move content up
     #[serde(default)]
     pub natural_scroll: bool,
+    /// Show the hint bar at the bottom of the TUI (default: true).
+    /// The searchable help overlay covers the full list, so the bar only carries
+    /// panel navigation and the few actions used many times a day.
+    #[serde(default = "default_true")]
+    pub status_bar: bool,
     #[serde(skip)]
     pub msgs: Msgs,
 }
@@ -81,9 +86,14 @@ impl Default for Config {
             export_dir: default_export_dir(),
             citekey_format: default_citekey_format(),
             natural_scroll: false,
+            status_bar: true,
             msgs: Msgs::default(),
         }
     }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_language() -> String {
