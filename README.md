@@ -161,6 +161,53 @@ bibox
 | Right click | Context menu (open, export, delete, etc.) |
 | Scroll wheel | Navigate entries/collections, scroll preview |
 
+Press `` ` ``, `~` or `F1` for a searchable list of every key that works in the focused panel. `/` filters it, and the filter matches descriptions too, so typing `clipboard` finds `y`.
+
+### Customizing keybindings
+
+Every key is remappable through `keymap.toml`, next to `config.toml`:
+
+- macOS: `~/Library/Application Support/bibox/keymap.toml`
+- Linux: `~/.config/bibox/keymap.toml`
+
+```toml
+[normal.entries]
+prepend_keymap = [
+  { on = "<C-n>",    run = "entry_down" },
+  { on = ["g", "b"], run = "entry_bottom", desc = "Jump to the last entry" },
+  { on = "d",        run = "noop" },              # disable delete
+]
+
+[normal.preview]
+prepend_keymap = [
+  { on = "<C-n>", run = "preview_scroll_down" },
+]
+```
+
+**Layers.** The Normal mode splits by which panel has focus: `[normal.collections]`, `[normal.entries]` and `[normal.preview]`. The layers are independent, so a key that should work in every panel has to be written in every layer. That is also why the help screen shows only what is live in the panel you are in.
+
+**Merging.** Each layer's effective list is `prepend_keymap` + the defaults + `append_keymap`, and lookup takes the first match. So `prepend_keymap` overrides a default, `append_keymap` adds to it, and `clear_defaults = true` drops the defaults for that layer only.
+
+**Fields.** `on` takes one key or a list for a sequence. `run` takes one action or a list to run in order. `desc` is optional and replaces the description shown in help. `noop` disables a key.
+
+**Key notation.** `<C-x>`, `<A-x>`, `<S-x>`, `<Esc>`, `<Space>`, `<Tab>`, `<Enter>`, `<Backspace>`, `<Left>`, `<Right>`, `<Up>`, `<Down>`, `<F1>` through `<F12>`. Anything else is the character itself. Shift is not written for letters: `G`, not `<S-g>`.
+
+**Two limits.** Digits cannot be bound, because they are the count prefix that makes `5j` work; the exception is a leading `0`, which is not a count and stays bindable. And a count now reaches every action in a sequence, so `5<Space>` selects one entry and moves down five.
+
+**Actions.**
+
+| Layer | Actions |
+|-------|---------|
+| Any | `quit` `cancel` `undo` `redo` `next_preview_tab` `search` `copy_citekey` `open_pdf` `open_web` `fetch_metadata` `export_menu` `delete` `help` `edit_note` `sort_menu` `collections` `tags` `attach_pdf` `settings` `noop` |
+| `normal.entries` | `entry_down` `entry_up` `entry_top` `entry_bottom` `entry_screen_top` `entry_screen_middle` `entry_screen_bottom` `entry_half_page_down` `entry_half_page_up` `toggle_select` `select_all` `focus_collections` `focus_preview` |
+| `normal.collections` | `collection_down` `collection_up` `collection_top` `collection_bottom` `collection_half_page_down` `collection_half_page_up` `focus_entries` |
+| `normal.preview` | `preview_scroll_down` `preview_scroll_up` `preview_top` `preview_bottom` `preview_half_page_down` `preview_half_page_up` `next_tab` `prev_tab` `prev_tab_or_focus_entries` `focus_entries` |
+
+Action names say what they move, not which panel has focus, so binding `entry_down` inside `[normal.preview]` is allowed and does what it says.
+
+**When it breaks.** A bad `keymap.toml` never stops bibox. Every problem is reported before the TUI opens and the default keymap is used for that run, so you are never locked out by your own config. `bibox doctor` reports the same problems without opening the TUI, and `bibox doctor --json` gives them to an editor.
+
+
 ## CLI
 
 **Browse:**
