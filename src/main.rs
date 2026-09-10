@@ -10,6 +10,7 @@ mod crossref;
 mod git;
 mod i18n;
 mod interactive;
+mod keymap;
 mod models;
 mod notes;
 mod openlibrary;
