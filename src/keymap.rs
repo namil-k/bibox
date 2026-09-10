@@ -175,7 +175,9 @@ pub enum Action {
 }
 
 impl Action {
-    /// 도움말 생성과 테스트가 전수 순회에 쓴다.
+    /// 모든 변형에 설명과 섹션이 붙어 있는지 검사하는 테스트 전용 목록.
+    /// 도움말은 키맵의 바인딩에서 생성되므로 이 목록을 쓰지 않는다.
+    #[cfg(test)]
     pub fn all() -> &'static [Action] {
         use Action::*;
         &[

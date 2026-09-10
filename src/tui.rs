@@ -1527,98 +1527,69 @@ fn draw_message_popup(f: &mut Frame, msg: &str, area: Rect) {
 
 /// One keyboard shortcut as data, so the help screen can be searched and tested
 /// rather than being a block of hardcoded prose that drifts from the handlers.
-struct Binding {
-    keys: &'static str,
-    action: &'static str,
-    desc: &'static str,
-}
-
-struct HelpSection {
-    title: &'static str,
-    bindings: &'static [Binding],
-}
-
-const HELP: &[HelpSection] = &[
-    HelpSection {
-        title: "Navigation",
-        bindings: &[
-            Binding { keys: "h  ←", action: "Focus left", desc: "Move focus one panel left, or step back a preview tab" },
-            Binding { keys: "l  →", action: "Focus right", desc: "Move focus one panel right, or step forward a preview tab" },
-            Binding { keys: "j  ↓", action: "Down", desc: "Move down one line in the focused panel" },
-            Binding { keys: "k  ↑", action: "Up", desc: "Move up one line in the focused panel" },
-            Binding { keys: "{n}j", action: "Down n lines", desc: "Type a count before j or k to repeat it, as in 5j" },
-            Binding { keys: "gg", action: "Top", desc: "Jump to the first item in the focused panel" },
-            Binding { keys: "G", action: "Bottom", desc: "Jump to the last item in the focused panel" },
-            Binding { keys: "H", action: "Screen top", desc: "Jump near the top of the visible entry list" },
-            Binding { keys: "M", action: "Screen middle", desc: "Jump to the middle of the entry list" },
-            Binding { keys: "L", action: "Screen bottom", desc: "Jump near the bottom of the visible entry list" },
-            Binding { keys: "C-d", action: "Half page down", desc: "Scroll the focused panel down half a screen" },
-            Binding { keys: "C-u", action: "Half page up", desc: "Scroll the focused panel up half a screen" },
-            Binding { keys: "Tab", action: "Preview tab", desc: "Cycle the preview panel between Info, Note and PDF" },
-        ],
-    },
-    HelpSection {
-        title: "Selection",
-        bindings: &[
-            Binding { keys: "Space", action: "Toggle select", desc: "Select or deselect the current entry, then move down" },
-            Binding { keys: "V", action: "Select all", desc: "Select every visible entry, or clear if all are selected" },
-            Binding { keys: "Esc", action: "Clear selection", desc: "Drop the current selection, or quit when nothing is selected" },
-        ],
-    },
-    HelpSection {
-        title: "Entry actions",
-        bindings: &[
-            Binding { keys: "o", action: "Open PDF", desc: "Open the attached PDF, or offer to fetch one when missing" },
-            Binding { keys: "w", action: "Open web page", desc: "Open the entry DOI or URL in the default browser" },
-            Binding { keys: "f", action: "Fetch metadata", desc: "Look the entry up by DOI, or search by title when it has none" },
-            Binding { keys: "A", action: "Attach PDF", desc: "Pick a PDF from disk and attach it to the current entry" },
-            Binding { keys: "y", action: "Copy citekey", desc: "Copy the BibTeX citation key to the system clipboard" },
-            Binding { keys: "N", action: "Edit note", desc: "Open the entry Markdown note in $EDITOR" },
-            Binding { keys: "e", action: "Export menu", desc: "Export the selection as BibTeX, PDFs or a zip archive" },
-            Binding { keys: "d", action: "Delete entry", desc: "Delete the current entry after a confirmation prompt" },
-        ],
-    },
-    HelpSection {
-        title: "Editing",
-        bindings: &[
-            Binding { keys: "c", action: "Collections", desc: "Add or remove the entry from collections" },
-            Binding { keys: "t", action: "Tags", desc: "Edit the tags attached to the entry" },
-            Binding { keys: "C-z", action: "Undo", desc: "Undo the last change to the library" },
-            Binding { keys: "C-y", action: "Redo", desc: "Redo the change that was last undone" },
-        ],
-    },
-    HelpSection {
-        title: "Search and sort",
-        bindings: &[
-            Binding { keys: "/", action: "Search", desc: "Filter entries by title, author, key or tag; filters collections when that panel has focus" },
-            Binding { keys: "s", action: "Sort menu", desc: "Choose the sort field and toggle ascending or descending order" },
-        ],
-    },
-    HelpSection {
-        title: "Application",
-        bindings: &[
-            Binding { keys: "`  ~  F1  ?", action: "Help", desc: "Open this help screen" },
-            Binding { keys: ",", action: "Settings", desc: "Open the settings screen" },
-            Binding { keys: "q", action: "Quit", desc: "Leave bibox" },
-            Binding { keys: "C-c", action: "Quit", desc: "Leave bibox immediately" },
-        ],
-    },
+/// 화면에 나오는 섹션 순서. `Action::section()`이 돌려주는 값과 같아야 한다.
+const SECTION_ORDER: &[&str] = &[
+    "Navigation", "Selection", "Entry actions", "Editing", "Search and sort", "Application",
 ];
 
-/// Rows matching `query`, paired with the title of the section they came from.
-/// An empty query returns every binding. Matching is case-insensitive across the
-/// key, the action name and the description, so "copy" finds a binding whose
-/// description mentions copying even when the key name says nothing about it.
-fn filter_bindings(sections: &'static [HelpSection], query: &str) -> Vec<(&'static str, &'static Binding)> {
-    let q = query.trim().to_lowercase();
-    sections
+struct HelpRow {
+    keys: String,
+    action: String,
+    desc: String,
+    section: &'static str,
+}
+
+/// 도움말 표는 활성 레이어의 바인딩에서 생성된다. 손으로 유지하지 않는다.
+///
+/// `draw_help_popup`이 "섹션이 바뀌면 제목을 끼워 넣는" 방식이라 행이 섹션순으로
+/// 정렬돼 있어야 한다. 옛 `const HELP`는 손으로 그 순서를 맞춰 두었지만 키맵의
+/// 바인딩 순서는 그렇지 않으므로 여기서 정렬한다. 안정 정렬이라 같은 섹션 안의
+/// 순서는 키맵에 쓴 순서를 따른다.
+fn help_rows(layer: &crate::keymap::Layer) -> Vec<HelpRow> {
+    let mut rows: Vec<HelpRow> = layer
+        .bindings
         .iter()
-        .flat_map(|section| section.bindings.iter().map(move |b| (section.title, b)))
-        .filter(|(_, b)| {
-            q.is_empty()
-                || b.keys.to_lowercase().contains(&q)
-                || b.action.to_lowercase().contains(&q)
-                || b.desc.to_lowercase().contains(&q)
+        .filter(|b| b.actions.first().is_some_and(|a| *a != Action::Noop))
+        .map(|b| {
+            let first = b.actions[0];
+            HelpRow {
+                keys: b.keys.iter().map(|k| crate::keymap::render_key(*k)).collect::<Vec<_>>().join(""),
+                action: format!("{:?}", first),
+                desc: b.desc.clone().unwrap_or_else(|| first.desc().to_string()),
+                section: first.section(),
+            }
+        })
+        .collect();
+    rows.sort_by_key(|r| SECTION_ORDER.iter().position(|s| *s == r.section).unwrap_or(usize::MAX));
+
+    // 같은 동작에 걸린 별칭 키는 한 행으로 합친다. 옛 `const HELP`가 "h  ←"처럼
+    // 손으로 합쳐 두었던 것과 같은 모양이고, 합치지 않으면 j와 <Down>이 따로 나와
+    // 표가 알맹이 없이 길어진다.
+    let mut merged: Vec<HelpRow> = Vec::new();
+    for r in rows {
+        match merged.last_mut() {
+            Some(prev) if prev.section == r.section && prev.action == r.action && prev.desc == r.desc => {
+                prev.keys.push_str("  ");
+                prev.keys.push_str(&r.keys);
+            }
+            _ => merged.push(r),
+        }
+    }
+    merged
+}
+
+/// `query`에 걸리는 행. 빈 질의는 전부 돌려준다. 키, 액션 이름, 설명 전부에서
+/// 대소문자를 무시하고 부분 문자열로 찾는다. "copy"가 설명에만 있는 행도 걸린다.
+fn filter_rows<'a>(rows: &'a [HelpRow], query: &str) -> Vec<&'a HelpRow> {
+    if query.is_empty() {
+        return rows.iter().collect();
+    }
+    let q = query.to_lowercase();
+    rows.iter()
+        .filter(|r| {
+            r.keys.to_lowercase().contains(&q)
+                || r.action.to_lowercase().contains(&q)
+                || r.desc.to_lowercase().contains(&q)
         })
         .collect()
 }
@@ -1628,25 +1599,26 @@ fn draw_help_popup(f: &mut Frame, app: &App, area: Rect) {
     let popup_area = centered_rect(90, height, area);
     f.render_widget(Clear, popup_area);
 
-    let rows = filter_bindings(HELP, &app.help_query);
+    let all = help_rows(app.keymap.layer(layer_for(app.focus)));
+    let rows = filter_rows(&all, &app.help_query);
 
     // Section headers are inserted between groups, so the row list the user sees
     // is longer than the binding list that was filtered.
     let mut lines: Vec<Line> = Vec::new();
     let mut last_section: Option<&str> = None;
-    for (section, b) in &rows {
-        if last_section != Some(*section) {
+    for r in &rows {
+        if last_section != Some(r.section) {
             if last_section.is_some() { lines.push(Line::from("")); }
             lines.push(Line::from(Span::styled(
-                format!(" {}", section),
+                format!(" {}", r.section),
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
             )));
-            last_section = Some(*section);
+            last_section = Some(r.section);
         }
         lines.push(Line::from(vec![
-            Span::styled(format!("  {:<13}", b.keys), Style::default().fg(Color::Yellow)),
-            Span::styled(format!("{:<17}", b.action), Style::default().fg(Color::White)),
-            Span::styled(b.desc.to_string(), Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("  {:<16}", r.keys), Style::default().fg(Color::Yellow)),
+            Span::styled(format!("{:<22}", r.action), Style::default().fg(Color::White)),
+            Span::styled(r.desc.clone(), Style::default().fg(Color::DarkGray)),
         ]));
     }
     if rows.is_empty() {
@@ -1659,7 +1631,7 @@ fn draw_help_popup(f: &mut Frame, app: &App, area: Rect) {
     let title = if app.help_query.is_empty() {
         format!(" Help  ({} shortcuts) ", rows.len())
     } else {
-        format!(" Help  ({} of {} shortcuts) ", rows.len(), HELP.iter().map(|s| s.bindings.len()).sum::<usize>())
+        format!(" Help  ({} of {} shortcuts) ", rows.len(), all.len())
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -2650,7 +2622,8 @@ fn handle_confirm(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool
 }
 
 fn handle_help(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
-    let total_rows = filter_bindings(HELP, &app.help_query).len();
+    let all = help_rows(app.keymap.layer(layer_for(app.focus)));
+    let total_rows = filter_rows(&all, &app.help_query).len();
     let max_scroll = total_rows.saturating_sub(1);
 
     if app.help_filtering {
@@ -3856,47 +3829,50 @@ mod tests {
         assert_eq!(mouse.map(|m| m.row), Some(3));
     }
 
-    fn total_bindings() -> usize {
-        super::HELP.iter().map(|s| s.bindings.len()).sum()
+    fn entries_help() -> Vec<super::HelpRow> {
+        super::help_rows(&default_keymap().entries)
     }
 
     #[test]
-    fn filter_bindings_returns_everything_for_an_empty_query() {
-        let rows = super::filter_bindings(super::HELP, "");
-        assert_eq!(rows.len(), total_bindings());
+    fn filter_rows_returns_everything_for_an_empty_query() {
+        let rows = entries_help();
+        assert_eq!(super::filter_rows(&rows, "").len(), rows.len());
     }
 
     #[test]
-    fn filter_bindings_matches_on_the_key_name() {
+    fn filter_rows_matches_on_the_key_name() {
         // "gg" also appears inside "Toggle"/"toggle" in two descriptions, which is
         // correct for a substring search, so assert the key row is found rather
         // than pinning an exact count.
-        let rows = super::filter_bindings(super::HELP, "gg");
-        let top = rows.iter().find(|(_, b)| b.keys == "gg").expect("gg binding should be found");
-        assert_eq!(top.1.action, "Top");
-        assert_eq!(top.0, "Navigation");
+        let rows = entries_help();
+        let hits = super::filter_rows(&rows, "gg");
+        let top = hits.iter().find(|r| r.keys == "gg").expect("gg binding should be found");
+        assert_eq!(top.action, "EntryTop");
+        assert_eq!(top.section, "Navigation");
     }
 
     #[test]
-    fn filter_bindings_matches_text_that_only_appears_in_the_description() {
+    fn filter_rows_matches_text_that_only_appears_in_the_description() {
         // "clipboard" appears in no key and no action name, only in a description.
-        let rows = super::filter_bindings(super::HELP, "clipboard");
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].1.action, "Copy citekey");
+        let rows = entries_help();
+        let hits = super::filter_rows(&rows, "clipboard");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].action, "CopyCitekey");
     }
 
     #[test]
-    fn filter_bindings_ignores_case() {
-        let upper = super::filter_bindings(super::HELP, "UNDO");
-        let lower = super::filter_bindings(super::HELP, "undo");
+    fn filter_rows_ignores_case() {
+        let rows = entries_help();
+        let upper = super::filter_rows(&rows, "UNDO");
+        let lower = super::filter_rows(&rows, "undo");
         assert!(!upper.is_empty());
         assert_eq!(upper.len(), lower.len());
     }
 
     #[test]
-    fn filter_bindings_returns_nothing_when_no_row_matches() {
-        let rows = super::filter_bindings(super::HELP, "zzzznotakey");
-        assert!(rows.is_empty());
+    fn filter_rows_returns_nothing_when_no_row_matches() {
+        let rows = entries_help();
+        assert!(super::filter_rows(&rows, "zzzznotakey").is_empty());
     }
 
     #[test]
@@ -3932,5 +3908,83 @@ mod tests {
     fn collection_paths_is_empty_when_no_entry_has_a_collection() {
         let entries = vec![entry_in(&[]), entry_in(&[])];
         assert_eq!(collection_paths(&entries), Vec::<String>::new());
+    }
+
+    use crate::keymap::{default_keymap, parse_key, Action, Binding as KmBinding, Layer as KmLayer};
+
+    #[test]
+    fn help_rows_come_from_the_keymap() {
+        let rows = super::help_rows(&default_keymap().entries);
+        // 별칭이 한 행으로 합쳐지므로 키 칸은 "j  <Down>"이다.
+        assert!(rows.iter().any(|r| r.keys.starts_with("j") && r.desc.contains("down one entry")));
+    }
+
+    #[test]
+    fn help_rows_show_a_custom_binding() {
+        let layer = KmLayer {
+            bindings: vec![KmBinding {
+                keys: vec![parse_key("Z").unwrap()],
+                actions: vec![Action::Quit],
+                desc: None,
+            }],
+        };
+        let rows = super::help_rows(&layer);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].keys, "Z");
+        assert_eq!(rows[0].desc, Action::Quit.desc());
+    }
+
+    #[test]
+    fn a_binding_desc_wins_over_the_action_desc_in_help() {
+        let layer = KmLayer {
+            bindings: vec![KmBinding {
+                keys: vec![parse_key("Z").unwrap()],
+                actions: vec![Action::Quit],
+                desc: Some("나가기".to_string()),
+            }],
+        };
+        assert_eq!(super::help_rows(&layer)[0].desc, "나가기");
+    }
+
+    #[test]
+    fn help_rows_render_a_key_sequence() {
+        let layer = KmLayer {
+            bindings: vec![KmBinding {
+                keys: vec![parse_key("g").unwrap(), parse_key("g").unwrap()],
+                actions: vec![Action::EntryTop],
+                desc: None,
+            }],
+        };
+        assert_eq!(super::help_rows(&layer)[0].keys, "gg");
+    }
+
+    #[test]
+    fn help_rows_are_grouped_by_section_in_a_fixed_order() {
+        // draw_help_popup은 섹션이 바뀔 때마다 제목을 끼워 넣는다. 행이 섹션순으로
+        // 정렬돼 있지 않으면 같은 제목이 여러 번 나온다.
+        let rows = super::help_rows(&default_keymap().entries);
+        let mut seen: Vec<&str> = Vec::new();
+        for r in &rows {
+            if seen.last() != Some(&r.section) {
+                assert!(!seen.contains(&r.section), "section {} appears twice", r.section);
+                seen.push(r.section);
+            }
+        }
+        assert_eq!(seen.first(), Some(&"Navigation"));
+    }
+
+    #[test]
+    fn entry_only_keys_do_not_appear_in_the_collections_help() {
+        let rows = super::help_rows(&default_keymap().collections);
+        assert!(!rows.iter().any(|r| r.keys == "H"), "H does nothing in the collections panel");
+    }
+
+    #[test]
+    fn alias_keys_share_one_help_row() {
+        // j와 <Down>은 같은 동작이므로 한 행이어야 한다. 나누면 표가 알맹이 없이 길어진다.
+        let rows = super::help_rows(&default_keymap().entries);
+        let down: Vec<&super::HelpRow> = rows.iter().filter(|r| r.action == "EntryDown").collect();
+        assert_eq!(down.len(), 1, "EntryDown should occupy one row");
+        assert_eq!(down[0].keys, "j  <Down>");
     }
 }

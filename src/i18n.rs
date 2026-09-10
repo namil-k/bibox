@@ -770,19 +770,7 @@ impl Msgs {
         }
     }
 
-    pub fn keymap_ok(&self) -> &'static str {
-        match self.lang {
-            Lang::En => "keymap.toml is valid",
-            Lang::Ko => "keymap.toml이 유효합니다",
-        }
-    }
 
-    pub fn keymap_problems_label(&self) -> &'static str {
-        match self.lang {
-            Lang::En => "keymap.toml problems",
-            Lang::Ko => "keymap.toml 문제",
-        }
-    }
 
     pub fn keymap_problem(&self, p: &crate::keymap::KeymapProblem) -> String {
         use crate::keymap::KeymapProblem::*;
