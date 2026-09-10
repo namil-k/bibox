@@ -3159,6 +3159,25 @@ fn open_note_editor(app: &mut App) -> Result<bool> {
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 pub fn run_tui(config: &Config) -> Result<()> {
+    // 키맵은 raw mode 앞에서 읽는다. 화면을 잡기 전이라 진단이 평범한 stdout에 찍히고,
+    // 사용자가 Enter로 확인한 뒤에 TUI가 뜬다.
+    let keymap_report = crate::keymap::load_keymap();
+    if !keymap_report.errors.is_empty() || !keymap_report.warnings.is_empty() {
+        if keymap_report.errors.is_empty() {
+            println!("{}", config.msgs.keymap_warning_header());
+        } else {
+            println!("{}", config.msgs.keymap_fallback_header());
+        }
+        println!();
+        for p in keymap_report.errors.iter().chain(keymap_report.warnings.iter()) {
+            println!("{}", config.msgs.keymap_problem(p));
+        }
+        println!();
+        println!("{}", config.msgs.keymap_press_enter());
+        let mut line = String::new();
+        let _ = std::io::stdin().read_line(&mut line);
+    }
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -3187,6 +3206,7 @@ pub fn run_tui(config: &Config) -> Result<()> {
     };
 
     let mut app = App::new(config_clone)?;
+    app.keymap = keymap_report.keymap;
     app.apply_filters();
 
     let result = run_loop(&mut terminal, &mut app);

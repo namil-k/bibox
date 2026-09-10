@@ -746,4 +746,79 @@ impl Msgs {
             Lang::Ko => format!("템플릿 '{}'이(가) {}에 적용됨", template, path),
         }
     }
+
+    // ── keymap.toml 로드 진단 ──────────────────────────────────────────────────
+
+    pub fn keymap_fallback_header(&self) -> &'static str {
+        match self.lang {
+            Lang::En => "keymap.toml has problems, starting with the default keymap.",
+            Lang::Ko => "keymap.toml에 문제가 있어 기본 키맵으로 시작합니다.",
+        }
+    }
+
+    pub fn keymap_warning_header(&self) -> &'static str {
+        match self.lang {
+            Lang::En => "keymap.toml warnings:",
+            Lang::Ko => "keymap.toml 경고:",
+        }
+    }
+
+    pub fn keymap_press_enter(&self) -> &'static str {
+        match self.lang {
+            Lang::En => "Press Enter to continue...",
+            Lang::Ko => "계속하려면 Enter를 누르세요...",
+        }
+    }
+
+    pub fn keymap_ok(&self) -> &'static str {
+        match self.lang {
+            Lang::En => "keymap.toml is valid",
+            Lang::Ko => "keymap.toml이 유효합니다",
+        }
+    }
+
+    pub fn keymap_problems_label(&self) -> &'static str {
+        match self.lang {
+            Lang::En => "keymap.toml problems",
+            Lang::Ko => "keymap.toml 문제",
+        }
+    }
+
+    pub fn keymap_problem(&self, p: &crate::keymap::KeymapProblem) -> String {
+        use crate::keymap::KeymapProblem::*;
+        match (&self.lang, p) {
+            (Lang::En, Syntax { detail }) => format!("  TOML syntax: {}", detail),
+            (Lang::Ko, Syntax { detail }) => format!("  TOML 문법: {}", detail),
+            (Lang::En, UnknownLayer { detail }) => format!("  unknown layer: {}", detail),
+            (Lang::Ko, UnknownLayer { detail }) => format!("  알 수 없는 레이어: {}", detail),
+            (Lang::En, UnknownAction { detail }) => format!("  unknown action: {}", detail),
+            (Lang::Ko, UnknownAction { detail }) => format!("  알 수 없는 액션: {}", detail),
+            (Lang::En, BadKey { layer, token }) => {
+                format!("  [{}] unknown key notation \"{}\"", layer, token)
+            }
+            (Lang::Ko, BadKey { layer, token }) => {
+                format!("  [{}] 알 수 없는 키 표기 \"{}\"", layer, token)
+            }
+            (Lang::En, PrefixConflict { layer, shorter, longer }) => format!(
+                "  [{}] \"{}\" is a prefix of \"{}\", so it would never fire",
+                layer, shorter, longer
+            ),
+            (Lang::Ko, PrefixConflict { layer, shorter, longer }) => format!(
+                "  [{}] \"{}\"가 \"{}\"의 접두사라 영원히 걸리지 않습니다",
+                layer, shorter, longer
+            ),
+            (Lang::En, DuplicateBinding { layer, keys }) => {
+                format!("  [{}] \"{}\" is bound twice; the first one wins", layer, keys)
+            }
+            (Lang::Ko, DuplicateBinding { layer, keys }) => {
+                format!("  [{}] \"{}\"가 두 번 바인딩되어 앞의 것을 씁니다", layer, keys)
+            }
+            (Lang::En, LayerNotWired { layer }) => {
+                format!("  [{}] this layer is not wired up yet and was ignored", layer)
+            }
+            (Lang::Ko, LayerNotWired { layer }) => {
+                format!("  [{}] 아직 구현되지 않은 레이어라 무시했습니다", layer)
+            }
+        }
+    }
 }

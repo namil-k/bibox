@@ -555,28 +555,184 @@ fn to_binding(bf: &BindingFile) -> Result<Binding, KeyParseError> {
     Ok(Binding { keys: keys?, actions, desc: bf.desc.clone() })
 }
 
-fn merge_layer(defaults: Layer, lf: &LayerFile) -> Result<Layer, KeyParseError> {
+/// 잘못된 키 표기를 만나면 그 바인딩만 건너뛰고 계속한다. 조기 반환하면 한 번에
+/// 하나씩만 보고하게 되어 사용자가 여러 번 고쳐야 한다.
+fn merge_layer(
+    defaults: Layer,
+    lf: &LayerFile,
+    layer_name: &str,
+    errors: &mut Vec<KeymapProblem>,
+) -> Layer {
+    let mut push = |out: &mut Vec<Binding>, list: &[BindingFile]| {
+        for bf in list {
+            match to_binding(bf) {
+                Ok(b) => out.push(b),
+                Err(e) => errors.push(KeymapProblem::BadKey {
+                    layer: layer_name.to_string(),
+                    token: e.token,
+                }),
+            }
+        }
+    };
+
     let mut out: Vec<Binding> = Vec::new();
-    for bf in &lf.prepend_keymap {
-        out.push(to_binding(bf)?);
-    }
+    push(&mut out, &lf.prepend_keymap);
     if !lf.clear_defaults {
         out.extend(defaults.bindings);
     }
-    for bf in &lf.append_keymap {
-        out.push(to_binding(bf)?);
-    }
-    Ok(Layer { bindings: out })
+    push(&mut out, &lf.append_keymap);
+    Layer { bindings: out }
 }
 
 /// 유효 목록은 prepend ++ (clear_defaults가 false일 때만 기본값) ++ append 다.
 /// 조회는 첫 일치이므로 prepend가 기본값을 이긴다.
-pub fn merge(defaults: Keymap, file: &KeymapFile) -> Result<Keymap, KeyParseError> {
-    Ok(Keymap {
-        collections: merge_layer(defaults.collections, &file.normal.collections)?,
-        entries: merge_layer(defaults.entries, &file.normal.entries)?,
-        preview: merge_layer(defaults.preview, &file.normal.preview)?,
-    })
+/// 키 표기 오류는 `errors`에 모으고, 그 바인딩만 빠진 키맵을 돌려준다.
+pub fn merge(defaults: Keymap, file: &KeymapFile, errors: &mut Vec<KeymapProblem>) -> Keymap {
+    Keymap {
+        collections: merge_layer(defaults.collections, &file.normal.collections, "normal.collections", errors),
+        entries: merge_layer(defaults.entries, &file.normal.entries, "normal.entries", errors),
+        preview: merge_layer(defaults.preview, &file.normal.preview, "normal.preview", errors),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum KeymapProblem {
+    Syntax { detail: String },
+    UnknownLayer { detail: String },
+    UnknownAction { detail: String },
+    BadKey { layer: String, token: String },
+    PrefixConflict { layer: String, shorter: String, longer: String },
+    DuplicateBinding { layer: String, keys: String },
+    LayerNotWired { layer: String },
+}
+
+pub struct LoadReport {
+    pub keymap: Keymap,
+    pub errors: Vec<KeymapProblem>,
+    pub warnings: Vec<KeymapProblem>,
+}
+
+fn render_seq(keys: &[KeyPress]) -> String {
+    keys.iter().map(|k| render_key(*k)).collect::<Vec<_>>().join("")
+}
+
+/// 한 소스 리스트(prepend 또는 append) 안의 중복만 경고한다.
+///
+/// 병합된 목록에서 중복을 찾으면 안 된다. `prepend_keymap`으로 기본 바인딩을
+/// 덮는 것이 이 기능의 존재 이유인데, 병합 후에는 그것이 중복으로 보인다.
+/// 리맵할 때마다 경고가 뜨면 기능을 쓸 수 없다.
+fn check_duplicates(name: &str, list: &[BindingFile], warnings: &mut Vec<KeymapProblem>) {
+    let keys: Vec<Vec<KeyPress>> = list
+        .iter()
+        .filter_map(|bf| to_binding(bf).ok().map(|b| b.keys))
+        .collect();
+    for (i, a) in keys.iter().enumerate() {
+        if keys.iter().take(i).any(|b| b == a) {
+            warnings.push(KeymapProblem::DuplicateBinding {
+                layer: name.to_string(),
+                keys: render_seq(a),
+            });
+        }
+    }
+}
+
+/// 접두사 충돌은 병합된 목록에서 찾는다. 사용자가 `g`를 바인딩하면 기본 `gg`가
+/// 영원히 안 걸리는데, 그 충돌은 소스 리스트 경계를 넘어서 생긴다.
+fn check_layer(
+    name: &str,
+    layer: &Layer,
+    errors: &mut Vec<KeymapProblem>,
+    _warnings: &mut Vec<KeymapProblem>,
+) {
+    for (i, a) in layer.bindings.iter().enumerate() {
+        for b in layer.bindings.iter().skip(i + 1) {
+            if a.keys == b.keys {
+                // 병합으로 생긴 그림자다. 정상 동작이므로 아무 말도 하지 않는다.
+            } else if b.keys.starts_with(&a.keys) {
+                errors.push(KeymapProblem::PrefixConflict {
+                    layer: name.to_string(),
+                    shorter: render_seq(&a.keys),
+                    longer: render_seq(&b.keys),
+                });
+            } else if a.keys.starts_with(&b.keys) {
+                errors.push(KeymapProblem::PrefixConflict {
+                    layer: name.to_string(),
+                    shorter: render_seq(&b.keys),
+                    longer: render_seq(&a.keys),
+                });
+            }
+        }
+    }
+}
+
+pub fn load_keymap_from_str(s: &str) -> LoadReport {
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+
+    // ① 파싱. 문법, 알 수 없는 레이어, 알 수 없는 액션이 여기서 갈린다.
+    let file: KeymapFile = match toml::from_str(s) {
+        Ok(f) => f,
+        Err(e) => {
+            let detail = e.to_string();
+            let problem = if detail.contains("unknown field") {
+                KeymapProblem::UnknownLayer { detail }
+            } else if detail.contains("unknown variant") || detail.contains("did not match any variant") {
+                KeymapProblem::UnknownAction { detail }
+            } else {
+                KeymapProblem::Syntax { detail }
+            };
+            return LoadReport { keymap: default_keymap(), errors: vec![problem], warnings };
+        }
+    };
+
+    // ② 아직 배선되지 않은 레이어는 경고다.
+    for (name, present) in [
+        ("help", file.help.is_some()),
+        ("search", file.search.is_some()),
+        ("sort_menu", file.sort_menu.is_some()),
+        ("export_menu", file.export_menu.is_some()),
+        ("settings", file.settings.is_some()),
+        ("file_picker", file.file_picker.is_some()),
+        ("fetch_preview", file.fetch_preview.is_some()),
+        ("search_result_picker", file.search_result_picker.is_some()),
+        ("context_menu", file.context_menu.is_some()),
+        ("confirm", file.confirm.is_some()),
+        ("picker", file.picker.is_some()),
+    ] {
+        if present {
+            warnings.push(KeymapProblem::LayerNotWired { layer: name.to_string() });
+        }
+    }
+
+    // ③ 병합. 키 표기 오류를 전부 모은다.
+    let merged = merge(default_keymap(), &file, &mut errors);
+
+    // ④ 소스 리스트 안의 중복(경고)과 병합 목록의 접두사 충돌(에러)
+    for (name, lf) in [
+        ("normal.collections", &file.normal.collections),
+        ("normal.entries", &file.normal.entries),
+        ("normal.preview", &file.normal.preview),
+    ] {
+        check_duplicates(name, &lf.prepend_keymap, &mut warnings);
+        check_duplicates(name, &lf.append_keymap, &mut warnings);
+    }
+    check_layer("normal.collections", &merged.collections, &mut errors, &mut warnings);
+    check_layer("normal.entries", &merged.entries, &mut errors, &mut warnings);
+    check_layer("normal.preview", &merged.preview, &mut errors, &mut warnings);
+
+    // ⑤ 에러가 하나라도 있으면 파일을 통째로 버린다.
+    if errors.is_empty() {
+        LoadReport { keymap: merged, errors, warnings }
+    } else {
+        LoadReport { keymap: default_keymap(), errors, warnings }
+    }
+}
+
+pub fn load_keymap() -> LoadReport {
+    match std::fs::read_to_string(keymap_path()) {
+        Ok(s) => load_keymap_from_str(&s),
+        Err(_) => LoadReport { keymap: default_keymap(), errors: vec![], warnings: vec![] },
+    }
 }
 
 #[cfg(test)]
@@ -831,7 +987,7 @@ mod tests {
             [normal.entries]
             prepend_keymap = [ { on = "j", run = "entry_up" } ]
         "#);
-        let km = merge(default_keymap(), &file).unwrap();
+        let km = merge(default_keymap(), &file, &mut Vec::new());
         assert_eq!(resolve(&km.entries, &[], kp("j")), Resolution::Run(vec![Action::EntryUp]));
         assert_eq!(resolve(&km.preview, &[], kp("j")), Resolution::Run(vec![Action::PreviewScrollDown]));
     }
@@ -842,7 +998,7 @@ mod tests {
             [normal.entries]
             append_keymap = [ { on = "Z", run = "quit" } ]
         "#);
-        let km = merge(default_keymap(), &file).unwrap();
+        let km = merge(default_keymap(), &file, &mut Vec::new());
         assert_eq!(resolve(&km.entries, &[], kp("Z")), Resolution::Run(vec![Action::Quit]));
         assert_eq!(resolve(&km.entries, &[], kp("j")), Resolution::Run(vec![Action::EntryDown]));
     }
@@ -854,7 +1010,7 @@ mod tests {
             clear_defaults = true
             prepend_keymap = [ { on = "x", run = "quit" } ]
         "#);
-        let km = merge(default_keymap(), &file).unwrap();
+        let km = merge(default_keymap(), &file, &mut Vec::new());
         assert_eq!(resolve(&km.entries, &[], kp("x")), Resolution::Run(vec![Action::Quit]));
         assert_eq!(resolve(&km.entries, &[], kp("j")), Resolution::Unbound);
         assert_eq!(resolve(&km.collections, &[], kp("j")), Resolution::Run(vec![Action::CollectionDown]));
@@ -866,7 +1022,7 @@ mod tests {
             [normal.entries]
             prepend_keymap = [ { on = ["g", "b"], run = ["toggle_select", "entry_down"] } ]
         "#);
-        let km = merge(default_keymap(), &file).unwrap();
+        let km = merge(default_keymap(), &file, &mut Vec::new());
         assert_eq!(resolve(&km.entries, &[kp("g")], kp("b")),
                    Resolution::Run(vec![Action::ToggleSelect, Action::EntryDown]));
     }
@@ -877,7 +1033,7 @@ mod tests {
             [normal.entries]
             prepend_keymap = [ { on = "d", run = "noop" } ]
         "#);
-        let km = merge(default_keymap(), &file).unwrap();
+        let km = merge(default_keymap(), &file, &mut Vec::new());
         assert_eq!(resolve(&km.entries, &[], kp("d")), Resolution::Run(vec![Action::Noop]));
     }
 
@@ -887,8 +1043,141 @@ mod tests {
             [normal.entries]
             prepend_keymap = [ { on = "j", run = "entry_down", desc = "한 칸 아래" } ]
         "#);
-        let km = merge(default_keymap(), &file).unwrap();
+        let km = merge(default_keymap(), &file, &mut Vec::new());
         let bind = km.entries.bindings.iter().find(|b| b.keys == vec![kp("j")]).unwrap();
         assert_eq!(bind.desc.as_deref(), Some("한 칸 아래"));
+    }
+
+    fn check(s: &str) -> (Vec<KeymapProblem>, Vec<KeymapProblem>) {
+        let r = load_keymap_from_str(s);
+        (r.errors, r.warnings)
+    }
+
+    #[test]
+    fn the_default_keymap_itself_validates_clean() {
+        // 기본 키맵에 접두사 충돌이나 중복이 있으면 사용자 파일이 없어도 경고가 뜬다.
+        let r = load_keymap_from_str("");
+        assert!(r.errors.is_empty(), "default keymap has errors: {:?}", r.errors);
+        assert!(r.warnings.is_empty(), "default keymap has warnings: {:?}", r.warnings);
+    }
+
+    #[test]
+    fn a_toml_syntax_error_is_reported_and_falls_back_to_defaults() {
+        let r = load_keymap_from_str("[normal.entries]\nprepend_keymap = [\n");
+        assert!(!r.errors.is_empty());
+        assert_eq!(resolve(&r.keymap.entries, &[], kp("j")), Resolution::Run(vec![Action::EntryDown]));
+    }
+
+    #[test]
+    fn an_unknown_layer_name_is_an_error() {
+        let (errors, _) = check("[normal.entrys]\n");
+        assert!(!errors.is_empty(), "a typo'd layer name must be reported");
+    }
+
+    #[test]
+    fn an_unknown_action_name_is_an_error() {
+        let (errors, _) = check(r#"
+            [normal.entries]
+            prepend_keymap = [ { on = "x", run = "opne_pdf" } ]
+        "#);
+        assert!(!errors.is_empty(), "an unknown action name must be reported");
+    }
+
+    #[test]
+    fn a_bad_key_notation_is_an_error() {
+        let (errors, _) = check(r#"
+            [normal.preview]
+            prepend_keymap = [ { on = "<Ctrl-d>", run = "quit" } ]
+        "#);
+        assert!(
+            errors.iter().any(|e| matches!(e, KeymapProblem::BadKey { token, .. } if token == "<Ctrl-d>")),
+            "expected the offending token to be named, got {:?}", errors
+        );
+    }
+
+    #[test]
+    fn a_prefix_conflict_is_an_error() {
+        let (errors, _) = check(r#"
+            [normal.entries]
+            prepend_keymap = [ { on = "g", run = "quit" } ]
+        "#);
+        assert!(
+            errors.iter().any(|e| matches!(e, KeymapProblem::PrefixConflict { .. })),
+            "g conflicts with the default gg, got {:?}", errors
+        );
+    }
+
+    #[test]
+    fn a_duplicate_binding_in_one_list_is_a_warning_and_the_first_wins() {
+        let r = load_keymap_from_str(r#"
+            [normal.entries]
+            prepend_keymap = [
+              { on = "x", run = "quit" },
+              { on = "x", run = "undo" },
+            ]
+        "#);
+        assert!(r.errors.is_empty(), "a duplicate must not discard the file, got {:?}", r.errors);
+        assert!(!r.warnings.is_empty());
+        assert_eq!(resolve(&r.keymap.entries, &[], kp("x")), Resolution::Run(vec![Action::Quit]));
+    }
+
+    #[test]
+    fn a_not_yet_wired_layer_is_a_warning_and_the_file_still_applies() {
+        let r = load_keymap_from_str(r#"
+            [help]
+            prepend_keymap = [ { on = "x", run = "quit" } ]
+
+            [normal.entries]
+            prepend_keymap = [ { on = "j", run = "entry_up" } ]
+        "#);
+        assert!(r.errors.is_empty(), "got {:?}", r.errors);
+        assert!(!r.warnings.is_empty());
+        assert_eq!(resolve(&r.keymap.entries, &[], kp("j")), Resolution::Run(vec![Action::EntryUp]));
+    }
+
+    #[test]
+    fn every_error_discards_the_whole_file() {
+        let r = load_keymap_from_str(r#"
+            [normal.entries]
+            prepend_keymap = [
+              { on = "j", run = "entry_up" },
+              { on = "x", run = "opne_pdf" },
+            ]
+        "#);
+        assert!(!r.errors.is_empty());
+        // 좋은 바인딩까지 전부 버리고 기본값으로 간다.
+        assert_eq!(resolve(&r.keymap.entries, &[], kp("j")), Resolution::Run(vec![Action::EntryDown]));
+    }
+
+    #[test]
+    fn every_bad_key_notation_is_collected_not_just_the_first() {
+        // TOML 파싱 에러는 serde가 첫 에러에서 멈춰 하나만 나오지만,
+        // 파싱 이후에 나오는 키 표기 오류는 전부 모아야 한 번에 고칠 수 있다.
+        let (errors, _) = check(r#"
+            [normal.entries]
+            prepend_keymap = [ { on = "<Ctrl-d>", run = "quit" } ]
+
+            [normal.preview]
+            prepend_keymap = [ { on = "<Meta-x>", run = "quit" } ]
+        "#);
+        let tokens: Vec<&str> = errors.iter().filter_map(|e| match e {
+            KeymapProblem::BadKey { token, .. } => Some(token.as_str()),
+            _ => None,
+        }).collect();
+        assert!(tokens.contains(&"<Ctrl-d>"), "got {:?}", tokens);
+        assert!(tokens.contains(&"<Meta-x>"), "got {:?}", tokens);
+    }
+
+    #[test]
+    fn overriding_a_default_is_not_a_duplicate() {
+        // prepend로 기본값을 덮는 것이 이 기능의 존재 이유다. 경고가 뜨면 안 된다.
+        // tmux에서 j를 리맵했더니 경고 화면이 떠서 발견했다.
+        let r = load_keymap_from_str(r#"
+            [normal.entries]
+            prepend_keymap = [ { on = "j", run = "entry_up" } ]
+        "#);
+        assert!(r.errors.is_empty(), "got {:?}", r.errors);
+        assert!(r.warnings.is_empty(), "overriding a default must be silent, got {:?}", r.warnings);
+        assert_eq!(resolve(&r.keymap.entries, &[], kp("j")), Resolution::Run(vec![Action::EntryUp]));
     }
 }
