@@ -16,6 +16,7 @@ use std::io;
 
 use crate::bibtex::entry_to_filename;
 use crate::config::Config;
+use crate::keymap::{Action, ExecCtx, Flow};
 use crate::models::Entry;
 use crate::storage::{find_by_key_mut, load_db, save_db};
 
@@ -2179,119 +2180,87 @@ fn execute_context_action(app: &mut App, idx: usize) {
     let _ = handle_normal(app, fake_key);
 }
 
-fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
-    // ── Key buffer for vim motions (digits + g) ──
-    match key.code {
-        KeyCode::Char(c @ '0'..='9') => {
-            // Only buffer digits if we already have digits or it's not '0' at start
-            if !app.key_buf.is_empty() || c != '0' {
-                app.key_buf.push(c);
-                return Ok(false);
-            }
-        }
-        KeyCode::Char('g') => {
-            if app.key_buf == "g" {
-                // gg → go to top
-                match app.focus {
-                    Panel::Collections => { app.col_list_state.select(Some(0)); app.list_state.select(Some(0)); app.apply_filters(); }
-                    Panel::Entries => { app.list_state.select(Some(0)); app.update_preview(); }
-                    Panel::Preview => { app.preview_scroll = 0; }
-                }
-                app.key_buf.clear();
-                return Ok(false);
-            } else if app.key_buf.is_empty() {
-                app.key_buf.push('g');
-                return Ok(false);
-            }
-        }
-        _ => {}
-    }
-
-    // Parse count from buffer
-    let count: usize = app.key_buf.chars().take_while(|c| c.is_ascii_digit())
-        .collect::<String>().parse().unwrap_or(1);
-    app.key_buf.clear();
-
-    match key.code {
-        KeyCode::Char('q') => return Ok(true),
-        KeyCode::Esc => {
+/// 액션 하나를 실행한다. 바디는 옛 `handle_normal`의 32갈래에서 그대로 옮겨 왔다.
+/// 포커스 분기가 있던 갈래는 패널별 액션으로 갈라졌으므로 여기에는 `app.focus`로
+/// 갈라지는 이동 코드가 없다.
+fn execute(app: &mut App, action: Action, ctx: ExecCtx) -> Result<Flow> {
+    match action {
+        Action::Quit => return Ok(Flow::Quit),
+        Action::Cancel => {
             if !app.selected_keys.is_empty() {
                 app.selected_keys.clear();
             } else {
-                return Ok(true);
+                return Ok(Flow::Quit);
             }
         }
-        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return Ok(true),
-        KeyCode::Char('z') if key.modifiers.contains(KeyModifiers::CONTROL) => { app.undo()?; }
-        KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => { app.redo()?; }
+        Action::Undo => { app.undo()?; }
+        Action::Redo => { app.redo()?; }
 
-        // Panel navigation
-        KeyCode::Char('h') | KeyCode::Left => {
-            match app.focus {
-                Panel::Collections => {}
-                Panel::Entries => { app.focus = Panel::Collections; }
-                Panel::Preview => {
-                    if let Some(prev) = app.preview_mode.prev_tab() {
-                        app.preview_mode = prev;
-                    } else {
-                        app.focus = Panel::Entries;
-                    }
-                }
+        // ── 포커스 이동과 미리보기 탭 ──
+        Action::FocusCollections => { app.focus = Panel::Collections; }
+        Action::FocusEntries => { app.focus = Panel::Entries; }
+        Action::FocusPreview => { app.focus = Panel::Preview; }
+        Action::PrevTabOrFocusEntries => {
+            if let Some(prev) = app.preview_mode.prev_tab() {
+                app.preview_mode = prev;
+            } else {
+                app.focus = Panel::Entries;
             }
         }
-        KeyCode::Char('l') | KeyCode::Right => {
-            match app.focus {
-                Panel::Collections => { app.focus = Panel::Entries; }
-                Panel::Entries => { app.focus = Panel::Preview; }
-                Panel::Preview => {
-                    if let Some(next) = app.preview_mode.next_tab() {
-                        app.preview_mode = next;
-                    }
-                }
+        Action::NextTab => {
+            if let Some(next) = app.preview_mode.next_tab() {
+                app.preview_mode = next;
+            }
+        }
+        Action::PrevTab => {
+            if let Some(prev) = app.preview_mode.prev_tab() {
+                app.preview_mode = prev;
             }
         }
 
-        // Vertical movement with count
-        KeyCode::Char('j') | KeyCode::Down => {
-            for _ in 0..count {
-                match app.focus {
-                    Panel::Collections => app.move_col_down(),
-                    Panel::Entries => app.move_entry_down(),
-                    Panel::Preview => { app.preview_scroll = app.preview_scroll.saturating_add(1).min(app.preview_max_scroll); }
-                }
+        // ── 한 칸 이동 (카운트를 읽는다) ──
+        Action::CollectionDown => { for _ in 0..ctx.count { app.move_col_down(); } }
+        Action::CollectionUp => { for _ in 0..ctx.count { app.move_col_up(); } }
+        Action::EntryDown => { for _ in 0..ctx.count { app.move_entry_down(); } }
+        Action::EntryUp => { for _ in 0..ctx.count { app.move_entry_up(); } }
+        Action::PreviewScrollDown => {
+            for _ in 0..ctx.count {
+                app.preview_scroll = app.preview_scroll.saturating_add(1).min(app.preview_max_scroll);
             }
         }
-        KeyCode::Char('k') | KeyCode::Up => {
-            for _ in 0..count {
-                match app.focus {
-                    Panel::Collections => app.move_col_up(),
-                    Panel::Entries => app.move_entry_up(),
-                    Panel::Preview => { app.preview_scroll = app.preview_scroll.saturating_sub(1); }
-                }
+        Action::PreviewScrollUp => {
+            for _ in 0..ctx.count {
+                app.preview_scroll = app.preview_scroll.saturating_sub(1);
             }
         }
 
-        // G → go to bottom
-        KeyCode::Char('G') => {
-            match app.focus {
-                Panel::Collections => {
-                    let last = app.col_count().saturating_sub(1);
-                    app.col_list_state.select(Some(last));
-                    app.list_state.select(Some(0));
-                    app.apply_filters();
-                }
-                Panel::Entries => {
-                    if !app.filtered.is_empty() {
-                        app.list_state.select(Some(app.filtered.len() - 1));
-                        app.update_preview();
-                    }
-                }
-                Panel::Preview => { app.preview_scroll = app.preview_max_scroll; }
+        // ── 끝으로 ──
+        Action::CollectionTop => {
+            app.col_list_state.select(Some(0));
+            app.list_state.select(Some(0));
+            app.apply_filters();
+        }
+        Action::EntryTop => {
+            app.list_state.select(Some(0));
+            app.update_preview();
+        }
+        Action::PreviewTop => { app.preview_scroll = 0; }
+        Action::CollectionBottom => {
+            let last = app.col_count().saturating_sub(1);
+            app.col_list_state.select(Some(last));
+            app.list_state.select(Some(0));
+            app.apply_filters();
+        }
+        Action::EntryBottom => {
+            if !app.filtered.is_empty() {
+                app.list_state.select(Some(app.filtered.len() - 1));
+                app.update_preview();
             }
         }
+        Action::PreviewBottom => { app.preview_scroll = app.preview_max_scroll; }
 
-        // H/M/L — screen-relative jumps (entries panel only)
-        KeyCode::Char('H') if app.focus == Panel::Entries => {
+        // ── 화면 상대 이동 (엔트리 패널) ──
+        Action::EntryScreenTop => {
             // Jump to first visible item (approximate: just go to current - half_page)
             let visible_height = 10; // approximate
             let cur = app.list_state.selected().unwrap_or(0);
@@ -2299,38 +2268,31 @@ fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
             app.list_state.select(Some(top));
             app.update_preview();
         }
-        KeyCode::Char('M') if app.focus == Panel::Entries => {
-            // Middle of list
+        Action::EntryScreenMiddle => {
             if !app.filtered.is_empty() {
                 app.list_state.select(Some(app.filtered.len() / 2));
                 app.update_preview();
             }
         }
-        KeyCode::Char('L') if app.focus == Panel::Entries => {
+        Action::EntryScreenBottom => {
             if !app.filtered.is_empty() {
                 app.list_state.select(Some(app.filtered.len() - 1));
                 app.update_preview();
             }
         }
 
-        // Ctrl+d/u — half page
-        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            match app.focus {
-                Panel::Entries => { for _ in 0..10 { app.move_entry_down(); } }
-                Panel::Preview => { app.preview_scroll = app.preview_scroll.saturating_add(10).min(app.preview_max_scroll); }
-                Panel::Collections => { for _ in 0..5 { app.move_col_down(); } }
-            }
+        // ── 반 페이지 ──
+        Action::EntryHalfPageDown => { for _ in 0..10 { app.move_entry_down(); } }
+        Action::EntryHalfPageUp => { for _ in 0..10 { app.move_entry_up(); } }
+        Action::PreviewHalfPageDown => {
+            app.preview_scroll = app.preview_scroll.saturating_add(10).min(app.preview_max_scroll);
         }
-        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            match app.focus {
-                Panel::Entries => { for _ in 0..10 { app.move_entry_up(); } }
-                Panel::Preview => { app.preview_scroll = app.preview_scroll.saturating_sub(10); }
-                Panel::Collections => { for _ in 0..5 { app.move_col_up(); } }
-            }
-        }
+        Action::PreviewHalfPageUp => { app.preview_scroll = app.preview_scroll.saturating_sub(10); }
+        Action::CollectionHalfPageDown => { for _ in 0..5 { app.move_col_down(); } }
+        Action::CollectionHalfPageUp => { for _ in 0..5 { app.move_col_up(); } }
 
-        // Space — toggle selection
-        KeyCode::Char(' ') if app.focus == Panel::Entries => {
+        // ── 선택 ──
+        Action::ToggleSelect => {
             if let Some(entry) = app.selected_entry() {
                 let key = entry.bibtex_key.clone();
                 if app.selected_keys.contains(&key) {
@@ -2338,12 +2300,9 @@ fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
                 } else {
                     app.selected_keys.insert(key);
                 }
-                app.move_entry_down(); // move to next after toggle
             }
         }
-
-        // V — select/deselect all visible
-        KeyCode::Char('V') if app.focus == Panel::Entries => {
+        Action::SelectAll => {
             let visible_keys: Vec<String> = app.filtered.iter()
                 .map(|&idx| app.entries[idx].bibtex_key.clone()).collect();
             let all_selected = visible_keys.iter().all(|k| app.selected_keys.contains(k));
@@ -2354,25 +2313,21 @@ fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
             }
         }
 
-
-
-        // Preview mode switch
-        KeyCode::Tab => {
+        Action::NextPreviewTab => {
             app.preview_mode = app.preview_mode.next();
             app.preview_scroll = 0;
             if app.preview_mode == PreviewMode::Note { app.load_note_for_preview(); }
         }
 
-        // Search (context-aware: collections panel vs entries panel)
-        KeyCode::Char('/') => {
+        // 검색은 포커스에 따라 대상이 다르다. 이동이 아니라 한 액션의 문서화된 동작이다.
+        Action::Search => {
             if app.focus == Panel::Collections {
                 app.col_search_query.clear();
             }
             app.mode = Mode::Search;
         }
 
-        // Copy citekey
-        KeyCode::Char('y') => {
+        Action::CopyCitekey => {
             if let Some(entry) = app.selected_entry() {
                 let bkey = entry.bibtex_key.clone();
                 if let Ok(mut ctx) = arboard::Clipboard::new() { let _ = ctx.set_text(&bkey); }
@@ -2380,8 +2335,7 @@ fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
             }
         }
 
-        // Open PDF
-        KeyCode::Char('o') => {
+        Action::OpenPdf => {
             if let Some(entry) = app.selected_entry() {
                 let entry = entry.clone();
                 if entry.file_path.is_some() {
@@ -2401,8 +2355,7 @@ fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
             }
         }
 
-        // Open web page
-        KeyCode::Char('w') => {
+        Action::OpenWeb => {
             if let Some(entry) = app.selected_entry() {
                 let url = if let Some(ref doi) = entry.doi {
                     Some(format!("https://doi.org/{}", doi))
@@ -2418,8 +2371,7 @@ fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
             }
         }
 
-        // Export menu
-        KeyCode::Char('f') => {
+        Action::FetchMetadata => {
             if let Some(entry) = app.selected_entry() {
                 let key = entry.bibtex_key.clone();
                 let doi = entry.doi.clone();
@@ -2444,7 +2396,8 @@ fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
                 }
             }
         }
-        KeyCode::Char('e') => {
+
+        Action::ExportMenu => {
             let mut scope_options = vec![];
             if !app.selected_keys.is_empty() {
                 scope_options.push((ExportScope::Selected, format!("{} selected entries", app.selected_keys.len())));
@@ -2464,35 +2417,37 @@ fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
             app.mode = Mode::ExportMenu;
         }
 
-        // Delete
-        KeyCode::Char('d') => {
+        Action::Delete => {
             if let Some(entry) = app.selected_entry() {
                 let bkey = entry.bibtex_key.clone();
                 app.mode = Mode::Confirm(ConfirmAction::Delete(bkey));
             }
         }
 
-        KeyCode::Char('?') | KeyCode::Char('`') | KeyCode::Char('~') | KeyCode::F(1) => {
+        Action::Help => {
             app.help_query.clear();
             app.help_filtering = false;
             app.help_scroll = 0;
             app.mode = Mode::Help;
         }
 
-        // Edit note in $EDITOR
-        KeyCode::Char('N') => {
-            if app.selected_entry().is_some() { return open_note_editor(app); }
-            else { app.mode = Mode::Message("No entry selected.".into()); }
+        Action::EditNote => {
+            if app.selected_entry().is_some() {
+                let quit = open_note_editor(app)?;
+                return Ok(if quit { Flow::Quit } else { Flow::Continue });
+            } else {
+                app.mode = Mode::Message("No entry selected.".into());
+            }
         }
 
-        KeyCode::Char('s') => {
+        Action::SortMenu => {
             app.prev_sort_by = app.sort_by;
             app.prev_sort_ascending = app.sort_ascending;
             app.sort_menu_index = SortCriterion::all().iter().position(|c| *c == app.sort_by).unwrap_or(0);
             app.mode = Mode::SortMenu;
         }
 
-        KeyCode::Char('c') => {
+        Action::Collections => {
             if !app.selected_keys.is_empty() {
                 app.open_collection_picker_multi();
             } else if app.selected_entry().is_some() {
@@ -2502,13 +2457,12 @@ fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
             }
         }
 
-        KeyCode::Char('t') => {
+        Action::Tags => {
             if app.selected_entry().is_some() { app.open_tag_editor(); }
             else { app.mode = Mode::Message("No entry selected.".into()); }
         }
 
-        // Attach PDF
-        KeyCode::Char('A') => {
+        Action::AttachPdf => {
             if let Some(entry) = app.selected_entry() {
                 let key = entry.bibtex_key.clone();
                 let start = dirs::download_dir()
@@ -2525,19 +2479,133 @@ fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
             }
         }
 
-        // Settings
-        KeyCode::Char(',') => {
+        Action::Settings => {
             app.settings_idx = 0;
             app.git_status_cache = "Press Enter to check".into();
             app.git_status_checked = false;
             app.mode = Mode::Settings;
         }
 
-        KeyCode::Enter => {}
+        Action::Noop => {}
+    }
+    Ok(Flow::Continue)
+}
 
+/// `execute`를 부르고 종료 여부만 돌려준다.
+fn dispatch(app: &mut App, action: Action, count: usize) -> Result<bool> {
+    Ok(execute(app, action, ExecCtx { count })? == Flow::Quit)
+}
+
+fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
+    // ── Key buffer for vim motions (digits + g) ──
+    match key.code {
+        KeyCode::Char(c @ '0'..='9') => {
+            // Only buffer digits if we already have digits or it's not '0' at start
+            if !app.key_buf.is_empty() || c != '0' {
+                app.key_buf.push(c);
+                return Ok(false);
+            }
+        }
+        KeyCode::Char('g') => {
+            if app.key_buf == "g" {
+                // gg → go to top
+                let action = match app.focus {
+                    Panel::Collections => Action::CollectionTop,
+                    Panel::Entries => Action::EntryTop,
+                    Panel::Preview => Action::PreviewTop,
+                };
+                app.key_buf.clear();
+                if dispatch(app, action, 1)? { return Ok(true); }
+                return Ok(false);
+            } else if app.key_buf.is_empty() {
+                app.key_buf.push('g');
+                return Ok(false);
+            }
+        }
         _ => {}
     }
-    Ok(false)
+
+    // Parse count from buffer
+    let count: usize = app.key_buf.chars().take_while(|c| c.is_ascii_digit())
+        .collect::<String>().parse().unwrap_or(1);
+    app.key_buf.clear();
+
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let quit = match key.code {
+        KeyCode::Char('q') => dispatch(app, Action::Quit, count)?,
+        KeyCode::Esc => dispatch(app, Action::Cancel, count)?,
+        KeyCode::Char('c') if ctrl => dispatch(app, Action::Quit, count)?,
+        KeyCode::Char('z') if ctrl => dispatch(app, Action::Undo, count)?,
+        KeyCode::Char('y') if ctrl => dispatch(app, Action::Redo, count)?,
+
+        KeyCode::Char('h') | KeyCode::Left => match app.focus {
+            Panel::Collections => false,
+            Panel::Entries => dispatch(app, Action::FocusCollections, count)?,
+            Panel::Preview => dispatch(app, Action::PrevTabOrFocusEntries, count)?,
+        },
+        KeyCode::Char('l') | KeyCode::Right => match app.focus {
+            Panel::Collections => dispatch(app, Action::FocusEntries, count)?,
+            Panel::Entries => dispatch(app, Action::FocusPreview, count)?,
+            Panel::Preview => dispatch(app, Action::NextTab, count)?,
+        },
+        KeyCode::Char('j') | KeyCode::Down => match app.focus {
+            Panel::Collections => dispatch(app, Action::CollectionDown, count)?,
+            Panel::Entries => dispatch(app, Action::EntryDown, count)?,
+            Panel::Preview => dispatch(app, Action::PreviewScrollDown, count)?,
+        },
+        KeyCode::Char('k') | KeyCode::Up => match app.focus {
+            Panel::Collections => dispatch(app, Action::CollectionUp, count)?,
+            Panel::Entries => dispatch(app, Action::EntryUp, count)?,
+            Panel::Preview => dispatch(app, Action::PreviewScrollUp, count)?,
+        },
+        KeyCode::Char('G') => match app.focus {
+            Panel::Collections => dispatch(app, Action::CollectionBottom, count)?,
+            Panel::Entries => dispatch(app, Action::EntryBottom, count)?,
+            Panel::Preview => dispatch(app, Action::PreviewBottom, count)?,
+        },
+        KeyCode::Char('d') if ctrl => match app.focus {
+            Panel::Collections => dispatch(app, Action::CollectionHalfPageDown, count)?,
+            Panel::Entries => dispatch(app, Action::EntryHalfPageDown, count)?,
+            Panel::Preview => dispatch(app, Action::PreviewHalfPageDown, count)?,
+        },
+        KeyCode::Char('u') if ctrl => match app.focus {
+            Panel::Collections => dispatch(app, Action::CollectionHalfPageUp, count)?,
+            Panel::Entries => dispatch(app, Action::EntryHalfPageUp, count)?,
+            Panel::Preview => dispatch(app, Action::PreviewHalfPageUp, count)?,
+        },
+
+        KeyCode::Char('H') if app.focus == Panel::Entries => dispatch(app, Action::EntryScreenTop, count)?,
+        KeyCode::Char('M') if app.focus == Panel::Entries => dispatch(app, Action::EntryScreenMiddle, count)?,
+        KeyCode::Char('L') if app.focus == Panel::Entries => dispatch(app, Action::EntryScreenBottom, count)?,
+
+        // 오늘 Space는 카운트를 버린다. 이 태스크는 동작을 보존하므로 1을 넘긴다.
+        KeyCode::Char(' ') if app.focus == Panel::Entries => {
+            dispatch(app, Action::ToggleSelect, 1)? || dispatch(app, Action::EntryDown, 1)?
+        }
+        KeyCode::Char('V') if app.focus == Panel::Entries => dispatch(app, Action::SelectAll, count)?,
+
+        KeyCode::Tab => dispatch(app, Action::NextPreviewTab, count)?,
+        KeyCode::Char('/') => dispatch(app, Action::Search, count)?,
+        KeyCode::Char('y') => dispatch(app, Action::CopyCitekey, count)?,
+        KeyCode::Char('o') => dispatch(app, Action::OpenPdf, count)?,
+        KeyCode::Char('w') => dispatch(app, Action::OpenWeb, count)?,
+        KeyCode::Char('f') => dispatch(app, Action::FetchMetadata, count)?,
+        KeyCode::Char('e') => dispatch(app, Action::ExportMenu, count)?,
+        KeyCode::Char('d') => dispatch(app, Action::Delete, count)?,
+        KeyCode::Char('?') | KeyCode::Char('`') | KeyCode::Char('~') | KeyCode::F(1) => {
+            dispatch(app, Action::Help, count)?
+        }
+        KeyCode::Char('N') => dispatch(app, Action::EditNote, count)?,
+        KeyCode::Char('s') => dispatch(app, Action::SortMenu, count)?,
+        KeyCode::Char('c') => dispatch(app, Action::Collections, count)?,
+        KeyCode::Char('t') => dispatch(app, Action::Tags, count)?,
+        KeyCode::Char('A') => dispatch(app, Action::AttachPdf, count)?,
+        KeyCode::Char(',') => dispatch(app, Action::Settings, count)?,
+        KeyCode::Enter => dispatch(app, Action::Noop, count)?,
+
+        _ => false,
+    };
+    Ok(quit)
 }
 
 fn handle_search(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {

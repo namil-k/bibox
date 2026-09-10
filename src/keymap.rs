@@ -260,6 +260,18 @@ impl Action {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Flow {
+    Continue,
+    Quit,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ExecCtx {
+    /// 숫자 접두사. 없으면 1. 이동 계열 액션만 읽는다.
+    pub count: usize,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
