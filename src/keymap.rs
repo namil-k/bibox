@@ -457,6 +457,128 @@ pub fn default_keymap() -> Keymap {
     }
 }
 
+/// `on`은 문자열 하나 또는 배열이다.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum OnField {
+    One(String),
+    Many(Vec<String>),
+}
+
+/// `run`도 하나 또는 배열이다.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum RunField {
+    One(Action),
+    Many(Vec<Action>),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BindingFile {
+    pub on: OnField,
+    pub run: RunField,
+    #[serde(default)]
+    pub desc: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LayerFile {
+    #[serde(default)]
+    pub clear_defaults: bool,
+    #[serde(default)]
+    pub prepend_keymap: Vec<BindingFile>,
+    #[serde(default)]
+    pub append_keymap: Vec<BindingFile>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NormalFile {
+    #[serde(default)]
+    pub collections: LayerFile,
+    #[serde(default)]
+    pub entries: LayerFile,
+    #[serde(default)]
+    pub preview: LayerFile,
+}
+
+/// 아직 배선되지 않은 모드도 필드로 선언한다. 그래야 `[help]`는 파싱을 통과해
+/// 후처리에서 "미구현 레이어" 경고가 되고, `[normal.entrys]` 같은 오타는
+/// `deny_unknown_fields`가 에러로 잡는다.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeymapFile {
+    #[serde(default)]
+    pub normal: NormalFile,
+    #[serde(default)]
+    pub help: Option<LayerFile>,
+    #[serde(default)]
+    pub search: Option<LayerFile>,
+    #[serde(default)]
+    pub sort_menu: Option<LayerFile>,
+    #[serde(default)]
+    pub export_menu: Option<LayerFile>,
+    #[serde(default)]
+    pub settings: Option<LayerFile>,
+    #[serde(default)]
+    pub file_picker: Option<LayerFile>,
+    #[serde(default)]
+    pub fetch_preview: Option<LayerFile>,
+    #[serde(default)]
+    pub search_result_picker: Option<LayerFile>,
+    #[serde(default)]
+    pub context_menu: Option<LayerFile>,
+    #[serde(default)]
+    pub confirm: Option<LayerFile>,
+    #[serde(default)]
+    pub picker: Option<LayerFile>,
+}
+
+pub fn keymap_path() -> std::path::PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("bibox")
+        .join("keymap.toml")
+}
+
+fn to_binding(bf: &BindingFile) -> Result<Binding, KeyParseError> {
+    let keys: Result<Vec<KeyPress>, KeyParseError> = match &bf.on {
+        OnField::One(s) => vec![parse_key(s)].into_iter().collect(),
+        OnField::Many(v) => v.iter().map(|s| parse_key(s)).collect(),
+    };
+    let actions = match &bf.run {
+        RunField::One(a) => vec![*a],
+        RunField::Many(v) => v.clone(),
+    };
+    Ok(Binding { keys: keys?, actions, desc: bf.desc.clone() })
+}
+
+fn merge_layer(defaults: Layer, lf: &LayerFile) -> Result<Layer, KeyParseError> {
+    let mut out: Vec<Binding> = Vec::new();
+    for bf in &lf.prepend_keymap {
+        out.push(to_binding(bf)?);
+    }
+    if !lf.clear_defaults {
+        out.extend(defaults.bindings);
+    }
+    for bf in &lf.append_keymap {
+        out.push(to_binding(bf)?);
+    }
+    Ok(Layer { bindings: out })
+}
+
+/// 유효 목록은 prepend ++ (clear_defaults가 false일 때만 기본값) ++ append 다.
+/// 조회는 첫 일치이므로 prepend가 기본값을 이긴다.
+pub fn merge(defaults: Keymap, file: &KeymapFile) -> Result<Keymap, KeyParseError> {
+    Ok(Keymap {
+        collections: merge_layer(defaults.collections, &file.normal.collections)?,
+        entries: merge_layer(defaults.entries, &file.normal.entries)?,
+        preview: merge_layer(defaults.preview, &file.normal.preview)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -697,5 +819,76 @@ mod tests {
     fn control_still_distinguishes_a_character_key() {
         assert_ne!(KeyPress::new(KeyCode::Char('d'), KeyModifiers::CONTROL), kp("d"));
         assert_eq!(KeyPress::new(KeyCode::Char('d'), KeyModifiers::CONTROL), kp("<C-d>"));
+    }
+
+    fn parse_file(s: &str) -> KeymapFile {
+        toml::from_str(s).unwrap()
+    }
+
+    #[test]
+    fn prepend_wins_over_a_default_binding() {
+        let file = parse_file(r#"
+            [normal.entries]
+            prepend_keymap = [ { on = "j", run = "entry_up" } ]
+        "#);
+        let km = merge(default_keymap(), &file).unwrap();
+        assert_eq!(resolve(&km.entries, &[], kp("j")), Resolution::Run(vec![Action::EntryUp]));
+        assert_eq!(resolve(&km.preview, &[], kp("j")), Resolution::Run(vec![Action::PreviewScrollDown]));
+    }
+
+    #[test]
+    fn append_adds_a_key_the_defaults_do_not_have() {
+        let file = parse_file(r#"
+            [normal.entries]
+            append_keymap = [ { on = "Z", run = "quit" } ]
+        "#);
+        let km = merge(default_keymap(), &file).unwrap();
+        assert_eq!(resolve(&km.entries, &[], kp("Z")), Resolution::Run(vec![Action::Quit]));
+        assert_eq!(resolve(&km.entries, &[], kp("j")), Resolution::Run(vec![Action::EntryDown]));
+    }
+
+    #[test]
+    fn clear_defaults_drops_every_default_in_that_layer_only() {
+        let file = parse_file(r#"
+            [normal.entries]
+            clear_defaults = true
+            prepend_keymap = [ { on = "x", run = "quit" } ]
+        "#);
+        let km = merge(default_keymap(), &file).unwrap();
+        assert_eq!(resolve(&km.entries, &[], kp("x")), Resolution::Run(vec![Action::Quit]));
+        assert_eq!(resolve(&km.entries, &[], kp("j")), Resolution::Unbound);
+        assert_eq!(resolve(&km.collections, &[], kp("j")), Resolution::Run(vec![Action::CollectionDown]));
+    }
+
+    #[test]
+    fn on_accepts_a_sequence_and_run_accepts_a_list() {
+        let file = parse_file(r#"
+            [normal.entries]
+            prepend_keymap = [ { on = ["g", "b"], run = ["toggle_select", "entry_down"] } ]
+        "#);
+        let km = merge(default_keymap(), &file).unwrap();
+        assert_eq!(resolve(&km.entries, &[kp("g")], kp("b")),
+                   Resolution::Run(vec![Action::ToggleSelect, Action::EntryDown]));
+    }
+
+    #[test]
+    fn noop_disables_a_default_key() {
+        let file = parse_file(r#"
+            [normal.entries]
+            prepend_keymap = [ { on = "d", run = "noop" } ]
+        "#);
+        let km = merge(default_keymap(), &file).unwrap();
+        assert_eq!(resolve(&km.entries, &[], kp("d")), Resolution::Run(vec![Action::Noop]));
+    }
+
+    #[test]
+    fn a_binding_desc_overrides_the_action_description() {
+        let file = parse_file(r#"
+            [normal.entries]
+            prepend_keymap = [ { on = "j", run = "entry_down", desc = "한 칸 아래" } ]
+        "#);
+        let km = merge(default_keymap(), &file).unwrap();
+        let bind = km.entries.bindings.iter().find(|b| b.keys == vec![kp("j")]).unwrap();
+        assert_eq!(bind.desc.as_deref(), Some("한 칸 아래"));
     }
 }
