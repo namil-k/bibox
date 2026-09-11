@@ -6,7 +6,7 @@ use crate::models::Entry;
 
 // ── bibox -> 플러그인 ────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Paths {
     pub config_dir: PathBuf,
     pub db: PathBuf,
@@ -15,7 +15,7 @@ pub struct Paths {
     pub home: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Context {
     pub focus: Option<String>,
     pub collection: Option<String>,
@@ -26,9 +26,9 @@ pub struct Context {
     pub hook: Option<Value>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Request {
-    pub r#type: &'static str,
+    pub r#type: String,
     pub id: String,
     pub trigger: String,
     pub context: Context,
@@ -36,7 +36,7 @@ pub struct Request {
 
 // ── 플러그인 -> bibox ────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "ui", rename_all = "lowercase")]
 pub enum UiRequest {
     Pick {
@@ -83,15 +83,15 @@ impl UiAnswer {
 
 /// 최종 응답. 모든 필드가 선택이고 `{}`도 유효하다. 모르는 필드는 무시한다
 /// (api 2 플러그인이 보내는 필드가 api 1 bibox를 깨지 않도록).
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Final {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub apply: Option<Vec<Value>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub refresh: bool,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
@@ -207,7 +207,7 @@ mod tests {
     #[test]
     fn a_request_serializes_with_type_id_trigger_and_context() {
         let req = Request {
-            r#type: "command",
+            r#type: "command".into(),
             id: "tidy".into(),
             trigger: "key".into(),
             context: Context {
@@ -357,5 +357,43 @@ mod tests {
         let mut v = serde_json::to_value(&pending).unwrap();
         v["bibtex_key"] = serde_json::json!("a");
         assert!(validate_apply(&db, Some(&pending), &[v]).unwrap_err().contains("bibtex_key"));
+    }
+    #[test]
+    fn a_request_round_trips_through_json() {
+        let req = Request {
+            r#type: "command".into(),
+            id: "sync".into(),
+            trigger: "hook:after_write".into(),
+            context: Context {
+                focus: None, collection: None, entry: Some(entry("1", "a")), entries: vec![entry("1", "a")],
+                config: serde_json::json!({"include_pdfs": true}),
+                paths: Paths { config_dir: "/c".into(), db: "/h/db.json".into(), notes: "/h/notes".into(), pdfs: "/h/pdfs".into(), home: Some("/h".into()) },
+                hook: Some(serde_json::json!({"reason": "add", "keys": ["a"]})),
+            },
+        };
+        let line = serde_json::to_string(&req).unwrap();
+        let back: Request = serde_json::from_str(&line).unwrap();
+        assert_eq!(back.r#type, "command");
+        assert_eq!(back.id, "sync");
+        assert_eq!(back.context.paths.home.as_deref(), Some(std::path::Path::new("/h")));
+        assert_eq!(back.context.hook.unwrap()["reason"], "add");
+        assert_eq!(back.context.entries[0].bibtex_key, "a");
+    }
+
+    #[test]
+    fn a_final_serializes_without_empty_fields() {
+        assert_eq!(serde_json::to_string(&Final::default()).unwrap(), "{}");
+        let f = Final { message: Some("ok".into()), refresh: true, ..Default::default() };
+        assert_eq!(serde_json::to_string(&f).unwrap(), r#"{"message":"ok","refresh":true}"#);
+        let f = Final { error: Some("bad".into()), ..Default::default() };
+        assert_eq!(serde_json::to_string(&f).unwrap(), r#"{"error":"bad"}"#);
+    }
+
+    #[test]
+    fn a_ui_request_serializes_with_the_ui_tag() {
+        let r = UiRequest::Progress { text: "pulling".into() };
+        assert_eq!(serde_json::to_string(&r).unwrap(), r#"{"ui":"progress","text":"pulling"}"#);
+        let r = UiRequest::Pick { title: Some("Style".into()), items: vec!["APA".into()] };
+        assert_eq!(serde_json::to_string(&r).unwrap(), r#"{"ui":"pick","title":"Style","items":["APA"]}"#);
     }
 }

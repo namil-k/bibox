@@ -361,7 +361,7 @@ impl PluginHost {
             io = slot.io.lock().unwrap_or_else(|p| p.into_inner());
         }
 
-        let request = Request { r#type: "command", id: command.id.clone(), trigger: trigger.to_string(), context };
+        let request = Request { r#type: "command".to_string(), id: command.id.clone(), trigger: trigger.to_string(), context };
         let line = serde_json::to_string(&request).map_err(|e| PluginError::Protocol(e.to_string()))?;
         if write_line(&mut io, &line).is_err() {
             return Err(self.reap(slot, &mut io));

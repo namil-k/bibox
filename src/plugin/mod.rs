@@ -2,6 +2,7 @@ pub mod cli;
 pub mod host;
 pub mod manifest;
 pub mod protocol;
+pub mod serve;
 
 use std::path::{Path, PathBuf};
 
