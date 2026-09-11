@@ -3252,6 +3252,7 @@ pub fn run_tui(config: &Config) -> Result<()> {
         citekey_format: config.citekey_format.clone(),
         natural_scroll: config.natural_scroll,
         status_bar: config.status_bar,
+        plugins: config.plugins.clone(),
         msgs: crate::i18n::Msgs::new(&config.language),
     };
 

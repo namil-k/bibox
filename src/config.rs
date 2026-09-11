@@ -1,5 +1,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
 use crate::i18n::Msgs;
@@ -62,6 +63,10 @@ pub struct Config {
     /// panel navigation and the few actions used many times a day.
     #[serde(default = "default_true")]
     pub status_bar: bool,
+    /// `[plugins.<name>]` 테이블. bibox는 `enabled`만 해석하고 나머지는 플러그인에 그대로 넘긴다.
+    /// TOML은 단순 값이 테이블보다 앞에 와야 하므로 마지막 필드다.
+    #[serde(default)]
+    pub plugins: BTreeMap<String, toml::Table>,
     #[serde(skip)]
     pub msgs: Msgs,
 }
@@ -87,6 +92,7 @@ impl Default for Config {
             citekey_format: default_citekey_format(),
             natural_scroll: false,
             status_bar: true,
+            plugins: BTreeMap::new(),
             msgs: Msgs::default(),
         }
     }
@@ -216,4 +222,65 @@ pub fn save_config(config: &Config) -> Result<()> {
     let content = toml::to_string_pretty(config)?;
     std::fs::write(&path, content)?;
     Ok(())
+}
+
+/// `[plugins.x] enabled = false`인 x들.
+pub fn disabled_plugins(config: &Config) -> HashSet<String> {
+    config
+        .plugins
+        .iter()
+        .filter(|(_, t)| t.get("enabled").and_then(|v| v.as_bool()) == Some(false))
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+/// 플러그인에 넘길 JSON. `enabled`는 여기서 빼지 않고 `PluginHost::context`가 뺀다
+/// (list 화면이 `enabled`를 봐야 하므로 원본은 유지).
+pub fn plugin_tables(config: &Config) -> BTreeMap<String, serde_json::Value> {
+    config
+        .plugins
+        .iter()
+        .filter_map(|(name, t)| serde_json::to_value(t).ok().map(|v| (name.clone(), v)))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plugin_tables_survive_a_config_round_trip() {
+        let text = "bibox_dir = \"/tmp/b\"\nsearch_case_sensitive = false\ndefault_page_size = 20\n\n[plugins.summarize]\nmodel = \"claude-opus-5\"\nmax_tokens = 800\n\n[plugins.entry-tidy]\nenabled = false\n";
+        let config: Config = toml::from_str(text).unwrap();
+        assert_eq!(config.plugins.len(), 2);
+        let out = toml::to_string_pretty(&config).unwrap();
+        let again: Config = toml::from_str(&out).unwrap();
+        assert_eq!(again.plugins["summarize"]["model"].as_str(), Some("claude-opus-5"));
+        assert_eq!(again.plugins["entry-tidy"]["enabled"].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn disabled_plugins_reads_only_enabled_false() {
+        let text = "bibox_dir = \"/tmp/b\"\nsearch_case_sensitive = false\ndefault_page_size = 20\n[plugins.a]\nenabled = false\n[plugins.b]\nenabled = true\n[plugins.c]\nmodel = \"x\"\n";
+        let config: Config = toml::from_str(text).unwrap();
+        let d = disabled_plugins(&config);
+        assert!(d.contains("a"));
+        assert!(!d.contains("b"));
+        assert!(!d.contains("c"));
+    }
+
+    #[test]
+    fn plugin_tables_convert_to_json_values() {
+        let text = "bibox_dir = \"/tmp/b\"\nsearch_case_sensitive = false\ndefault_page_size = 20\n[plugins.a]\nmodel = \"x\"\nn = 3\nflags = [\"p\", \"q\"]\n";
+        let config: Config = toml::from_str(text).unwrap();
+        let t = plugin_tables(&config);
+        assert_eq!(t["a"], serde_json::json!({"model": "x", "n": 3, "flags": ["p", "q"]}));
+    }
+
+    #[test]
+    fn a_config_without_a_plugins_table_still_loads() {
+        let text = "bibox_dir = \"/tmp/b\"\nsearch_case_sensitive = false\ndefault_page_size = 20\n";
+        let config: Config = toml::from_str(text).unwrap();
+        assert!(config.plugins.is_empty());
+    }
 }

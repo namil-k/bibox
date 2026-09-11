@@ -38,3 +38,34 @@ pub fn discover(dir: &Path) -> (Vec<Manifest>, Vec<PluginProblem>) {
     }
     (manifests, problems)
 }
+
+impl host::PluginHost {
+    /// 설정에서 호스트를 만든다. 매니페스트 문제는 돌려주되 호스트 구성은 계속한다.
+    /// CLI 명령은 문제를 무시하고, TUI 시작 화면과 doctor가 보여준다.
+    pub fn discover(config: &crate::config::Config) -> (host::PluginHost, Vec<PluginProblem>) {
+        let (manifests, problems) = discover(&plugins_dir());
+        let host = host::PluginHost::new(
+            manifests,
+            crate::config::disabled_plugins(config),
+            crate::config::plugin_tables(config),
+            host::PluginEnv::from_config(config),
+        );
+        (host, problems)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discover_on_a_config_uses_the_plugins_dir_and_never_panics() {
+        let config = crate::config::Config::default();
+        let (host, problems) = host::PluginHost::discover(&config);
+        // 실제 사용자 디렉토리를 읽으므로 내용은 단정하지 않는다. 죽지 않고 일관된 테이블을 만드는지만 본다.
+        let _ = problems;
+        for (id, c) in host.commands().iter() {
+            assert_eq!(host.commands().find(&c.full_name()), Some(id));
+        }
+    }
+}
