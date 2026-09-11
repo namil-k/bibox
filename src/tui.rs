@@ -18,7 +18,11 @@ use crate::bibtex::entry_to_filename;
 use crate::config::Config;
 use crate::keymap::{default_keymap, resolve, Action, ExecCtx, Flow, KeyPress, Keymap, LayerId, Resolution};
 use crate::models::Entry;
+use crate::plugin::protocol::{Final, UiAnswer, UiRequest};
+use crate::plugin::{PluginCmdId, PluginError, PluginHost, UiSink};
 use crate::storage::{find_by_key_mut, load_db, save_db};
+use std::sync::mpsc::{Receiver, Sender};
+use std::sync::Arc;
 
 // ── State ────────────────────────────────────────────────────────────────────
 
@@ -86,6 +90,7 @@ enum Mode {
     FetchPreview,
     SearchResultPicker,
     ContextMenu,
+    PluginUi(PluginUiState),
 }
 
 struct ContextMenuState {
@@ -331,6 +336,9 @@ pub struct App {
     // Panel areas for mouse hit-testing
     panel_areas: [Rect; 3],
     context_menu: ContextMenuState,
+    // ── Plugins ──
+    host: Arc<PluginHost>,
+    plugin_run: Option<PluginRun>,
 }
 
 /// Collect every collection path referenced by `entries`, sorted and deduplicated.
@@ -353,7 +361,7 @@ fn collection_paths(entries: &[Entry]) -> Vec<String> {
 }
 
 impl App {
-    pub fn new(config: Config) -> Result<Self> {
+    pub fn new(config: Config, host: Arc<PluginHost>) -> Result<Self> {
         let db_path = crate::config::resolve_db_path(&config);
         let db = load_db(&db_path)?;
         let entries = db.entries;
@@ -417,6 +425,8 @@ impl App {
             help_filtering: false,
             help_scroll: 0,
             context_menu: ContextMenuState { x: 0, y: 0, index: 0 },
+            host,
+            plugin_run: None,
         })
     }
 
@@ -802,6 +812,273 @@ impl App {
     }
 }
 
+// ── Plugins ─────────────────────────────────────────────────────────────────
+
+/// 워커 스레드 -> 메인 루프.
+enum PluginEvent {
+    Ui(UiRequest, Sender<UiAnswer>),
+    Progress(String),
+    Done(Result<Final, PluginError>),
+}
+
+struct PluginRun {
+    plugin: String,
+    rx: Receiver<PluginEvent>,
+}
+
+/// 워커의 UI 싱크. 팝업 요청은 메인 루프에 보내고 답을 기다린다. progress는 기다리지 않는다.
+struct TuiSink {
+    tx: Sender<PluginEvent>,
+}
+
+impl UiSink for TuiSink {
+    fn ask(&mut self, _plugin: &str, req: UiRequest) -> UiAnswer {
+        if let UiRequest::Progress { text } = req {
+            let _ = self.tx.send(PluginEvent::Progress(text));
+            return UiAnswer::Ack {};
+        }
+        let cancel = UiAnswer::cancel_for(&req);
+        let (rtx, rrx) = std::sync::mpsc::channel();
+        if self.tx.send(PluginEvent::Ui(req, rtx)).is_err() {
+            return cancel;
+        }
+        rrx.recv().unwrap_or(cancel)
+    }
+}
+
+#[derive(Debug)]
+enum PluginUiKind {
+    Pick { title: String, items: Vec<String>, index: usize },
+    Prompt { title: String, buf: String },
+    Confirm { title: String },
+}
+
+impl PluginUiKind {
+    /// 팝업이 필요 없는 요청은 `Err(즉시 답)`. 빈 pick은 null, progress는 Ack.
+    fn from_request(plugin: &str, req: UiRequest) -> Result<PluginUiKind, UiAnswer> {
+        match req {
+            UiRequest::Pick { items, .. } if items.is_empty() => Err(UiAnswer::Index { index: None }),
+            UiRequest::Pick { title, items } => Ok(PluginUiKind::Pick {
+                title: title.unwrap_or_else(|| plugin.to_string()),
+                items,
+                index: 0,
+            }),
+            UiRequest::Prompt { title, default } => Ok(PluginUiKind::Prompt {
+                title: title.unwrap_or_else(|| plugin.to_string()),
+                buf: default.unwrap_or_default(),
+            }),
+            UiRequest::Confirm { title } => Ok(PluginUiKind::Confirm { title: title.unwrap_or_else(|| plugin.to_string()) }),
+            UiRequest::Progress { .. } => Err(UiAnswer::Ack {}),
+        }
+    }
+}
+
+struct PluginUiState {
+    plugin: String,
+    kind: PluginUiKind,
+    reply: Sender<UiAnswer>,
+}
+
+/// 팝업 키 하나. 답이 정해지면 `Some`. 키는 기존 팝업(정렬 메뉴, 검색창, 확인)과 같다.
+fn plugin_ui_step(kind: &mut PluginUiKind, code: KeyCode) -> Option<UiAnswer> {
+    match kind {
+        PluginUiKind::Pick { items, index, .. } => match code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                *index = index.saturating_sub(1);
+                None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if *index + 1 < items.len() {
+                    *index += 1;
+                }
+                None
+            }
+            KeyCode::Enter => Some(UiAnswer::Index { index: Some(*index) }),
+            KeyCode::Esc | KeyCode::Char('q') => Some(UiAnswer::Index { index: None }),
+            _ => None,
+        },
+        PluginUiKind::Prompt { buf, .. } => match code {
+            KeyCode::Char(c) => {
+                buf.push(c);
+                None
+            }
+            KeyCode::Backspace => {
+                buf.pop();
+                None
+            }
+            KeyCode::Enter => Some(UiAnswer::Text { text: Some(buf.clone()) }),
+            KeyCode::Esc => Some(UiAnswer::Text { text: None }),
+            _ => None,
+        },
+        PluginUiKind::Confirm { .. } => match code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => Some(UiAnswer::Yes { yes: true }),
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Char('q') => Some(UiAnswer::Yes { yes: false }),
+            _ => None,
+        },
+    }
+}
+
+impl App {
+    /// 명령 요청의 컨텍스트. 다중 선택이 있으면 그것, 없으면 커서 항목 하나.
+    fn plugin_context(&self, plugin: &str) -> crate::plugin::protocol::Context {
+        let focus = match self.focus {
+            Panel::Collections => "collections",
+            Panel::Entries => "entries",
+            Panel::Preview => "preview",
+        };
+        let entry = self.selected_entry().cloned();
+        let entries: Vec<Entry> = if self.selected_keys.is_empty() {
+            entry.iter().cloned().collect()
+        } else {
+            self.entries.iter().filter(|e| self.selected_keys.contains(&e.bibtex_key)).cloned().collect()
+        };
+        self.host.context(
+            plugin,
+            Some(focus.to_string()),
+            self.current_collection().map(|s| s.to_string()),
+            entry,
+            entries,
+            None,
+        )
+    }
+
+    fn start_plugin_command(&mut self, id: PluginCmdId, trigger: &str) {
+        let Some(cmd) = self.host.commands().get(id).cloned() else { return };
+        let plugin = cmd.plugin.clone();
+        let context = self.plugin_context(&plugin);
+        let host = Arc::clone(&self.host);
+        let trigger = trigger.to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut sink = TuiSink { tx: tx.clone() };
+            let result = host.invoke(id, &trigger, context, &mut sink);
+            let _ = tx.send(PluginEvent::Done(result));
+        });
+        self.plugin_run = Some(PluginRun { plugin: plugin.clone(), rx });
+        self.spinner_tick = 0;
+        self.mode = Mode::Loading(format!("{}: running", plugin));
+    }
+
+    /// 최종 응답 처리. `error`가 있으면 나머지는 무시. `apply` 뒤 `refresh`, 마지막에 `message`.
+    fn finish_plugin(&mut self, plugin: &str, result: Result<Final, PluginError>) {
+        let f = match result {
+            Ok(f) => f,
+            Err(e) => {
+                self.mode = Mode::Message(format!("{}: {}", plugin, e));
+                return;
+            }
+        };
+        if let Some(err) = f.error {
+            self.mode = Mode::Message(format!("{}: {}", plugin, err));
+            return;
+        }
+        self.mode = Mode::Normal;
+        if let Some(apply) = f.apply {
+            if let Err(e) = self.apply_plugin_entries(apply) {
+                self.mode = Mode::Message(format!("{}: apply rejected: {}", plugin, e));
+                return;
+            }
+        }
+        if f.refresh {
+            if let Err(e) = self.refresh_from_disk() {
+                self.mode = Mode::Message(format!("{}: refresh failed: {}", plugin, e));
+                return;
+            }
+        }
+        if let Some(m) = f.message {
+            self.mode = Mode::Message(m);
+        }
+    }
+
+    /// `apply`를 검증해 통째로 반영한다. undo 스냅샷을 찍는다.
+    fn apply_plugin_entries(&mut self, incoming: Vec<serde_json::Value>) -> Result<(), String> {
+        let updated = crate::plugin::protocol::validate_apply(&self.entries, None, &incoming)?;
+        self.push_undo();
+        for u in &updated {
+            if let Some(slot) = self.entries.iter_mut().find(|e| e.id == u.id) {
+                *slot = u.clone();
+            }
+        }
+        let db_path = crate::config::resolve_db_path(&self.config);
+        let mut db = load_db(&db_path).map_err(|e| e.to_string())?;
+        db.entries = self.entries.clone();
+        save_db(&db, &db_path).map_err(|e| e.to_string())?;
+        self.rebuild_collections();
+        self.apply_filters();
+        Ok(())
+    }
+
+    /// 플러그인이 `$BIBOX_BIN`으로 DB를 바꿨을 때. 커서를 citekey로 복원하고 노트 캐시를 버린다.
+    fn refresh_from_disk(&mut self) -> Result<()> {
+        let key = self.selected_entry().map(|e| e.bibtex_key.clone());
+        let db_path = crate::config::resolve_db_path(&self.config);
+        self.entries = load_db(&db_path)?.entries;
+        self.rebuild_collections();
+        self.apply_filters();
+        if let Some(key) = key {
+            if let Some(pos) = self.filtered.iter().position(|&i| self.entries[i].bibtex_key == key) {
+                self.list_state.select(Some(pos));
+            }
+        }
+        self.note_citekey.clear();
+        self.update_preview();
+        Ok(())
+    }
+}
+
+fn draw_plugin_ui(f: &mut Frame, state: &PluginUiState, area: Rect) {
+    match &state.kind {
+        PluginUiKind::Pick { title, items, index } => {
+            let height = (items.len() as u16 + 5).min(20);
+            let popup_area = centered_rect(55, height, area);
+            f.render_widget(Clear, popup_area);
+            let visible = (height as usize).saturating_sub(5).max(1);
+            let start = index.saturating_sub(visible.saturating_sub(1));
+            let mut lines = vec![
+                Line::from(Span::styled(title.clone(), Style::default().fg(Color::Yellow))),
+                Line::from(""),
+            ];
+            for (i, item) in items.iter().enumerate().skip(start).take(visible) {
+                let arrow = if i == *index { "▶ " } else { "  " };
+                let style = if i == *index { Style::default().fg(Color::Cyan) } else { Style::default() };
+                lines.push(Line::from(vec![
+                    Span::styled(arrow, Style::default().fg(Color::Yellow)),
+                    Span::styled(item.clone(), style),
+                ]));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled("↑↓ select  Enter choose  Esc cancel", Style::default().fg(Color::DarkGray))));
+            let popup = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(format!(" {} ", state.plugin)));
+            f.render_widget(popup, popup_area);
+        }
+        PluginUiKind::Prompt { title, buf } => {
+            let popup_area = centered_rect(60, 5, area);
+            f.render_widget(Clear, popup_area);
+            let text = Paragraph::new(vec![
+                Line::from(Span::styled(title.clone(), Style::default().fg(Color::Yellow))),
+                Line::from(format!("> {}▏", buf)),
+            ])
+            .block(Block::default().borders(Borders::ALL).title(format!(" {} ", state.plugin)));
+            f.render_widget(text, popup_area);
+        }
+        PluginUiKind::Confirm { title } => draw_confirm_popup(f, &format!("{} (y/n)", title), area),
+    }
+}
+
+fn handle_plugin_ui(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
+    let answer = match &mut app.mode {
+        Mode::PluginUi(state) => plugin_ui_step(&mut state.kind, key.code),
+        _ => None,
+    };
+    if let Some(answer) = answer {
+        if let Mode::PluginUi(state) = std::mem::replace(&mut app.mode, Mode::Normal) {
+            let _ = state.reply.send(answer);
+            app.mode = Mode::Loading(format!("{}: running", state.plugin));
+        }
+    }
+    Ok(false)
+}
+
 // ── Drawing ──────────────────────────────────────────────────────────────────
 
 fn draw(f: &mut Frame, app: &mut App) {
@@ -900,6 +1177,7 @@ fn draw(f: &mut Frame, app: &mut App) {
         Mode::ContextMenu => {
             draw_context_menu(f, app, size);
         }
+        Mode::PluginUi(state) => draw_plugin_ui(f, state, size),
         _ => {}
     }
 }
@@ -2176,8 +2454,17 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
         Mode::Search => handle_search(app, key),
         Mode::Confirm(_) => handle_confirm(app, key),
         Mode::Message(_) => { app.mode = Mode::Normal; Ok(false) }
+        Mode::PluginUi(_) => handle_plugin_ui(app, key),
         Mode::Loading(_) => {
-            if key.code == KeyCode::Esc { app.bg_result = None; app.mode = Mode::Normal; }
+            if key.code == KeyCode::Esc {
+                if let Some(run) = app.plugin_run.take() {
+                    app.host.kill(&run.plugin);
+                    app.mode = Mode::Message(format!("{}: cancelled", run.plugin));
+                } else {
+                    app.bg_result = None;
+                    app.mode = Mode::Normal;
+                }
+            }
             Ok(false)
         }
         Mode::Help => handle_help(app, key),
@@ -2242,7 +2529,7 @@ fn execute(app: &mut App, action: Action, ctx: ExecCtx) -> Result<Flow> {
         }
         Action::Undo => { app.undo()?; }
         Action::Redo => { app.redo()?; }
-        Action::Plugin(_) => {} // Task 6에서 실제 실행으로 바뀐다
+        Action::Plugin(id) => { app.start_plugin_command(id, "key"); }
 
         // ── 포커스 이동과 미리보기 탭 ──
         Action::FocusCollections => { app.focus = Panel::Collections; }
@@ -3209,20 +3496,33 @@ fn open_note_editor(app: &mut App) -> Result<bool> {
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 pub fn run_tui(config: &Config) -> Result<()> {
-    // 키맵은 raw mode 앞에서 읽는다. 화면을 잡기 전이라 진단이 평범한 stdout에 찍히고,
+    // 플러그인 매니페스트와 키맵은 raw mode 앞에서 읽는다. 진단이 평범한 stdout에 찍히고,
     // 사용자가 Enter로 확인한 뒤에 TUI가 뜬다.
-    let keymap_report = crate::keymap::load_keymap(&crate::plugin::PluginCommands::default());
-    if !keymap_report.errors.is_empty() || !keymap_report.warnings.is_empty() {
-        if keymap_report.errors.is_empty() {
-            println!("{}", config.msgs.keymap_warning_header());
-        } else {
-            println!("{}", config.msgs.keymap_fallback_header());
+    let (host, plugin_problems) = PluginHost::discover(config);
+    let host = Arc::new(host);
+    let keymap_report = crate::keymap::load_keymap(host.commands());
+    let keymap_noisy = !keymap_report.errors.is_empty() || !keymap_report.warnings.is_empty();
+    if keymap_noisy || !plugin_problems.is_empty() {
+        if !plugin_problems.is_empty() {
+            println!("{}", config.msgs.plugin_problem_header());
+            println!();
+            for p in &plugin_problems {
+                println!("{}", config.msgs.plugin_problem(p));
+            }
+            println!();
         }
-        println!();
-        for p in keymap_report.errors.iter().chain(keymap_report.warnings.iter()) {
-            println!("{}", config.msgs.keymap_problem(p));
+        if keymap_noisy {
+            if keymap_report.errors.is_empty() {
+                println!("{}", config.msgs.keymap_warning_header());
+            } else {
+                println!("{}", config.msgs.keymap_fallback_header());
+            }
+            println!();
+            for p in keymap_report.errors.iter().chain(keymap_report.warnings.iter()) {
+                println!("{}", config.msgs.keymap_problem(p));
+            }
+            println!();
         }
-        println!();
         println!("{}", config.msgs.keymap_press_enter());
         let mut line = String::new();
         let _ = std::io::stdin().read_line(&mut line);
@@ -3257,12 +3557,13 @@ pub fn run_tui(config: &Config) -> Result<()> {
         msgs: crate::i18n::Msgs::new(&config.language),
     };
 
-    let mut app = App::new(config_clone)?;
+    let mut app = App::new(config_clone, Arc::clone(&host))?;
     app.keymap = keymap_report.keymap;
     app.apply_filters();
 
     let result = run_loop(&mut terminal, &mut app);
 
+    host.shutdown();
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.show_cursor()?;
@@ -3616,6 +3917,30 @@ fn run_loop(
                 if let Some(status) = slot.take() {
                     app.git_status_cache = status;
                     app.git_fetching = false;
+                }
+            }
+        }
+
+        // Poll plugin command
+        if app.plugin_run.is_some() {
+            let (plugin, ev) = {
+                let run = app.plugin_run.as_ref().expect("checked");
+                (run.plugin.clone(), run.rx.try_recv())
+            };
+            match ev {
+                Ok(PluginEvent::Ui(req, reply)) => match PluginUiKind::from_request(&plugin, req) {
+                    Ok(kind) => app.mode = Mode::PluginUi(PluginUiState { plugin: plugin.clone(), kind, reply }),
+                    Err(answer) => { let _ = reply.send(answer); }
+                },
+                Ok(PluginEvent::Progress(text)) => { app.mode = Mode::Loading(format!("{}: {}", plugin, text)); }
+                Ok(PluginEvent::Done(result)) => {
+                    app.plugin_run = None;
+                    app.finish_plugin(&plugin, result);
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => { app.spinner_tick = app.spinner_tick.wrapping_add(1); }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    app.plugin_run = None;
+                    app.mode = Mode::Message(format!("{}: worker disconnected", plugin));
                 }
             }
         }
@@ -4140,5 +4465,65 @@ mod tests {
         assert!(bar.contains("q quit"), "got {}", bar);
         assert!(!bar.contains(" search"), "unbound actions must be dropped, got {}", bar);
         assert!(!bar.contains("  navigate"), "got {}", bar);
+    }
+
+    // ── Plugins ──
+
+    use super::{plugin_ui_step, PluginUiKind};
+    use crate::plugin::protocol::{UiAnswer, UiRequest};
+    use crossterm::event::KeyCode;
+
+    #[test]
+    fn pick_moves_with_jk_and_answers_on_enter_or_esc() {
+        let mut k = PluginUiKind::from_request("p", UiRequest::Pick { title: None, items: vec!["a".into(), "b".into(), "c".into()] }).unwrap();
+        assert_eq!(plugin_ui_step(&mut k, KeyCode::Char('j')), None);
+        assert_eq!(plugin_ui_step(&mut k, KeyCode::Char('j')), None);
+        assert_eq!(plugin_ui_step(&mut k, KeyCode::Char('j')), None); // 끝에서 멈춤
+        assert_eq!(plugin_ui_step(&mut k, KeyCode::Enter), Some(UiAnswer::Index { index: Some(2) }));
+        assert_eq!(plugin_ui_step(&mut k, KeyCode::Char('k')), None);
+        assert_eq!(plugin_ui_step(&mut k, KeyCode::Esc), Some(UiAnswer::Index { index: None }));
+    }
+
+    #[test]
+    fn pick_title_falls_back_to_the_plugin_name() {
+        match PluginUiKind::from_request("summarize", UiRequest::Pick { title: None, items: vec!["a".into()] }).unwrap() {
+            PluginUiKind::Pick { title, .. } => assert_eq!(title, "summarize"),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn an_empty_pick_is_answered_immediately_with_null() {
+        assert_eq!(
+            PluginUiKind::from_request("p", UiRequest::Pick { title: None, items: vec![] }).unwrap_err(),
+            UiAnswer::Index { index: None }
+        );
+    }
+
+    #[test]
+    fn progress_never_becomes_a_popup() {
+        assert_eq!(
+            PluginUiKind::from_request("p", UiRequest::Progress { text: "x".into() }).unwrap_err(),
+            UiAnswer::Ack {}
+        );
+    }
+
+    #[test]
+    fn prompt_edits_a_buffer_seeded_with_the_default() {
+        let mut k = PluginUiKind::from_request("p", UiRequest::Prompt { title: None, default: Some("ab".into()) }).unwrap();
+        assert_eq!(plugin_ui_step(&mut k, KeyCode::Char('c')), None);
+        assert_eq!(plugin_ui_step(&mut k, KeyCode::Backspace), None);
+        assert_eq!(plugin_ui_step(&mut k, KeyCode::Char('q')), None); // q는 글자다
+        assert_eq!(plugin_ui_step(&mut k, KeyCode::Enter), Some(UiAnswer::Text { text: Some("abq".into()) }));
+        assert_eq!(plugin_ui_step(&mut k, KeyCode::Esc), Some(UiAnswer::Text { text: None }));
+    }
+
+    #[test]
+    fn confirm_answers_y_and_n() {
+        let mut k = PluginUiKind::from_request("p", UiRequest::Confirm { title: Some("Sure?".into()) }).unwrap();
+        assert_eq!(plugin_ui_step(&mut k, KeyCode::Char('x')), None);
+        assert_eq!(plugin_ui_step(&mut k, KeyCode::Char('y')), Some(UiAnswer::Yes { yes: true }));
+        assert_eq!(plugin_ui_step(&mut k, KeyCode::Char('n')), Some(UiAnswer::Yes { yes: false }));
+        assert_eq!(plugin_ui_step(&mut k, KeyCode::Esc), Some(UiAnswer::Yes { yes: false }));
     }
 }

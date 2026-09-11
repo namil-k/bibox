@@ -831,4 +831,35 @@ impl Msgs {
             ),
         }
     }
+
+    // ── 플러그인 로드 진단 ──────────────────────────────────────────────────
+
+    pub fn plugin_problem_header(&self) -> &'static str {
+        match self.lang {
+            Lang::En => "plugin problems:",
+            Lang::Ko => "플러그인 문제:",
+        }
+    }
+
+    pub fn plugin_problem(&self, p: &crate::plugin::PluginProblem) -> String {
+        use crate::plugin::PluginProblem::*;
+        match (&self.lang, p) {
+            (Lang::En, Manifest { plugin, detail }) => format!("  {}: plugin.toml: {} (plugin not loaded)", plugin, detail),
+            (Lang::Ko, Manifest { plugin, detail }) => format!("  {}: plugin.toml: {} (플러그인을 로드하지 않음)", plugin, detail),
+            (Lang::En, BadKey { plugin, command, token }) => format!("  {}.{}: unknown key notation \"{}\"; the default key was dropped", plugin, command, token),
+            (Lang::Ko, BadKey { plugin, command, token }) => format!("  {}.{}: 알 수 없는 키 표기 \"{}\". 기본 키를 버렸습니다", plugin, command, token),
+            (Lang::En, UnknownLayer { plugin, command, layer }) => format!("  {}.{}: unknown layer \"{}\" ignored", plugin, command, layer),
+            (Lang::Ko, UnknownLayer { plugin, command, layer }) => format!("  {}.{}: 알 수 없는 레이어 \"{}\"를 무시했습니다", plugin, command, layer),
+            (Lang::En, BadHook { plugin, detail }) => format!("  {}: {} (hook ignored)", plugin, detail),
+            (Lang::Ko, BadHook { plugin, detail }) => format!("  {}: {} (훅을 무시했습니다)", plugin, detail),
+            (Lang::En, NoManifest { dir }) => format!("  {}: no plugin.toml in this directory", dir),
+            (Lang::Ko, NoManifest { dir }) => format!("  {}: 이 디렉토리에 plugin.toml이 없습니다", dir),
+            (Lang::En, ConfigWithoutPlugin { name }) => format!("  [plugins.{}] in config.toml, but no such plugin is installed", name),
+            (Lang::Ko, ConfigWithoutPlugin { name }) => format!("  config.toml에 [plugins.{}]가 있지만 그 플러그인이 없습니다", name),
+            (Lang::En, ExecutableMissing { plugin, program }) => format!("  {}: \"{}\" is not on PATH; the plugin will fail to start", plugin, program),
+            (Lang::Ko, ExecutableMissing { plugin, program }) => format!("  {}: \"{}\"가 PATH에 없어 플러그인이 시작되지 않습니다", plugin, program),
+            (Lang::En, NameCollidesWithSubcommand { plugin }) => format!("  {}: name collides with a built-in subcommand, so `bibox {}` never reaches the plugin", plugin, plugin),
+            (Lang::Ko, NameCollidesWithSubcommand { plugin }) => format!("  {}: 내장 서브커맨드와 이름이 같아 `bibox {}`가 플러그인에 닿지 않습니다", plugin, plugin),
+        }
+    }
 }
