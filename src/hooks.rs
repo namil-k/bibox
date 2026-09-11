@@ -226,7 +226,7 @@ mod tests {
             bin: "/bin/true".into(), config_dir: dir.clone(), db: dir.join("db.json"),
             notes: dir.join("n"), pdfs: dir.join("p"), home: None,
         };
-        let host = Arc::new(crate::plugin::PluginHost::new(vec![m], Default::default(), Default::default(), env));
+        let host = Arc::new(crate::plugin::PluginHost::new(vec![m], Default::default(), env));
         (HookRunner { host, git: false, db_path: dir.join("db.json") }, dir)
     }
 
@@ -281,7 +281,7 @@ mod tests {
         let mut problems = vec![];
         let m = parse_manifest(&dir, text, &mut problems).unwrap();
         let env = crate::plugin::PluginEnv { bin: "/bin/true".into(), config_dir: dir.clone(), db: dir.join("db.json"), notes: dir.join("n"), pdfs: dir.join("p"), home: None };
-        let host = Arc::new(crate::plugin::PluginHost::new(vec![m], Default::default(), Default::default(), env));
+        let host = Arc::new(crate::plugin::PluginHost::new(vec![m], Default::default(), env));
         let r = HookRunner { host, git: false, db_path: dir.join("db.json") };
         let (e, out) = r.before_add(entry("1", "a"), &mut crate::plugin::NoUiSink);
         assert!(out[0].result.is_ok(), "{:?}", out[0].result);

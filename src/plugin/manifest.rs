@@ -136,6 +136,10 @@ pub enum PluginProblem {
     ExecutableMissing { plugin: String, program: String },
     /// doctor 전용. 이름이 내장 서브커맨드와 같아 `bibox <name>`이 절대 폴스루되지 않는다.
     NameCollidesWithSubcommand { plugin: String },
+    /// `config.toml`의 `git = true`. git-sync 플러그인이 대신한다.
+    ObsoleteGitSetting,
+    /// `[plugins.x] enabled`. 지우기/깔기만 남았다.
+    ObsoleteEnabledFlag { name: String },
 }
 
 impl PluginProblem {
@@ -154,6 +158,8 @@ impl PluginProblem {
             | PluginProblem::NameCollidesWithSubcommand { plugin } => plugin,
             PluginProblem::NoManifest { dir } => dir,
             PluginProblem::ConfigWithoutPlugin { name } => name,
+            PluginProblem::ObsoleteGitSetting => "config",
+            PluginProblem::ObsoleteEnabledFlag { name } => name,
         }
     }
 }

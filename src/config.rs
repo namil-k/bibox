@@ -1,6 +1,6 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::i18n::Msgs;
@@ -32,8 +32,8 @@ pub struct Config {
     pub default_page_size: usize,
     #[serde(default = "default_language")]
     pub language: String,
-    /// Auto-commit the database to git after every write (default: false)
-    #[serde(default)]
+    /// Obsolete since 0.4.0. Read only so that the doctor can point at it; never written back.
+    #[serde(default, skip_serializing)]
     pub git: bool,
     /// Directory for per-entry note files (default: ~/.local/share/bibox/notes/)
     #[serde(default = "default_notes_dir")]
@@ -224,16 +224,6 @@ pub fn save_config(config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// `[plugins.x] enabled = false`인 x들.
-pub fn disabled_plugins(config: &Config) -> HashSet<String> {
-    config
-        .plugins
-        .iter()
-        .filter(|(_, t)| t.get("enabled").and_then(|v| v.as_bool()) == Some(false))
-        .map(|(name, _)| name.clone())
-        .collect()
-}
-
 /// 플러그인에 넘길 JSON. `enabled`는 여기서 빼지 않고 `PluginHost::context`가 뺀다
 /// (list 화면이 `enabled`를 봐야 하므로 원본은 유지).
 pub fn plugin_tables(config: &Config) -> BTreeMap<String, serde_json::Value> {
@@ -260,13 +250,12 @@ mod tests {
     }
 
     #[test]
-    fn disabled_plugins_reads_only_enabled_false() {
-        let text = "bibox_dir = \"/tmp/b\"\nsearch_case_sensitive = false\ndefault_page_size = 20\n[plugins.a]\nenabled = false\n[plugins.b]\nenabled = true\n[plugins.c]\nmodel = \"x\"\n";
+    fn git_is_read_but_never_written_back() {
+        let text = "bibox_dir = \"/tmp/b\"\nsearch_case_sensitive = false\ndefault_page_size = 20\ngit = true\n";
         let config: Config = toml::from_str(text).unwrap();
-        let d = disabled_plugins(&config);
-        assert!(d.contains("a"));
-        assert!(!d.contains("b"));
-        assert!(!d.contains("c"));
+        assert!(config.git);
+        let out = toml::to_string_pretty(&config).unwrap();
+        assert!(!out.contains("git"), "{}", out);
     }
 
     #[test]

@@ -4646,7 +4646,7 @@ mod tests {
             hooks: vec![], cli: None, builtin: None, dir: "/tmp".into(),
         };
         let env = crate::plugin::PluginEnv { bin: "/bin/true".into(), config_dir: "/tmp".into(), db: "/tmp/db.json".into(), notes: "/tmp/n".into(), pdfs: "/tmp/p".into(), home: None };
-        crate::plugin::PluginHost::new(vec![m], Default::default(), Default::default(), env).commands().clone()
+        crate::plugin::PluginHost::new(vec![m], Default::default(), env).commands().clone()
     }
 
     #[test]

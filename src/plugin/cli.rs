@@ -124,7 +124,7 @@ pub fn cmd_plugin_list(json: bool, _config: &Config) -> Result<()> {
     Ok(())
 }
 
-// ── install / remove / enable / disable ─────────────────────────────────────
+// ── install / remove ────────────────────────────────────────────────────────
 
 pub fn cmd_plugin_install(source: &str, yes: bool, config: &Config) -> Result<()> {
     let dir = plugins_dir();
@@ -253,26 +253,6 @@ pub fn cmd_plugin_remove(name: &str, yes: bool, config: &Config) -> Result<()> {
     Ok(())
 }
 
-/// `config.toml`을 다시 쓴다. 주석이 사라지는 것은 Settings 화면과 같은 기존 동작이다.
-pub fn cmd_plugin_set_enabled(name: &str, enabled: bool, config: &Config) -> Result<()> {
-    if !plugins_dir().join(name).exists() {
-        bail!("{}", config.msgs.plugin_not_found(name));
-    }
-    let mut cfg = crate::config::load_config()?;
-    let table = cfg.plugins.entry(name.to_string()).or_default();
-    if enabled {
-        table.remove("enabled");
-        if table.is_empty() {
-            cfg.plugins.remove(name);
-        }
-    } else {
-        table.insert("enabled".to_string(), toml::Value::Boolean(false));
-    }
-    crate::config::save_config(&cfg)?;
-    println!("{} {}", if enabled { "Enabled" } else { "Disabled" }, name);
-    Ok(())
-}
-
 // ── new ─────────────────────────────────────────────────────────────────────
 
 pub fn cmd_plugin_new(name: &str, config: &Config) -> Result<()> {
@@ -343,15 +323,12 @@ pub fn doctor_checks(host: &PluginHost, config: &Config) -> Vec<PluginProblem> {
         }
     }
     for m in host.manifests() {
-        // 꺼진 플러그인은 시작하지 않으므로 "시작되지 않는다"는 경고가 맞지 않는다.
-        if !host.is_disabled(&m.name) {
-            if !which(&m.run[0]) {
-                out.push(PluginProblem::ExecutableMissing { plugin: m.name.clone(), program: m.run[0].clone() });
-            }
-            if let Some(cli) = &m.cli {
-                if !which(&cli[0]) {
-                    out.push(PluginProblem::ExecutableMissing { plugin: m.name.clone(), program: cli[0].clone() });
-                }
+        if !which(&m.run[0]) {
+            out.push(PluginProblem::ExecutableMissing { plugin: m.name.clone(), program: m.run[0].clone() });
+        }
+        if let Some(cli) = &m.cli {
+            if !which(&cli[0]) {
+                out.push(PluginProblem::ExecutableMissing { plugin: m.name.clone(), program: cli[0].clone() });
             }
         }
         if BUILTIN_SUBCOMMANDS.contains(&m.name.as_str()) {

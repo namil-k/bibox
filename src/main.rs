@@ -586,10 +586,6 @@ enum PluginAction {
         #[arg(long)]
         yes: bool,
     },
-    /// Load the plugin again (removes `enabled = false` from config.toml)
-    Enable { name: String },
-    /// Keep the plugin installed but do not load it
-    Disable { name: String },
     /// Create a working plugin skeleton in the plugins directory
     New { name: String },
     /// Run a built-in plugin's protocol loop on stdin/stdout (used by bibox itself; handy for debugging)
@@ -852,8 +848,6 @@ async fn main() -> Result<()> {
             PluginAction::List { json } => plugin::cli::cmd_plugin_list(json, &config)?,
             PluginAction::Install { source, yes } => plugin::cli::cmd_plugin_install(&source, yes, &config)?,
             PluginAction::Remove { name, yes } => plugin::cli::cmd_plugin_remove(&name, yes, &config)?,
-            PluginAction::Enable { name } => plugin::cli::cmd_plugin_set_enabled(&name, true, &config)?,
-            PluginAction::Disable { name } => plugin::cli::cmd_plugin_set_enabled(&name, false, &config)?,
             PluginAction::New { name } => plugin::cli::cmd_plugin_new(&name, &config)?,
             PluginAction::Run { name } => plugin::builtin::run(&name)?,
         },

@@ -1352,7 +1352,7 @@ mod tests {
             bin: "/bin/true".into(), config_dir: "/tmp".into(), db: "/tmp/db.json".into(),
             notes: "/tmp/n".into(), pdfs: "/tmp/p".into(), home: None,
         };
-        crate::plugin::PluginHost::new(manifests, Default::default(), Default::default(), env).commands().clone()
+        crate::plugin::PluginHost::new(manifests, Default::default(), env).commands().clone()
     }
 
     const ALL: &[LayerId] = &[LayerId::Collections, LayerId::Entries, LayerId::Preview];

@@ -860,6 +860,10 @@ impl Msgs {
             (Lang::Ko, ExecutableMissing { plugin, program }) => format!("  {}: \"{}\"가 PATH에 없어 플러그인이 시작되지 않습니다", plugin, program),
             (Lang::En, NameCollidesWithSubcommand { plugin }) => format!("  {}: name collides with a built-in subcommand, so `bibox {}` never reaches the plugin", plugin, plugin),
             (Lang::Ko, NameCollidesWithSubcommand { plugin }) => format!("  {}: 내장 서브커맨드와 이름이 같아 `bibox {}`가 플러그인에 닿지 않습니다", plugin, plugin),
+            (Lang::En, ObsoleteGitSetting) => "  config.toml: `git = true` is obsolete; the git-sync plugin now commits on every write when the portable home is a git repository. Remove the line".to_string(),
+            (Lang::Ko, ObsoleteGitSetting) => "  config.toml: `git = true`는 더 이상 쓰이지 않습니다. 포터블 홈이 git 저장소이면 git-sync 플러그인이 저장할 때마다 커밋합니다. 그 줄을 지우세요".to_string(),
+            (Lang::En, ObsoleteEnabledFlag { name }) => format!("  config.toml: [plugins.{}] enabled is no longer supported; remove the plugin with `bibox plugin remove {}` instead", name, name),
+            (Lang::Ko, ObsoleteEnabledFlag { name }) => format!("  config.toml: [plugins.{}]의 enabled는 더 이상 지원하지 않습니다. 대신 `bibox plugin remove {}`로 지우세요", name, name),
         }
     }
 

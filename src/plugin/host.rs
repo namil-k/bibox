@@ -1,5 +1,5 @@
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
@@ -196,7 +196,6 @@ struct PluginSlot {
 
 pub struct PluginHost {
     manifests: Vec<Manifest>,
-    disabled: HashSet<String>,
     slots: BTreeMap<String, Arc<PluginSlot>>,
     commands: PluginCommands,
     hooks: HashMap<HookKind, Vec<PluginCmdId>>,
@@ -205,19 +204,11 @@ pub struct PluginHost {
 }
 
 impl PluginHost {
-    pub fn new(
-        manifests: Vec<Manifest>,
-        disabled: HashSet<String>,
-        config_tables: BTreeMap<String, Value>,
-        env: PluginEnv,
-    ) -> PluginHost {
+    pub fn new(manifests: Vec<Manifest>, config_tables: BTreeMap<String, Value>, env: PluginEnv) -> PluginHost {
         let mut slots = BTreeMap::new();
         let mut list = Vec::new();
         let mut hooks: HashMap<HookKind, Vec<PluginCmdId>> = HashMap::new();
         for m in &manifests {
-            if disabled.contains(&m.name) {
-                continue;
-            }
             for c in &m.commands {
                 list.push(PluginCommand {
                     plugin: m.name.clone(),
@@ -240,20 +231,17 @@ impl PluginHost {
         }
         let commands = PluginCommands { list };
         for m in &manifests {
-            if disabled.contains(&m.name) {
-                continue;
-            }
             for h in &m.hooks {
                 if let Some(id) = commands.find(&format!("{}.{}", m.name, h.run)) {
                     hooks.entry(h.on).or_default().push(id);
                 }
             }
         }
-        PluginHost { manifests, disabled, slots, commands, hooks, config_tables, env }
+        PluginHost { manifests, slots, commands, hooks, config_tables, env }
     }
 
     pub fn empty(env: PluginEnv) -> PluginHost {
-        PluginHost::new(vec![], HashSet::new(), BTreeMap::new(), env)
+        PluginHost::new(vec![], BTreeMap::new(), env)
     }
 
     pub fn commands(&self) -> &PluginCommands {
@@ -266,10 +254,6 @@ impl PluginHost {
 
     pub fn manifests(&self) -> &[Manifest] {
         &self.manifests
-    }
-
-    pub fn is_disabled(&self, name: &str) -> bool {
-        self.disabled.contains(name)
     }
 
     /// 요청 컨텍스트. `config`는 `[plugins.<name>]`에서 `enabled`를 뺀 것, 없으면 `{}`.
@@ -510,7 +494,7 @@ mod tests {
         );
         let mut problems = vec![];
         let m = parse_manifest(&dir, &text, &mut problems).unwrap();
-        (PluginHost::new(vec![m], HashSet::new(), BTreeMap::new(), env()), dir)
+        (PluginHost::new(vec![m], BTreeMap::new(), env()), dir)
     }
 
     fn ctx(host: &PluginHost, plugin: &str) -> Context {
@@ -528,7 +512,7 @@ mod tests {
     }
 
     #[test]
-    fn commands_table_is_built_from_enabled_manifests_only() {
+    fn commands_and_hooks_are_built_from_the_manifests() {
         let (host, _) = host_for("alpha", "echo.sh");
         assert_eq!(host.commands().len(), 1);
         let id = host.commands().find("alpha.go").unwrap();
@@ -536,13 +520,7 @@ mod tests {
         assert_eq!(host.commands().find("alpha.nope"), None);
         assert_eq!(host.hooks(HookKind::AfterWrite), &[id]);
         assert!(host.hooks(HookKind::BeforeAdd).is_empty());
-
-        let m = host.manifests()[0].clone();
-        let disabled: HashSet<String> = ["alpha".to_string()].into_iter().collect();
-        let host2 = PluginHost::new(vec![m], disabled, BTreeMap::new(), env());
-        assert!(host2.commands().is_empty());
-        assert!(host2.is_disabled("alpha"));
-        assert_eq!(host2.manifests().len(), 1, "disabled plugins still list");
+        assert_eq!(host.manifests().len(), 1);
     }
 
     #[test]
@@ -551,7 +529,7 @@ mod tests {
         let m = h.manifests()[0].clone();
         let mut tables = BTreeMap::new();
         tables.insert("alpha".to_string(), serde_json::json!({"model": "x", "enabled": true}));
-        let host = PluginHost::new(vec![m], HashSet::new(), tables, env());
+        let host = PluginHost::new(vec![m], tables, env());
         let c = ctx(&host, "alpha");
         assert_eq!(c.config, serde_json::json!({"model": "x"}));
         assert_eq!(c.paths.db, PathBuf::from("/tmp/bibox-test/db.json"));
@@ -655,7 +633,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mut problems = vec![];
         let m = parse_manifest(&dir, "api = 1\nname = \"m\"\nrun = \"definitely-not-a-program-xyz\"\n[[commands]]\nid = \"go\"\ndesc = \"Go\"\n", &mut problems).unwrap();
-        let host = PluginHost::new(vec![m], HashSet::new(), BTreeMap::new(), env());
+        let host = PluginHost::new(vec![m], BTreeMap::new(), env());
         let id = host.commands().find("m.go").unwrap();
         assert!(matches!(host.invoke(id, "key", ctx(&host, "m"), &mut NoUiSink), Err(PluginError::Spawn(_))));
     }

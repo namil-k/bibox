@@ -108,18 +108,28 @@ pub fn seed_builtins_from(plugins_dir: &Path, names: &[&str]) -> Vec<String> {
     created
 }
 
+/// 더 이상 쓰이지 않는 설정. TUI 시작 화면과 doctor에 나온다.
+pub fn obsolete_config_problems(config: &crate::config::Config) -> Vec<PluginProblem> {
+    let mut out = Vec::new();
+    if config.git {
+        out.push(PluginProblem::ObsoleteGitSetting);
+    }
+    for (name, table) in &config.plugins {
+        if table.contains_key("enabled") {
+            out.push(PluginProblem::ObsoleteEnabledFlag { name: name.clone() });
+        }
+    }
+    out
+}
+
 impl host::PluginHost {
     /// 설정에서 호스트를 만든다. 매니페스트 문제는 돌려주되 호스트 구성은 계속한다.
     /// CLI 명령은 문제를 무시하고, TUI 시작 화면과 doctor가 보여준다.
     pub fn discover(config: &crate::config::Config) -> (host::PluginHost, Vec<PluginProblem>) {
         seed_builtins(&plugins_dir());
-        let (manifests, problems) = discover(&plugins_dir());
-        let host = host::PluginHost::new(
-            manifests,
-            crate::config::disabled_plugins(config),
-            crate::config::plugin_tables(config),
-            host::PluginEnv::from_config(config),
-        );
+        let (manifests, mut problems) = discover(&plugins_dir());
+        problems.extend(obsolete_config_problems(config));
+        let host = host::PluginHost::new(manifests, crate::config::plugin_tables(config), host::PluginEnv::from_config(config));
         (host, problems)
     }
 }
@@ -187,5 +197,21 @@ mod tests {
     #[test]
     fn stub_text_is_three_lines() {
         assert_eq!(stub_text("git-sync"), "api = 1\nname = \"git-sync\"\nbuiltin = \"git-sync\"\n");
+    }
+    #[test]
+    fn obsolete_settings_are_reported_once_each() {
+        let text = "bibox_dir = \"/tmp/b\"\nsearch_case_sensitive = false\ndefault_page_size = 20\ngit = true\n[plugins.a]\nenabled = false\n[plugins.b]\nenabled = true\n[plugins.c]\nmodel = \"x\"\n";
+        let config: crate::config::Config = toml::from_str(text).unwrap();
+        let p = obsolete_config_problems(&config);
+        assert_eq!(p.len(), 3, "{:?}", p);
+        assert!(p.contains(&PluginProblem::ObsoleteGitSetting));
+        assert!(p.contains(&PluginProblem::ObsoleteEnabledFlag { name: "a".into() }));
+        assert!(p.contains(&PluginProblem::ObsoleteEnabledFlag { name: "b".into() }));
+    }
+
+    #[test]
+    fn a_clean_config_has_no_obsolete_problems() {
+        let config = crate::config::Config::default();
+        assert!(obsolete_config_problems(&config).is_empty());
     }
 }
