@@ -55,6 +55,8 @@ def run(ctx):
         return {"error": "no entry selected"}
     tidied = [tidy(e) for e in entries]
     changed = sum(1 for a, b in zip(entries, tidied) if a != b)
+    if changed == 0:
+        return {"message": "Nothing to tidy"}  # no apply: no write, no undo step, no git commit
     return {"apply": tidied, "message": "Tidied {} of {} entries".format(changed, len(entries))}
 
 
