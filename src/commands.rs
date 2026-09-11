@@ -3684,6 +3684,7 @@ Issue types:
 - `latex_escape` - LaTeX escapes (\l, \&, \' etc.) in text/author [fixable: decodes to Unicode]
 - `orphaned_note` - Note file with no matching entry
 - `invalid_json` - db.json is not valid JSON (e.g. git merge conflict markers)
+- `plugin_problem` - A plugin.toml, its program, or its `[plugins.<name>]` config has a problem
 
 ## PDF Storage (Cloud Sync)
 
@@ -3697,6 +3698,25 @@ pdf_dir = "~/Library/Mobile Documents/com~apple~CloudDocs/bibox-pdfs"  # iCloud
 ```
 
 This lets you git-sync `db.json` + notes without committing large PDFs. `bibox config --json` shows the resolved `pdf_dir`.
+
+## Plugins
+
+A plugin is a directory under `<config_dir>/bibox/plugins/<name>/` with a `plugin.toml` and a program in any language. It adds commands (keys, right-click menu items) and save hooks (`before_add`, `after_write`, `after_note_save`).
+
+```bash
+bibox plugin list                                      # what is installed and whether it loaded
+bibox plugin new my-plugin                             # skeleton: plugin.toml, main.py, bibox_plugin.py (Python helper)
+bibox plugin install namil-k/bibox/plugins/entry-tidy  # from GitHub (owner/repo/subdir), asks before installing
+bibox plugin install ./my-plugin                       # symlink a local directory
+bibox plugin disable my-plugin                         # keep it installed, stop loading it
+bibox plugin remove my-plugin
+```
+
+Protocol: one JSON object per line on stdin/stdout. bibox sends `{"type":"command","id":"<cmd>","trigger":"key|menu|hook:<name>","context":{"entry":...,"entries":[...],"config":{...},"paths":{...}}}`. The plugin may send `{"ui":"pick|prompt|confirm|progress",...}` lines (bibox answers each with one line), then one final line without `"ui"`: `{"message":"..."}`, `{"apply":[<full entries>]}`, `{"refresh":true}` or `{"error":"..."}`. Flush stdout after every line.
+
+Every plugin process gets `BIBOX_BIN` (call it for `modify`, `note --stdin`, `add --json` and return `refresh`), `BIBOX_CONFIG_DIR`, `BIBOX_DB_PATH`, `BIBOX_NOTES_DIR`, `BIBOX_PDF_DIR`, `BIBOX_PLUGIN_DIR`. Inside a hook the helper sets `BIBOX_IN_HOOK=1` on that call so it does not fire hooks again. The plugin's stderr is in `plugins/<name>/stderr.log`, truncated on every start.
+
+Test a plugin without the TUI: `printf '<request json>\n' | python3 main.py`. See the README's Plugins section for `plugin.toml` fields and `[plugins.<name>]` settings in config.toml.
 
 ## Tips
 
@@ -4365,6 +4385,11 @@ pub fn cmd_agent_guide(json: bool) -> Result<()> {
         let result = serde_json::json!({
             "guide": AGENT_GUIDE,
             "version": env!("CARGO_PKG_VERSION"),
+            "plugins": {
+                "dir": crate::plugin::plugins_dir().to_string_lossy(),
+                "commands": ["plugin list", "plugin install <source>", "plugin remove <name>", "plugin enable <name>", "plugin disable <name>", "plugin new <name>"],
+                "protocol": "one JSON object per line on stdin/stdout; a line with \"ui\" is a popup request, a line without it is the final answer; see README",
+            },
         });
         println!("{}", serde_json::to_string_pretty(&result)?);
     } else {

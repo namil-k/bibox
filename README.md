@@ -39,6 +39,7 @@ For humans: browse and edit in the TUI. For agents: manage entries and notes thr
 - **Export** - BibTeX, YAML, RIS, CSV, notes (`.md`). Include PDFs. Copy to clipboard. Zip it up.
 - **Templates** - Built-in and custom note templates with `{{variable}}` substitution
 - **Doctor** - `bibox doctor` diagnoses and auto-repairs DB issues: bad citekeys, LaTeX escapes, orphaned files
+- **Plugins** - Any executable becomes a bibox command, a context-menu item or a save hook. Declared by `plugin.toml`, talks JSON over stdin/stdout, can open bibox's own popups. Ships with entry-tidy, copy-citation, summarize (Claude) and git-push
 
 ## Install
 
@@ -206,6 +207,8 @@ prepend_keymap = [
 | `normal.preview` | `preview_scroll_down` `preview_scroll_up` `preview_top` `preview_bottom` `preview_half_page_down` `preview_half_page_up` `next_tab` `prev_tab` `prev_tab_or_focus_entries` `focus_entries` |
 
 Action names say what they move, not which panel has focus, so binding `entry_down` inside `[normal.preview]` is allowed and does what it says.
+
+Plugin commands are bound by `<plugin>.<command>`, for example `run = "entry-tidy.tidy"`. Their default keys sit below the built-in ones, so a built-in key always wins; the help screen lists live plugin commands under Plugins.
 
 **When it breaks.** A bad `keymap.toml` never stops bibox. Every problem is reported before the TUI opens and the default keymap is used for that run, so you are never locked out by your own config. `bibox doctor` reports the same problems without opening the TUI, and `bibox doctor --json` gives them to an editor.
 
@@ -415,6 +418,59 @@ pdf_dir = "~/Library/Mobile Documents/com~apple~CloudDocs/bibox-pdfs"  # iCloud
 # pdf_dir = "~/Dropbox/bibox-pdfs"                                     # Dropbox
 ```
 
+## Plugins
+
+A plugin is a directory with a `plugin.toml` and a program in any language. bibox starts the program the first time it is needed, keeps it running while the TUI is open, and talks to it one JSON line at a time.
+
+```
+~/Library/Application Support/bibox/plugins/   (Linux: ~/.config/bibox/plugins/)
+  entry-tidy/
+    plugin.toml
+    main.py
+```
+
+**Install.** `bibox plugin install namil-k/bibox/plugins/summarize` clones from GitHub, `bibox plugin install ./my-plugin` symlinks a local directory, `bibox plugin list` shows what is loaded, `bibox plugin disable <name>` keeps it installed but off. Installing from a repository shows where the code comes from and what it runs, then asks. Nobody has reviewed code that is not in a registry.
+
+**Write one.** `bibox plugin new my-plugin` creates a working skeleton with a Python helper. The whole contract for other languages is four lines:
+
+```
+bibox  → plugin   {"type":"command","id":"copy","trigger":"key","context":{"entry":{...},"entries":[...],"config":{},"paths":{...}}}
+plugin → bibox    {"ui":"pick","title":"Citation style","items":["APA","IEEE"]}
+bibox  → plugin   {"index":0}
+plugin → bibox    {"message":"Copied APA citation"}
+```
+
+A line with `"ui"` asks bibox to show something (`pick`, `prompt`, `confirm`, `progress`) and gets one line back. A line without `"ui"` ends the command: `message` shows text, `apply` replaces entries (undoable, all or nothing), `refresh` re-reads the database after you changed it through `$BIBOX_BIN`, `error` reports a failure. Flush stdout after every line.
+
+**Declare.** `plugin.toml`:
+
+```toml
+api = 1
+name = "entry-tidy"                  # must equal the directory name
+run = "python3 main.py"              # split on spaces, no shell; cwd is the plugin directory
+
+[[commands]]
+id = "tidy"
+desc = "Normalize the selected entries"
+key = "="                            # default key; users override it in keymap.toml as run = "entry-tidy.tidy"
+menu = true                          # right-click menu
+
+[[hooks]]
+on = "before_add"                    # before_add | after_write | after_note_save
+run = "tidy"
+
+[cli]                                # optional: `bibox entry-tidy ...` runs this with your stdio
+run = "python3 cli.py"
+```
+
+`before_add` runs before an entry is saved and may return `apply` to change it; if the plugin fails the entry is added unchanged. `after_write` and `after_note_save` run in the background after the save and cannot open popups. Plugin settings live in `config.toml` under `[plugins.<name>]` and arrive as `context.config`; `enabled = false` turns a plugin off.
+
+**Environment.** Every plugin process gets `BIBOX_BIN`, `BIBOX_CONFIG_DIR`, `BIBOX_DB_PATH`, `BIBOX_NOTES_DIR`, `BIBOX_PDF_DIR`, `BIBOX_HOME` (when set) and `BIBOX_PLUGIN_DIR`. To change the library, call `$BIBOX_BIN` (`modify`, `note --stdin`, `add --json`) and return `refresh`, or return `apply` for a few entries. The plugin's stderr goes to `plugins/<name>/stderr.log`, truncated on every start.
+
+**When it breaks.** A broken plugin never stops bibox. Manifest problems are shown before the TUI opens and by `bibox doctor`. A plugin that exits, hangs (press Esc) or prints something that is not JSON is reported in the status line and restarted on the next call. Default keys that collide with built-in keys are dropped with a warning; bind them yourself in `keymap.toml`.
+
+**Included plugins** (`plugins/` in this repository): `entry-tidy` (`=`, also a `before_add` hook), `copy-citation` (`Y`, APA / IEEE / Chicago to the clipboard), `summarize` (`S`, PDF to the note's Summary section with Claude; needs `pip install anthropic` and `ANTHROPIC_API_KEY`), `git-push` (pushes after every write; needs `git = true`).
+
 ## Settings
 
 Press `,` in the TUI, or run `bibox config` to see all current settings and paths.
@@ -464,6 +520,8 @@ bibox sync --yes --json
 | `--section "Name"` | Target a specific `## Heading` in a note |
 | `--yes` / `-y` | Skip confirmation prompts |
 | `--template <name>` | Initialize note from template |
+
+**Writing a plugin as an agent.** Run `bibox plugin new <name>`, edit `main.py` (the helper's `serve`, `pick`, `prompt`, `confirm`, `progress`, `bibox` and `copy_to_clipboard` are documented at the top of `bibox_plugin.py`), then test it without the TUI: `printf '<request json>\n' | python3 main.py`. Failures land in `plugins/<name>/stderr.log`. When your plugin calls `bibox` from inside a hook, the helper sets `BIBOX_IN_HOOK=1` so that call does not fire hooks again.
 
 ## License
 
