@@ -807,6 +807,28 @@ impl Msgs {
             (Lang::Ko, LayerNotWired { layer }) => {
                 format!("  [{}] 아직 구현되지 않은 레이어라 무시했습니다", layer)
             }
+            (Lang::En, UnknownPluginCommand { layer, name }) => {
+                format!("  [{}] plugin command \"{}\" is not installed or is disabled; that binding was skipped", layer, name)
+            }
+            (Lang::Ko, UnknownPluginCommand { layer, name }) => {
+                format!("  [{}] 플러그인 명령 \"{}\"가 설치되지 않았거나 꺼져 있어 그 바인딩을 건너뜁니다", layer, name)
+            }
+            (Lang::En, PluginKeyShadowed { plugin, command, layer, key, by }) => format!(
+                "  [{}] {}.{}: default key \"{}\" is shadowed by {}; bind it in keymap.toml",
+                layer, plugin, command, key, by
+            ),
+            (Lang::Ko, PluginKeyShadowed { plugin, command, layer, key, by }) => format!(
+                "  [{}] {}.{}: 기본 키 \"{}\"가 {}에 가려집니다. keymap.toml에서 바인딩하세요",
+                layer, plugin, command, key, by
+            ),
+            (Lang::En, PluginKeyTaken { plugin, command, layer, key, by_plugin }) => format!(
+                "  [{}] {}.{}: default key \"{}\" is already used by plugin {}; bind it in keymap.toml",
+                layer, plugin, command, key, by_plugin
+            ),
+            (Lang::Ko, PluginKeyTaken { plugin, command, layer, key, by_plugin }) => format!(
+                "  [{}] {}.{}: 기본 키 \"{}\"를 플러그인 {}가 먼저 씁니다. keymap.toml에서 바인딩하세요",
+                layer, plugin, command, key, by_plugin
+            ),
         }
     }
 }

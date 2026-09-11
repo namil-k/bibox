@@ -464,9 +464,12 @@ mod tests {
         }
     }
 
-    /// fixture 스크립트 하나를 플러그인 `name`으로 삼는 호스트. 디렉토리는 임시로 만든다.
+    /// fixture 스크립트 하나를 플러그인 `name`으로 삼는 호스트. 디렉토리는 테스트마다 고유하게
+    /// 만든다(같은 이름을 쓰는 테스트가 병렬로 돌면서 서로의 디렉토리를 지우지 않도록).
     fn host_for(name: &str, script: &str) -> (PluginHost, PathBuf) {
-        let dir = std::env::temp_dir().join(format!("bibox-host-{}-{}", name, std::process::id())).join(name);
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("bibox-host-{}-{}-{}", name, std::process::id(), seq)).join(name);
         let _ = std::fs::remove_dir_all(dir.parent().unwrap());
         std::fs::create_dir_all(&dir).unwrap();
         let text = format!(

@@ -2242,6 +2242,7 @@ fn execute(app: &mut App, action: Action, ctx: ExecCtx) -> Result<Flow> {
         }
         Action::Undo => { app.undo()?; }
         Action::Redo => { app.redo()?; }
+        Action::Plugin(_) => {} // Task 6에서 실제 실행으로 바뀐다
 
         // ── 포커스 이동과 미리보기 탭 ──
         Action::FocusCollections => { app.focus = Panel::Collections; }
@@ -3210,7 +3211,7 @@ fn open_note_editor(app: &mut App) -> Result<bool> {
 pub fn run_tui(config: &Config) -> Result<()> {
     // 키맵은 raw mode 앞에서 읽는다. 화면을 잡기 전이라 진단이 평범한 stdout에 찍히고,
     // 사용자가 Enter로 확인한 뒤에 TUI가 뜬다.
-    let keymap_report = crate::keymap::load_keymap();
+    let keymap_report = crate::keymap::load_keymap(&crate::plugin::PluginCommands::default());
     if !keymap_report.errors.is_empty() || !keymap_report.warnings.is_empty() {
         if keymap_report.errors.is_empty() {
             println!("{}", config.msgs.keymap_warning_header());

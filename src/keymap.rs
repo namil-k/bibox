@@ -172,6 +172,9 @@ pub enum Action {
     NextTab,
     PrevTab,
     PrevTabOrFocusEntries,
+    // ── 플러그인 명령. 인덱스는 로드 시 만든 명령 테이블을 가리킨다 ──
+    #[serde(skip)]
+    Plugin(crate::plugin::PluginCmdId),
 }
 
 impl Action {
@@ -216,6 +219,8 @@ impl Action {
             Search | SortMenu => "Search and sort",
 
             Help | Settings | Quit | Noop => "Application",
+
+            Plugin(_) => "Plugins",
         }
     }
 
@@ -275,6 +280,8 @@ impl Action {
             NextTab => "Step forward a preview tab",
             PrevTab => "Step back a preview tab",
             PrevTabOrFocusEntries => "Step back a preview tab, or leave for the Entries panel",
+
+            Plugin(_) => "Run a plugin command",
         }
     }
 }
@@ -467,12 +474,32 @@ pub enum OnField {
     Many(Vec<String>),
 }
 
+/// `run`의 원소 하나. `.`이 있으면 플러그인 명령 참조(`entry-tidy.tidy`), 없으면 내장 액션.
+/// 내장 액션 이름이 틀리면 serde의 "unknown variant" 에러가 그대로 나와 기존
+/// `UnknownAction` 판정이 유지된다.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RunItem {
+    Builtin(Action),
+    Plugin(String),
+}
+
+impl<'de> serde::Deserialize<'de> for RunItem {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::IntoDeserializer;
+        let s = String::deserialize(d)?;
+        if s.contains('.') {
+            return Ok(RunItem::Plugin(s));
+        }
+        Action::deserialize(s.as_str().into_deserializer()).map(RunItem::Builtin)
+    }
+}
+
 /// `run`도 하나 또는 배열이다.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 pub enum RunField {
-    One(Action),
-    Many(Vec<Action>),
+    One(RunItem),
+    Many(Vec<RunItem>),
 }
 
 #[derive(Debug, Deserialize)]
@@ -545,55 +572,152 @@ pub fn keymap_path() -> std::path::PathBuf {
         .join("keymap.toml")
 }
 
-fn to_binding(bf: &BindingFile) -> Result<Binding, KeyParseError> {
+enum BindingError {
+    BadKey(String),
+    UnknownPlugin(String),
+}
+
+fn to_binding(bf: &BindingFile, commands: &crate::plugin::PluginCommands) -> Result<Binding, BindingError> {
     let keys: Result<Vec<KeyPress>, KeyParseError> = match &bf.on {
         OnField::One(s) => vec![parse_key(s)].into_iter().collect(),
         OnField::Many(v) => v.iter().map(|s| parse_key(s)).collect(),
     };
-    let actions = match &bf.run {
-        RunField::One(a) => vec![*a],
-        RunField::Many(v) => v.clone(),
+    let keys = keys.map_err(|e| BindingError::BadKey(e.token))?;
+    let items: Vec<&RunItem> = match &bf.run {
+        RunField::One(a) => vec![a],
+        RunField::Many(v) => v.iter().collect(),
     };
-    Ok(Binding { keys: keys?, actions, desc: bf.desc.clone() })
+    let mut actions = Vec::with_capacity(items.len());
+    for it in items {
+        match it {
+            RunItem::Builtin(a) => actions.push(*a),
+            RunItem::Plugin(name) => match commands.find(name) {
+                Some(id) => actions.push(Action::Plugin(id)),
+                None => return Err(BindingError::UnknownPlugin(name.clone())),
+            },
+        }
+    }
+    Ok(Binding { keys, actions, desc: bf.desc.clone() })
 }
 
+/// 이 레이어에 들어갈 플러그인 기본 바인딩.
+///
+/// 내장 기본과 같거나 접두사 관계면 버리고 경고한다(내장이 이기므로 조용히 죽는 키를 알려야 한다).
+/// 사용자 바인딩(prepend/append)과는 접두사 관계일 때만 버린다. 그대로 두면 `check_layer`가
+/// 접두사 충돌 에러를 내어 플러그인 설치가 사용자 키맵 전체를 폴백시킨다. 같은 키는 병합 순서가
+/// 정하는 정상 그림자라 아무 말도 하지 않는다. 플러그인끼리 겹치면 먼저 로드된(알파벳순) 쪽이 남는다.
+fn plugin_default_bindings(
+    commands: &crate::plugin::PluginCommands,
+    layer: LayerId,
+    layer_name: &str,
+    builtin: &[Binding],
+    user: &[&Binding],
+    warnings: &mut Vec<KeymapProblem>,
+) -> Vec<Binding> {
+    let mut out: Vec<Binding> = Vec::new();
+    for (id, cmd) in commands.iter() {
+        let Some(keys) = &cmd.key else { continue };
+        if !cmd.layers.contains(&layer) {
+            continue;
+        }
+        let same = |other: &[KeyPress]| other == keys.as_slice();
+        let prefix_related = |other: &[KeyPress]| !same(other) && (other.starts_with(keys) || keys.starts_with(other));
+        let shadowed_by = builtin
+            .iter()
+            .find(|b| same(&b.keys) || prefix_related(&b.keys))
+            .or_else(|| user.iter().copied().find(|b| prefix_related(&b.keys)));
+        if let Some(b) = shadowed_by {
+            let by = match b.actions.first() {
+                Some(Action::Plugin(pid)) => commands.get(*pid).map(|c| c.full_name()).unwrap_or_default(),
+                Some(a) => format!("{} ({:?})", render_seq(&b.keys), a),
+                None => render_seq(&b.keys),
+            };
+            warnings.push(KeymapProblem::PluginKeyShadowed {
+                plugin: cmd.plugin.clone(),
+                command: cmd.id.clone(),
+                layer: layer_name.to_string(),
+                key: render_seq(keys),
+                by,
+            });
+            continue;
+        }
+        if let Some(b) = out.iter().find(|b| same(&b.keys) || prefix_related(&b.keys)) {
+            let by_plugin = match b.actions.first() {
+                Some(Action::Plugin(pid)) => commands.get(*pid).map(|c| c.plugin.clone()).unwrap_or_default(),
+                _ => String::new(),
+            };
+            warnings.push(KeymapProblem::PluginKeyTaken {
+                plugin: cmd.plugin.clone(),
+                command: cmd.id.clone(),
+                layer: layer_name.to_string(),
+                key: render_seq(keys),
+                by_plugin,
+            });
+            continue;
+        }
+        out.push(Binding { keys: keys.clone(), actions: vec![Action::Plugin(id)], desc: Some(cmd.desc.clone()) });
+    }
+    out
+}
+
+/// 유효 목록은 prepend ++ 내장 기본 ++ 플러그인 기본 ++ append 다. 조회는 첫 일치.
+/// `clear_defaults`는 내장과 플러그인 기본을 함께 버린다.
 /// 잘못된 키 표기를 만나면 그 바인딩만 건너뛰고 계속한다. 조기 반환하면 한 번에
 /// 하나씩만 보고하게 되어 사용자가 여러 번 고쳐야 한다.
 fn merge_layer(
     defaults: Layer,
     lf: &LayerFile,
+    layer_id: LayerId,
     layer_name: &str,
+    commands: &crate::plugin::PluginCommands,
     errors: &mut Vec<KeymapProblem>,
+    warnings: &mut Vec<KeymapProblem>,
 ) -> Layer {
-    let mut push = |out: &mut Vec<Binding>, list: &[BindingFile]| {
+    let mut parse_list = |list: &[BindingFile]| -> Vec<Binding> {
+        let mut out = Vec::new();
         for bf in list {
-            match to_binding(bf) {
+            match to_binding(bf, commands) {
                 Ok(b) => out.push(b),
-                Err(e) => errors.push(KeymapProblem::BadKey {
+                Err(BindingError::BadKey(token)) => errors.push(KeymapProblem::BadKey {
                     layer: layer_name.to_string(),
-                    token: e.token,
+                    token,
+                }),
+                Err(BindingError::UnknownPlugin(name)) => warnings.push(KeymapProblem::UnknownPluginCommand {
+                    layer: layer_name.to_string(),
+                    name,
                 }),
             }
         }
+        out
+    };
+    let prepend = parse_list(&lf.prepend_keymap);
+    let append = parse_list(&lf.append_keymap);
+    let base: Vec<Binding> = if lf.clear_defaults { Vec::new() } else { defaults.bindings };
+    let plugin = if lf.clear_defaults {
+        Vec::new()
+    } else {
+        let user: Vec<&Binding> = prepend.iter().chain(append.iter()).collect();
+        plugin_default_bindings(commands, layer_id, layer_name, &base, &user, warnings)
     };
 
-    let mut out: Vec<Binding> = Vec::new();
-    push(&mut out, &lf.prepend_keymap);
-    if !lf.clear_defaults {
-        out.extend(defaults.bindings);
-    }
-    push(&mut out, &lf.append_keymap);
+    let mut out = prepend;
+    out.extend(base);
+    out.extend(plugin);
+    out.extend(append);
     Layer { bindings: out }
 }
 
-/// 유효 목록은 prepend ++ (clear_defaults가 false일 때만 기본값) ++ append 다.
-/// 조회는 첫 일치이므로 prepend가 기본값을 이긴다.
-/// 키 표기 오류는 `errors`에 모으고, 그 바인딩만 빠진 키맵을 돌려준다.
-pub fn merge(defaults: Keymap, file: &KeymapFile, errors: &mut Vec<KeymapProblem>) -> Keymap {
+pub fn merge(
+    defaults: Keymap,
+    file: &KeymapFile,
+    commands: &crate::plugin::PluginCommands,
+    errors: &mut Vec<KeymapProblem>,
+    warnings: &mut Vec<KeymapProblem>,
+) -> Keymap {
     Keymap {
-        collections: merge_layer(defaults.collections, &file.normal.collections, "normal.collections", errors),
-        entries: merge_layer(defaults.entries, &file.normal.entries, "normal.entries", errors),
-        preview: merge_layer(defaults.preview, &file.normal.preview, "normal.preview", errors),
+        collections: merge_layer(defaults.collections, &file.normal.collections, LayerId::Collections, "normal.collections", commands, errors, warnings),
+        entries: merge_layer(defaults.entries, &file.normal.entries, LayerId::Entries, "normal.entries", commands, errors, warnings),
+        preview: merge_layer(defaults.preview, &file.normal.preview, LayerId::Preview, "normal.preview", commands, errors, warnings),
     }
 }
 
@@ -606,6 +730,9 @@ pub enum KeymapProblem {
     PrefixConflict { layer: String, shorter: String, longer: String },
     DuplicateBinding { layer: String, keys: String },
     LayerNotWired { layer: String },
+    UnknownPluginCommand { layer: String, name: String },
+    PluginKeyShadowed { plugin: String, command: String, layer: String, key: String, by: String },
+    PluginKeyTaken { plugin: String, command: String, layer: String, key: String, by_plugin: String },
 }
 
 pub struct LoadReport {
@@ -614,7 +741,7 @@ pub struct LoadReport {
     pub warnings: Vec<KeymapProblem>,
 }
 
-fn render_seq(keys: &[KeyPress]) -> String {
+pub fn render_seq(keys: &[KeyPress]) -> String {
     keys.iter().map(|k| render_key(*k)).collect::<Vec<_>>().join("")
 }
 
@@ -623,10 +750,10 @@ fn render_seq(keys: &[KeyPress]) -> String {
 /// 병합된 목록에서 중복을 찾으면 안 된다. `prepend_keymap`으로 기본 바인딩을
 /// 덮는 것이 이 기능의 존재 이유인데, 병합 후에는 그것이 중복으로 보인다.
 /// 리맵할 때마다 경고가 뜨면 기능을 쓸 수 없다.
-fn check_duplicates(name: &str, list: &[BindingFile], warnings: &mut Vec<KeymapProblem>) {
+fn check_duplicates(name: &str, list: &[BindingFile], commands: &crate::plugin::PluginCommands, warnings: &mut Vec<KeymapProblem>) {
     let keys: Vec<Vec<KeyPress>> = list
         .iter()
-        .filter_map(|bf| to_binding(bf).ok().map(|b| b.keys))
+        .filter_map(|bf| to_binding(bf, commands).ok().map(|b| b.keys))
         .collect();
     for (i, a) in keys.iter().enumerate() {
         if keys.iter().take(i).any(|b| b == a) {
@@ -667,9 +794,15 @@ fn check_layer(
     }
 }
 
-pub fn load_keymap_from_str(s: &str) -> LoadReport {
+pub fn load_keymap_from_str(s: &str, commands: &crate::plugin::PluginCommands) -> LoadReport {
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
+
+    // 파일이 없거나 비어 있어도 플러그인 기본 키는 들어가야 하므로 폴백도 merge를 거친다.
+    let fallback = |warnings: &mut Vec<KeymapProblem>| {
+        let mut ignored = Vec::new();
+        merge(default_keymap(), &KeymapFile::default(), commands, &mut ignored, warnings)
+    };
 
     // ① 파싱. 문법, 알 수 없는 레이어, 알 수 없는 액션이 여기서 갈린다.
     let file: KeymapFile = match toml::from_str(s) {
@@ -683,7 +816,8 @@ pub fn load_keymap_from_str(s: &str) -> LoadReport {
             } else {
                 KeymapProblem::Syntax { detail }
             };
-            return LoadReport { keymap: default_keymap(), errors: vec![problem], warnings };
+            let keymap = fallback(&mut warnings);
+            return LoadReport { keymap, errors: vec![problem], warnings };
         }
     };
 
@@ -707,7 +841,7 @@ pub fn load_keymap_from_str(s: &str) -> LoadReport {
     }
 
     // ③ 병합. 키 표기 오류를 전부 모은다.
-    let merged = merge(default_keymap(), &file, &mut errors);
+    let merged = merge(default_keymap(), &file, commands, &mut errors, &mut warnings);
 
     // ④ 소스 리스트 안의 중복(경고)과 병합 목록의 접두사 충돌(에러)
     for (name, lf) in [
@@ -715,25 +849,28 @@ pub fn load_keymap_from_str(s: &str) -> LoadReport {
         ("normal.entries", &file.normal.entries),
         ("normal.preview", &file.normal.preview),
     ] {
-        check_duplicates(name, &lf.prepend_keymap, &mut warnings);
-        check_duplicates(name, &lf.append_keymap, &mut warnings);
+        check_duplicates(name, &lf.prepend_keymap, commands, &mut warnings);
+        check_duplicates(name, &lf.append_keymap, commands, &mut warnings);
     }
     check_layer("normal.collections", &merged.collections, &mut errors, &mut warnings);
     check_layer("normal.entries", &merged.entries, &mut errors, &mut warnings);
     check_layer("normal.preview", &merged.preview, &mut errors, &mut warnings);
 
-    // ⑤ 에러가 하나라도 있으면 파일을 통째로 버린다.
+    // ⑤ 에러가 하나라도 있으면 파일을 통째로 버린다. 플러그인 기본 키는 남는다.
     if errors.is_empty() {
         LoadReport { keymap: merged, errors, warnings }
     } else {
-        LoadReport { keymap: default_keymap(), errors, warnings }
+        // 폴백에서 나오는 플러그인 경고는 위에서 이미 한 번 나왔으므로 버린다.
+        let mut dup = Vec::new();
+        let keymap = fallback(&mut dup);
+        LoadReport { keymap, errors, warnings }
     }
 }
 
-pub fn load_keymap() -> LoadReport {
+pub fn load_keymap(commands: &crate::plugin::PluginCommands) -> LoadReport {
     match std::fs::read_to_string(keymap_path()) {
-        Ok(s) => load_keymap_from_str(&s),
-        Err(_) => LoadReport { keymap: default_keymap(), errors: vec![], warnings: vec![] },
+        Ok(s) => load_keymap_from_str(&s, commands),
+        Err(_) => load_keymap_from_str("", commands),
     }
 }
 
@@ -989,7 +1126,7 @@ mod tests {
             [normal.entries]
             prepend_keymap = [ { on = "j", run = "entry_up" } ]
         "#);
-        let km = merge(default_keymap(), &file, &mut Vec::new());
+        let km = merge(default_keymap(), &file, &crate::plugin::PluginCommands::default(), &mut Vec::new(), &mut Vec::new());
         assert_eq!(resolve(&km.entries, &[], kp("j")), Resolution::Run(vec![Action::EntryUp]));
         assert_eq!(resolve(&km.preview, &[], kp("j")), Resolution::Run(vec![Action::PreviewScrollDown]));
     }
@@ -1000,7 +1137,7 @@ mod tests {
             [normal.entries]
             append_keymap = [ { on = "Z", run = "quit" } ]
         "#);
-        let km = merge(default_keymap(), &file, &mut Vec::new());
+        let km = merge(default_keymap(), &file, &crate::plugin::PluginCommands::default(), &mut Vec::new(), &mut Vec::new());
         assert_eq!(resolve(&km.entries, &[], kp("Z")), Resolution::Run(vec![Action::Quit]));
         assert_eq!(resolve(&km.entries, &[], kp("j")), Resolution::Run(vec![Action::EntryDown]));
     }
@@ -1012,7 +1149,7 @@ mod tests {
             clear_defaults = true
             prepend_keymap = [ { on = "x", run = "quit" } ]
         "#);
-        let km = merge(default_keymap(), &file, &mut Vec::new());
+        let km = merge(default_keymap(), &file, &crate::plugin::PluginCommands::default(), &mut Vec::new(), &mut Vec::new());
         assert_eq!(resolve(&km.entries, &[], kp("x")), Resolution::Run(vec![Action::Quit]));
         assert_eq!(resolve(&km.entries, &[], kp("j")), Resolution::Unbound);
         assert_eq!(resolve(&km.collections, &[], kp("j")), Resolution::Run(vec![Action::CollectionDown]));
@@ -1024,7 +1161,7 @@ mod tests {
             [normal.entries]
             prepend_keymap = [ { on = ["g", "b"], run = ["toggle_select", "entry_down"] } ]
         "#);
-        let km = merge(default_keymap(), &file, &mut Vec::new());
+        let km = merge(default_keymap(), &file, &crate::plugin::PluginCommands::default(), &mut Vec::new(), &mut Vec::new());
         assert_eq!(resolve(&km.entries, &[kp("g")], kp("b")),
                    Resolution::Run(vec![Action::ToggleSelect, Action::EntryDown]));
     }
@@ -1035,7 +1172,7 @@ mod tests {
             [normal.entries]
             prepend_keymap = [ { on = "d", run = "noop" } ]
         "#);
-        let km = merge(default_keymap(), &file, &mut Vec::new());
+        let km = merge(default_keymap(), &file, &crate::plugin::PluginCommands::default(), &mut Vec::new(), &mut Vec::new());
         assert_eq!(resolve(&km.entries, &[], kp("d")), Resolution::Run(vec![Action::Noop]));
     }
 
@@ -1045,27 +1182,27 @@ mod tests {
             [normal.entries]
             prepend_keymap = [ { on = "j", run = "entry_down", desc = "한 칸 아래" } ]
         "#);
-        let km = merge(default_keymap(), &file, &mut Vec::new());
+        let km = merge(default_keymap(), &file, &crate::plugin::PluginCommands::default(), &mut Vec::new(), &mut Vec::new());
         let bind = km.entries.bindings.iter().find(|b| b.keys == vec![kp("j")]).unwrap();
         assert_eq!(bind.desc.as_deref(), Some("한 칸 아래"));
     }
 
     fn check(s: &str) -> (Vec<KeymapProblem>, Vec<KeymapProblem>) {
-        let r = load_keymap_from_str(s);
+        let r = load_keymap_from_str(s, &crate::plugin::PluginCommands::default());
         (r.errors, r.warnings)
     }
 
     #[test]
     fn the_default_keymap_itself_validates_clean() {
         // 기본 키맵에 접두사 충돌이나 중복이 있으면 사용자 파일이 없어도 경고가 뜬다.
-        let r = load_keymap_from_str("");
+        let r = load_keymap_from_str("", &crate::plugin::PluginCommands::default());
         assert!(r.errors.is_empty(), "default keymap has errors: {:?}", r.errors);
         assert!(r.warnings.is_empty(), "default keymap has warnings: {:?}", r.warnings);
     }
 
     #[test]
     fn a_toml_syntax_error_is_reported_and_falls_back_to_defaults() {
-        let r = load_keymap_from_str("[normal.entries]\nprepend_keymap = [\n");
+        let r = load_keymap_from_str("[normal.entries]\nprepend_keymap = [\n", &crate::plugin::PluginCommands::default());
         assert!(!r.errors.is_empty());
         assert_eq!(resolve(&r.keymap.entries, &[], kp("j")), Resolution::Run(vec![Action::EntryDown]));
     }
@@ -1117,7 +1254,7 @@ mod tests {
               { on = "x", run = "quit" },
               { on = "x", run = "undo" },
             ]
-        "#);
+        "#, &crate::plugin::PluginCommands::default());
         assert!(r.errors.is_empty(), "a duplicate must not discard the file, got {:?}", r.errors);
         assert!(!r.warnings.is_empty());
         assert_eq!(resolve(&r.keymap.entries, &[], kp("x")), Resolution::Run(vec![Action::Quit]));
@@ -1131,7 +1268,7 @@ mod tests {
 
             [normal.entries]
             prepend_keymap = [ { on = "j", run = "entry_up" } ]
-        "#);
+        "#, &crate::plugin::PluginCommands::default());
         assert!(r.errors.is_empty(), "got {:?}", r.errors);
         assert!(!r.warnings.is_empty());
         assert_eq!(resolve(&r.keymap.entries, &[], kp("j")), Resolution::Run(vec![Action::EntryUp]));
@@ -1145,7 +1282,7 @@ mod tests {
               { on = "j", run = "entry_up" },
               { on = "x", run = "opne_pdf" },
             ]
-        "#);
+        "#, &crate::plugin::PluginCommands::default());
         assert!(!r.errors.is_empty());
         // 좋은 바인딩까지 전부 버리고 기본값으로 간다.
         assert_eq!(resolve(&r.keymap.entries, &[], kp("j")), Resolution::Run(vec![Action::EntryDown]));
@@ -1177,9 +1314,156 @@ mod tests {
         let r = load_keymap_from_str(r#"
             [normal.entries]
             prepend_keymap = [ { on = "j", run = "entry_up" } ]
-        "#);
+        "#, &crate::plugin::PluginCommands::default());
         assert!(r.errors.is_empty(), "got {:?}", r.errors);
         assert!(r.warnings.is_empty(), "overriding a default must be silent, got {:?}", r.warnings);
         assert_eq!(resolve(&r.keymap.entries, &[], kp("j")), Resolution::Run(vec![Action::EntryUp]));
+    }
+
+    // ── 플러그인 명령 ──
+
+    fn cmds(specs: &[(&str, &str, Option<&str>, &[LayerId])]) -> crate::plugin::PluginCommands {
+        use crate::plugin::manifest::{Command, Manifest};
+        let mut by_plugin: std::collections::BTreeMap<String, Vec<Command>> = Default::default();
+        for (plugin, id, key, layers) in specs {
+            by_plugin.entry(plugin.to_string()).or_default().push(Command {
+                id: id.to_string(),
+                desc: format!("{} desc", id),
+                key: key.map(|k| k.split(' ').map(|t| parse_key(t).unwrap()).collect()),
+                layers: layers.to_vec(),
+                menu: false,
+            });
+        }
+        let manifests: Vec<Manifest> = by_plugin
+            .into_iter()
+            .map(|(name, commands)| Manifest {
+                name,
+                version: None,
+                description: None,
+                run: vec!["sh".into()],
+                commands,
+                hooks: vec![],
+                cli: None,
+                dir: std::path::PathBuf::from("/tmp"),
+            })
+            .collect();
+        let env = crate::plugin::PluginEnv {
+            bin: "/bin/true".into(), config_dir: "/tmp".into(), db: "/tmp/db.json".into(),
+            notes: "/tmp/n".into(), pdfs: "/tmp/p".into(), home: None,
+        };
+        crate::plugin::PluginHost::new(manifests, Default::default(), Default::default(), env).commands().clone()
+    }
+
+    const ALL: &[LayerId] = &[LayerId::Collections, LayerId::Entries, LayerId::Preview];
+
+    #[test]
+    fn a_plugin_default_key_lands_in_its_layers_with_its_desc() {
+        let c = cmds(&[("tidy", "run", Some("="), &[LayerId::Entries])]);
+        let r = load_keymap_from_str("", &c);
+        assert!(r.errors.is_empty() && r.warnings.is_empty(), "{:?} {:?}", r.errors, r.warnings);
+        let id = c.find("tidy.run").unwrap();
+        let hit = r.keymap.entries.bindings.iter().find(|b| b.actions == vec![Action::Plugin(id)]).unwrap();
+        assert_eq!(hit.keys, vec![parse_key("=").unwrap()]);
+        assert_eq!(hit.desc.as_deref(), Some("run desc"));
+        assert!(!r.keymap.collections.bindings.iter().any(|b| b.actions == vec![Action::Plugin(id)]));
+    }
+
+    #[test]
+    fn a_user_can_bind_a_plugin_command_by_its_full_name() {
+        let c = cmds(&[("tidy", "run", None, ALL)]);
+        let toml = "[normal.entries]\nprepend_keymap = [{ on = \"<C-t>\", run = \"tidy.run\" }]\n";
+        let r = load_keymap_from_str(toml, &c);
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        let id = c.find("tidy.run").unwrap();
+        assert_eq!(resolve(&r.keymap.entries, &[], parse_key("<C-t>").unwrap()), Resolution::Run(vec![Action::Plugin(id)]));
+    }
+
+    #[test]
+    fn a_plugin_command_can_sit_in_a_run_list_next_to_builtins() {
+        let c = cmds(&[("tidy", "run", None, ALL)]);
+        let toml = "[normal.entries]\nprepend_keymap = [{ on = \"x\", run = [\"tidy.run\", \"entry_down\"] }]\n";
+        let r = load_keymap_from_str(toml, &c);
+        let id = c.find("tidy.run").unwrap();
+        assert_eq!(resolve(&r.keymap.entries, &[], parse_key("x").unwrap()), Resolution::Run(vec![Action::Plugin(id), Action::EntryDown]));
+    }
+
+    #[test]
+    fn an_unknown_plugin_reference_is_a_warning_that_drops_only_that_binding() {
+        let c = cmds(&[]);
+        let toml = "[normal.entries]\nprepend_keymap = [{ on = \"x\", run = \"gone.cmd\" }, { on = \"y\", run = \"entry_down\" }]\n";
+        let r = load_keymap_from_str(toml, &c);
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert_eq!(r.warnings, vec![KeymapProblem::UnknownPluginCommand { layer: "normal.entries".into(), name: "gone.cmd".into() }]);
+        assert_eq!(resolve(&r.keymap.entries, &[], parse_key("y").unwrap()), Resolution::Run(vec![Action::EntryDown]));
+        assert_eq!(resolve(&r.keymap.entries, &[], parse_key("x").unwrap()), Resolution::Unbound);
+    }
+
+    #[test]
+    fn an_unknown_builtin_action_name_is_still_an_error() {
+        let c = cmds(&[]);
+        let r = load_keymap_from_str("[normal.entries]\nprepend_keymap = [{ on = \"x\", run = \"entry_dwon\" }]\n", &c);
+        assert!(matches!(r.errors[0], KeymapProblem::UnknownAction { .. }));
+    }
+
+    #[test]
+    fn merge_order_is_user_prepend_then_builtin_then_plugin_then_user_append() {
+        let c = cmds(&[("p", "cmd", Some("j"), &[LayerId::Entries]), ("p", "cmd2", Some("z"), &[LayerId::Entries])]);
+        let toml = "[normal.entries]\nprepend_keymap = [{ on = \"z\", run = \"entry_up\" }]\nappend_keymap = [{ on = \"z\", run = \"entry_top\" }]\n";
+        let r = load_keymap_from_str(toml, &c);
+        // j: 플러그인이 내장 j를 덮으려 했지만 내장이 이긴다 (경고)
+        assert_eq!(resolve(&r.keymap.entries, &[], parse_key("j").unwrap()), Resolution::Run(vec![Action::EntryDown]));
+        // z: 사용자 prepend가 플러그인을 이긴다 (경고 없음. 정상 그림자)
+        assert_eq!(resolve(&r.keymap.entries, &[], parse_key("z").unwrap()), Resolution::Run(vec![Action::EntryUp]));
+        assert_eq!(r.warnings.len(), 1, "{:?}", r.warnings);
+        assert!(matches!(&r.warnings[0], KeymapProblem::PluginKeyShadowed { plugin, command, key, .. } if plugin == "p" && command == "cmd" && key == "j"));
+    }
+
+    #[test]
+    fn a_plugin_key_that_is_a_prefix_of_an_existing_binding_is_dropped_not_an_error() {
+        let c = cmds(&[("p", "cmd", Some("g"), &[LayerId::Entries])]); // 내장 "g g"의 접두사
+        let r = load_keymap_from_str("", &c);
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert!(matches!(&r.warnings[0], KeymapProblem::PluginKeyShadowed { key, by, .. } if key == "g" && by.contains("gg")));
+        assert_eq!(resolve(&r.keymap.entries, &[], parse_key("g").unwrap()), Resolution::Pending);
+    }
+
+    #[test]
+    fn a_plugin_key_that_extends_a_user_binding_is_dropped_too() {
+        let c = cmds(&[("p", "cmd", Some("x y"), &[LayerId::Entries])]);
+        let toml = "[normal.entries]\nappend_keymap = [{ on = \"x\", run = \"entry_down\" }]\n";
+        let r = load_keymap_from_str(toml, &c);
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert!(matches!(&r.warnings[0], KeymapProblem::PluginKeyShadowed { key, .. } if key == "xy"));
+    }
+
+    #[test]
+    fn two_plugins_on_the_same_key_keep_the_first_and_warn() {
+        let c = cmds(&[("a", "cmd", Some("="), &[LayerId::Entries]), ("b", "cmd", Some("="), &[LayerId::Entries])]);
+        let r = load_keymap_from_str("", &c);
+        let a = c.find("a.cmd").unwrap();
+        assert_eq!(resolve(&r.keymap.entries, &[], parse_key("=").unwrap()), Resolution::Run(vec![Action::Plugin(a)]));
+        assert!(matches!(&r.warnings[0], KeymapProblem::PluginKeyTaken { plugin, by_plugin, .. } if plugin == "b" && by_plugin == "a"));
+    }
+
+    #[test]
+    fn clear_defaults_drops_plugin_defaults_as_well() {
+        let c = cmds(&[("p", "cmd", Some("="), &[LayerId::Entries])]);
+        let r = load_keymap_from_str("[normal.entries]\nclear_defaults = true\n", &c);
+        assert_eq!(resolve(&r.keymap.entries, &[], parse_key("=").unwrap()), Resolution::Unbound);
+    }
+
+    #[test]
+    fn the_default_keymap_is_unchanged_when_there_are_no_plugins() {
+        let r = load_keymap_from_str("", &crate::plugin::PluginCommands::default());
+        assert_eq!(r.keymap.entries, default_keymap().entries);
+        assert_eq!(r.keymap.collections, default_keymap().collections);
+        assert_eq!(r.keymap.preview, default_keymap().preview);
+    }
+
+    #[test]
+    fn plugin_actions_have_a_section_and_a_desc() {
+        let a = Action::Plugin(crate::plugin::PluginCmdId(0));
+        assert_eq!(a.section(), "Plugins");
+        assert!(!a.desc().is_empty());
     }
 }

@@ -4009,7 +4009,7 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
     } else { 0 };
 
     // ── 키맵 검증 ────────────────────────────────────────────────────────────
-    let km_report = crate::keymap::load_keymap();
+    let km_report = crate::keymap::load_keymap(&crate::plugin::PluginCommands::default());
     for p in km_report.errors.iter().chain(km_report.warnings.iter()) {
         issues.push(Issue {
             kind: "keymap_problem".into(),
