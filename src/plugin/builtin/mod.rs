@@ -1,6 +1,8 @@
 //! 바이너리 안에 있는 플러그인들. 사용자 디렉토리에는 `builtin = "<name>"` 스텁만 있고,
 //! 매니페스트와 코드는 여기 있다. bibox가 `bibox plugin run <name>`으로 자기 자신을 띄운다.
 
+pub mod git_sync;
+
 #[derive(Clone, Copy)]
 pub struct Builtin {
     pub name: &'static str,
@@ -10,7 +12,7 @@ pub struct Builtin {
     pub run: fn(),
 }
 
-pub const BUILTINS: &[Builtin] = &[];
+pub const BUILTINS: &[Builtin] = &[git_sync::BUILTIN];
 
 pub fn find(name: &str) -> Option<&'static Builtin> {
     BUILTINS.iter().find(|b| b.name == name)
