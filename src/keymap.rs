@@ -1344,6 +1344,7 @@ mod tests {
                 commands,
                 hooks: vec![],
                 cli: None,
+                builtin: None,
                 dir: std::path::PathBuf::from("/tmp"),
             })
             .collect();

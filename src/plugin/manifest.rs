@@ -50,7 +50,10 @@ struct ManifestFile {
     version: Option<String>,
     #[serde(default)]
     description: Option<String>,
-    run: String,
+    #[serde(default)]
+    run: Option<String>,
+    #[serde(default)]
+    builtin: Option<String>,
     #[serde(default)]
     commands: Vec<CommandFile>,
     #[serde(default)]
@@ -111,6 +114,7 @@ pub struct Manifest {
     pub commands: Vec<Command>,
     pub hooks: Vec<Hook>,
     pub cli: Option<Vec<String>>,
+    pub builtin: Option<String>,
     pub dir: PathBuf,
 }
 
@@ -176,6 +180,16 @@ fn dir_name(dir: &Path) -> String {
 /// 파싱 이후 문제는 전부 `problems`에 모은다. 오류 등급 문제가 하나라도 있으면 `None`.
 /// TOML 문법 오류는 serde가 첫 오류에서 멈추므로 하나만 나온다(키맵과 같은 한계).
 pub fn parse_manifest(dir: &Path, text: &str, problems: &mut Vec<PluginProblem>) -> Option<Manifest> {
+    parse_manifest_with(dir, text, problems, crate::plugin::builtin::BUILTINS)
+}
+
+/// `builtins`를 인자로 받는 것은 테스트가 가짜 내장 목록을 넣기 위해서다.
+pub fn parse_manifest_with(
+    dir: &Path,
+    text: &str,
+    problems: &mut Vec<PluginProblem>,
+    builtins: &[crate::plugin::builtin::Builtin],
+) -> Option<Manifest> {
     let plugin = dir_name(dir);
     let err = |detail: String| PluginProblem::Manifest { plugin: plugin.clone(), detail };
 
@@ -186,6 +200,79 @@ pub fn parse_manifest(dir: &Path, text: &str, problems: &mut Vec<PluginProblem>)
             return None;
         }
     };
+
+    match (&file.run, &file.builtin) {
+        (Some(_), Some(_)) => {
+            problems.push(err("run and builtin are mutually exclusive".to_string()));
+            None
+        }
+        (None, None) => {
+            problems.push(err("run or builtin is required".to_string()));
+            None
+        }
+        (None, Some(b)) => expand_stub(dir, &file, b, problems, builtins),
+        (Some(_), None) => build(dir, file, None, problems),
+    }
+}
+
+/// 스텁을 바이너리 안의 매니페스트로 바꾼다. 스텁에는 api, name, builtin만 있어야 한다.
+fn expand_stub(
+    dir: &Path,
+    file: &ManifestFile,
+    builtin: &str,
+    problems: &mut Vec<PluginProblem>,
+    builtins: &[crate::plugin::builtin::Builtin],
+) -> Option<Manifest> {
+    let plugin = dir_name(dir);
+    let err = |detail: String| PluginProblem::Manifest { plugin: plugin.clone(), detail };
+
+    let extra = file.version.is_some() || file.description.is_some() || !file.commands.is_empty() || !file.hooks.is_empty() || file.cli.is_some();
+    if extra {
+        problems.push(err("a built-in stub carries only api, name and builtin".to_string()));
+        return None;
+    }
+    if file.api != SUPPORTED_API {
+        problems.push(err(format!("bibox supports api {}, plugin declares {}", SUPPORTED_API, file.api)));
+        return None;
+    }
+    if builtin != file.name {
+        problems.push(err(format!("builtin \"{}\" must equal name \"{}\"", builtin, file.name)));
+        return None;
+    }
+    if file.name != plugin {
+        problems.push(err(format!("name \"{}\" must equal the directory name \"{}\"", file.name, plugin)));
+        return None;
+    }
+    let Some(b) = builtins.iter().find(|b| b.name == builtin) else {
+        problems.push(err(format!("unknown built-in plugin \"{}\" (downgraded bibox?)", builtin)));
+        return None;
+    };
+    let exe = match std::env::current_exe() {
+        Ok(p) => p.to_string_lossy().to_string(),
+        Err(e) => {
+            problems.push(err(format!("cannot locate the bibox executable: {}", e)));
+            return None;
+        }
+    };
+    let embedded: ManifestFile = match toml::from_str(b.manifest) {
+        Ok(f) => f,
+        Err(e) => {
+            // bibox 자체의 버그다. every_real_builtin_manifest_expands_cleanly 테스트가 막는다.
+            problems.push(err(format!("embedded manifest for {} is broken: {}", builtin, e)));
+            return None;
+        }
+    };
+    let run = vec![exe, "plugin".to_string(), "run".to_string(), builtin.to_string()];
+    let mut m = build(dir, embedded, Some(run), problems)?;
+    m.builtin = Some(builtin.to_string());
+    m.version = Some(env!("CARGO_PKG_VERSION").to_string());
+    Some(m)
+}
+
+/// 검증 본체. `run_override`가 있으면(내장) 파일의 `run`을 보지 않는다.
+fn build(dir: &Path, file: ManifestFile, run_override: Option<Vec<String>>, problems: &mut Vec<PluginProblem>) -> Option<Manifest> {
+    let plugin = dir_name(dir);
+    let err = |detail: String| PluginProblem::Manifest { plugin: plugin.clone(), detail };
 
     let mut fatal = false;
     if file.api != SUPPORTED_API {
@@ -199,7 +286,10 @@ pub fn parse_manifest(dir: &Path, text: &str, problems: &mut Vec<PluginProblem>)
         problems.push(err(format!("name \"{}\" must match [a-z0-9][a-z0-9-]{{0,63}}", file.name)));
         fatal = true;
     }
-    let run: Vec<String> = file.run.split_whitespace().map(str::to_string).collect();
+    let run: Vec<String> = match run_override {
+        Some(r) => r,
+        None => file.run.as_deref().unwrap_or("").split_whitespace().map(str::to_string).collect(),
+    };
     if run.is_empty() {
         problems.push(err("run must name a program".to_string()));
         fatal = true;
@@ -310,6 +400,7 @@ pub fn parse_manifest(dir: &Path, text: &str, problems: &mut Vec<PluginProblem>)
         commands,
         hooks,
         cli,
+        builtin: None,
         dir: dir.to_path_buf(),
     })
 }
@@ -516,5 +607,82 @@ run = "python3 cli.py"
         let (manifests, problems) = crate::plugin::discover(std::path::Path::new("/nonexistent/bibox/plugins"));
         assert!(manifests.is_empty());
         assert!(problems.is_empty());
+    }
+    // ── 내장 스텁 ──
+
+    fn noop() {}
+
+    const TEST_BUILTINS: &[crate::plugin::builtin::Builtin] = &[crate::plugin::builtin::Builtin {
+        name: "demo",
+        manifest: "api = 1\nname = \"demo\"\ndescription = \"Demo plugin\"\n[[commands]]\nid = \"hello\"\ndesc = \"Say hello\"\nkey = \"<C-g>\"\n[[hooks]]\non = \"after_write\"\nrun = \"hello\"\n",
+        run: noop,
+    }];
+
+    const STUB: &str = "api = 1\nname = \"demo\"\nbuiltin = \"demo\"\n";
+
+    #[test]
+    fn a_stub_expands_to_the_embedded_manifest_run_by_this_executable() {
+        let mut problems = vec![];
+        let m = parse_manifest_with(&dir("demo"), STUB, &mut problems, TEST_BUILTINS).expect("manifest");
+        assert!(problems.is_empty(), "{:?}", problems);
+        assert_eq!(m.builtin.as_deref(), Some("demo"));
+        assert_eq!(m.description.as_deref(), Some("Demo plugin"));
+        assert_eq!(m.version.as_deref(), Some(env!("CARGO_PKG_VERSION")));
+        assert_eq!(m.commands.len(), 1);
+        assert_eq!(m.commands[0].id, "hello");
+        assert_eq!(m.hooks.len(), 1);
+        let exe = std::env::current_exe().unwrap().to_string_lossy().to_string();
+        assert_eq!(m.run, vec![exe, "plugin".to_string(), "run".to_string(), "demo".to_string()]);
+        assert_eq!(m.dir, dir("demo"));
+    }
+
+    #[test]
+    fn an_unknown_builtin_name_is_a_manifest_error() {
+        let mut problems = vec![];
+        assert!(parse_manifest_with(&dir("gone"), "api = 1\nname = \"gone\"\nbuiltin = \"gone\"\n", &mut problems, TEST_BUILTINS).is_none());
+        assert!(matches!(&problems[0], PluginProblem::Manifest { detail, .. } if detail.contains("unknown built-in")));
+    }
+
+    #[test]
+    fn run_and_builtin_are_mutually_exclusive_and_one_is_required() {
+        let mut problems = vec![];
+        assert!(parse_manifest_with(&dir("demo"), "api = 1\nname = \"demo\"\nrun = \"sh\"\nbuiltin = \"demo\"\n", &mut problems, TEST_BUILTINS).is_none());
+        assert!(matches!(&problems[0], PluginProblem::Manifest { detail, .. } if detail.contains("mutually exclusive")));
+        let mut problems = vec![];
+        assert!(parse_manifest_with(&dir("demo"), "api = 1\nname = \"demo\"\n", &mut problems, TEST_BUILTINS).is_none());
+        assert!(matches!(&problems[0], PluginProblem::Manifest { detail, .. } if detail.contains("run or builtin")));
+    }
+
+    #[test]
+    fn a_stub_with_extra_fields_is_rejected() {
+        let mut problems = vec![];
+        let text = "api = 1\nname = \"demo\"\nbuiltin = \"demo\"\ndescription = \"x\"\n";
+        assert!(parse_manifest_with(&dir("demo"), text, &mut problems, TEST_BUILTINS).is_none());
+        assert!(matches!(&problems[0], PluginProblem::Manifest { detail, .. } if detail.contains("only api, name and builtin")));
+    }
+
+    #[test]
+    fn a_stub_whose_builtin_differs_from_its_name_is_rejected() {
+        let mut problems = vec![];
+        let text = "api = 1\nname = \"other\"\nbuiltin = \"demo\"\n";
+        assert!(parse_manifest_with(&dir("other"), text, &mut problems, TEST_BUILTINS).is_none());
+        assert!(matches!(&problems[0], PluginProblem::Manifest { detail, .. } if detail.contains("must equal name")));
+    }
+
+    #[test]
+    fn every_real_builtin_manifest_expands_cleanly() {
+        for b in crate::plugin::builtin::BUILTINS {
+            let stub = format!("api = 1\nname = \"{0}\"\nbuiltin = \"{0}\"\n", b.name);
+            let mut problems = vec![];
+            let m = parse_manifest_with(&dir(b.name), &stub, &mut problems, crate::plugin::builtin::BUILTINS);
+            assert!(m.is_some() && problems.is_empty(), "{}: {:?}", b.name, problems);
+        }
+    }
+
+    #[test]
+    fn a_normal_manifest_has_no_builtin() {
+        let mut problems = vec![];
+        let m = parse_manifest(&dir("entry-tidy"), OK, &mut problems).unwrap();
+        assert_eq!(m.builtin, None);
     }
 }
