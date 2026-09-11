@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use crate::config::Config;
 use crate::plugin::host::{apply_env, PluginEnv};
 use crate::plugin::manifest::{parse_manifest, PluginProblem};
-use crate::plugin::{discover, plugins_dir, PluginHost};
+use crate::plugin::{discover, plugins_dir, Manifest, PluginHost};
 
 /// 헬퍼의 단일 출처는 레포의 `plugins/lib/bibox_plugin.py`다. `plugin new`가 이 사본을 넣는다.
 pub const HELPER_PY: &str = include_str!("../../plugins/lib/bibox_plugin.py");
@@ -18,12 +18,16 @@ pub const BUILTIN_SUBCOMMANDS: &[&str] = &[
 
 #[derive(Debug, PartialEq)]
 pub enum Source {
+    Builtin(String),
     Local(PathBuf),
     GitHub { owner: String, repo: String, subdir: Option<PathBuf> },
     Url(String),
 }
 
 pub fn parse_source(s: &str) -> Source {
+    if !s.contains('/') && !s.contains("://") && crate::plugin::builtin::find(s).is_some() {
+        return Source::Builtin(s.to_string());
+    }
     let p = Path::new(s);
     if p.is_dir() {
         return Source::Local(p.to_path_buf());
@@ -53,26 +57,58 @@ pub fn which(program: &str) -> bool {
 
 // ── list ────────────────────────────────────────────────────────────────────
 
-pub fn cmd_plugin_list(json: bool, config: &Config) -> Result<()> {
-    let dir = plugins_dir();
-    let (manifests, problems) = discover(&dir);
-    let disabled = crate::config::disabled_plugins(config);
-    let mut rows: Vec<(String, String, String, String)> = Vec::new(); // name, version, status, description
-    for m in &manifests {
-        let status = if disabled.contains(&m.name) { "disabled".to_string() } else { "ok".to_string() };
-        rows.push((m.name.clone(), m.version.clone().unwrap_or_default(), status, m.description.clone().unwrap_or_default()));
+pub struct ListRow {
+    pub name: String,
+    pub version: String,
+    pub source: String,
+    pub description: String,
+    pub builtin: bool,
+}
+
+/// `built-in`(스텁), `local`(심링크), `git`(.git 있음), `dir`.
+pub fn source_of(dir: &Path, m: &Manifest) -> &'static str {
+    if m.builtin.is_some() {
+        return "built-in";
     }
+    let path = dir.join(&m.name);
+    if std::fs::symlink_metadata(&path).map(|md| md.file_type().is_symlink()).unwrap_or(false) {
+        return "local";
+    }
+    if path.join(".git").exists() {
+        return "git";
+    }
+    "dir"
+}
+
+pub fn list_rows(dir: &Path) -> Vec<ListRow> {
+    let (manifests, problems) = discover(dir);
+    let mut rows: Vec<ListRow> = manifests
+        .iter()
+        .map(|m| ListRow {
+            name: m.name.clone(),
+            version: m.version.clone().unwrap_or_default(),
+            source: source_of(dir, m).to_string(),
+            description: m.description.clone().unwrap_or_default(),
+            builtin: m.builtin.is_some(),
+        })
+        .collect();
     for p in &problems {
         if let PluginProblem::Manifest { plugin, detail } = p {
-            rows.push((plugin.clone(), String::new(), format!("error: {}", detail), String::new()));
+            rows.push(ListRow { name: plugin.clone(), version: String::new(), source: "error".to_string(), description: detail.clone(), builtin: false });
         }
     }
-    rows.sort_by(|a, b| a.0.cmp(&b.0));
+    rows.sort_by(|a, b| a.name.cmp(&b.name));
+    rows
+}
 
+pub fn cmd_plugin_list(json: bool, _config: &Config) -> Result<()> {
+    let dir = plugins_dir();
+    crate::plugin::seed_builtins(&dir);
+    let rows = list_rows(&dir);
     if json {
         let v: Vec<serde_json::Value> = rows
             .iter()
-            .map(|(n, v, s, d)| serde_json::json!({ "name": n, "version": v, "status": s, "description": d, "dir": dir.join(n) }))
+            .map(|r| serde_json::json!({ "name": r.name, "version": r.version, "source": r.source, "builtin": r.builtin, "description": r.description, "dir": dir.join(&r.name) }))
             .collect();
         println!("{}", serde_json::to_string_pretty(&v)?);
         return Ok(());
@@ -81,9 +117,9 @@ pub fn cmd_plugin_list(json: bool, config: &Config) -> Result<()> {
         println!("(no plugins in {})", dir.display());
         return Ok(());
     }
-    println!("{:<20} {:<10} {:<28} DESCRIPTION", "NAME", "VERSION", "STATUS");
-    for (n, v, s, d) in rows {
-        println!("{:<20} {:<10} {:<28} {}", n, v, s, d);
+    println!("{:<20} {:<10} {:<10} DESCRIPTION", "NAME", "VERSION", "SOURCE");
+    for r in rows {
+        println!("{:<20} {:<10} {:<10} {}", r.name, r.version, r.source, r.description);
     }
     Ok(())
 }
@@ -94,6 +130,15 @@ pub fn cmd_plugin_install(source: &str, yes: bool, config: &Config) -> Result<()
     let dir = plugins_dir();
     std::fs::create_dir_all(&dir)?;
     match parse_source(source) {
+        Source::Builtin(name) => {
+            let dest = dir.join(&name);
+            if dest.exists() {
+                bail!("{} already exists", dest.display());
+            }
+            crate::plugin::write_stub(&dir, &name)?;
+            println!("{}", config.msgs.plugin_installed(&name, &dest.display().to_string()));
+            Ok(())
+        }
         Source::Local(path) => {
             let path = path.canonicalize()?;
             let text = std::fs::read_to_string(path.join("plugin.toml"))
@@ -387,5 +432,48 @@ mod tests {
         assert!(root.join("my-plugin/bibox_plugin.py").exists());
         assert_eq!(std::fs::read_to_string(root.join("my-plugin/.gitignore")).unwrap().trim(), "stderr.log");
         let _ = std::fs::remove_dir_all(&root);
+    }
+    #[test]
+    fn a_bare_builtin_name_is_a_builtin_source() {
+        assert!(matches!(parse_source("git-sync"), Source::Builtin(n) if n == "git-sync"));
+        assert!(matches!(parse_source("someone/git-sync"), Source::GitHub { .. }));
+        assert!(matches!(parse_source("not-a-builtin-xyz"), Source::Url(_)));
+    }
+
+    #[test]
+    fn list_rows_tell_built_in_local_git_and_plain_apart() {
+        let dir = std::env::temp_dir().join(format!("bibox-list-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // built-in stub
+        crate::plugin::write_stub(&dir, "git-sync").unwrap();
+        // plain dir
+        std::fs::create_dir_all(dir.join("plain")).unwrap();
+        std::fs::write(dir.join("plain/plugin.toml"), "api = 1\nname = \"plain\"\nrun = \"sh\"\nversion = \"0.2.0\"\n").unwrap();
+        // git clone
+        std::fs::create_dir_all(dir.join("cloned/.git")).unwrap();
+        std::fs::write(dir.join("cloned/plugin.toml"), "api = 1\nname = \"cloned\"\nrun = \"sh\"\n").unwrap();
+        // symlink
+        let src = dir.join("src-of-local");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("plugin.toml"), "api = 1\nname = \"local\"\nrun = \"sh\"\n").unwrap();
+        std::os::unix::fs::symlink(&src, dir.join("local")).unwrap();
+        // broken
+        std::fs::create_dir_all(dir.join("broken")).unwrap();
+        std::fs::write(dir.join("broken/plugin.toml"), "api = 1\nname = \"broken\"\n").unwrap();
+
+        let rows = list_rows(&dir);
+        let get = |n: &str| rows.iter().find(|r| r.name == n).unwrap_or_else(|| panic!("row {}", n));
+        assert_eq!(get("git-sync").source, "built-in");
+        assert!(get("git-sync").builtin);
+        assert_eq!(get("git-sync").version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(get("plain").source, "dir");
+        assert_eq!(get("plain").version, "0.2.0");
+        assert_eq!(get("cloned").source, "git");
+        assert_eq!(get("local").source, "local");
+        assert_eq!(get("broken").source, "error");
+        assert!(get("broken").description.contains("run or builtin"));
+        assert!(rows.windows(2).all(|w| w[0].name <= w[1].name), "sorted");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
