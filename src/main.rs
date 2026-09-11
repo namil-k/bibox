@@ -15,6 +15,7 @@ mod models;
 mod notes;
 mod openlibrary;
 mod pdf;
+mod plugin;
 mod storage;
 #[cfg(feature = "tui")]
 mod tui;
