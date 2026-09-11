@@ -1,0 +1,13 @@
+api = 1
+name = "git-push"
+version = "0.1.0"
+description = "Push the library repository after every write (needs git = true)"
+run = "python3 main.py"
+
+[[commands]]
+id = "push"
+desc = "Push the library repository"
+
+[[hooks]]
+on = "after_write"
+run = "push"

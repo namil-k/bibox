@@ -1,0 +1,15 @@
+api = 1
+name = "entry-tidy"
+version = "0.1.0"
+description = "Normalize author names, title case and whitespace"
+run = "python3 main.py"
+
+[[commands]]
+id = "tidy"
+desc = "Normalize the selected entries"
+key = "="
+menu = true
+
+[[hooks]]
+on = "before_add"
+run = "tidy"

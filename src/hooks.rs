@@ -65,7 +65,13 @@ pub struct HookRunner {
 impl HookRunner {
     /// CLI용. 매니페스트 문제는 무시한다(doctor와 TUI 시작 화면이 보여준다).
     pub fn from_config(config: &Config) -> HookRunner {
-        let (host, _problems) = PluginHost::discover(config);
+        // 훅 안에서 불린 bibox는 플러그인 훅을 다시 발화하지 않는다(프로세스 경계를 넘는 무한 루프 방지).
+        // 헬퍼가 `$BIBOX_BIN`을 되부를 때 이 변수를 붙인다. git auto-commit은 그대로 한다.
+        let host = if std::env::var_os("BIBOX_IN_HOOK").is_some() {
+            PluginHost::empty(crate::plugin::PluginEnv::from_config(config))
+        } else {
+            PluginHost::discover(config).0
+        };
         HookRunner {
             host: Arc::new(host),
             git: config.git,
@@ -296,5 +302,16 @@ mod tests {
         let db = crate::storage::load_db(&db_path).unwrap();
         assert_eq!(db.entries[0].title.as_deref(), Some("From hook"));
         assert!(apply_from_hook(&db_path, &[serde_json::json!({"id": "zzz"})]).is_err());
+    }
+
+    #[test]
+    fn from_config_inside_a_hook_has_no_plugin_hooks_but_keeps_git() {
+        std::env::set_var("BIBOX_IN_HOOK", "1");
+        let mut config = crate::config::Config::default();
+        config.git = true;
+        let r = HookRunner::from_config(&config);
+        std::env::remove_var("BIBOX_IN_HOOK");
+        assert!(r.host.commands().is_empty());
+        assert!(r.git);
     }
 }
