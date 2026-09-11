@@ -110,3 +110,27 @@ fn clear_lines(n: usize, stdout: &mut io::Stdout) -> Result<()> {
     execute!(stdout, cursor::MoveUp(n as u16))?;
     Ok(())
 }
+
+/// 한 줄 입력. 빈 입력이면 `default`. EOF면 None.
+pub fn prompt_line(title: &str, default: &str) -> Option<String> {
+    if default.is_empty() {
+        print!("{}: ", title);
+    } else {
+        print!("{} [{}]: ", title, default);
+    }
+    let _ = io::stdout().flush();
+    let mut buf = String::new();
+    if io::stdin().read_line(&mut buf).unwrap_or(0) == 0 {
+        return None;
+    }
+    let s = buf.trim_end_matches(['\n', '\r']);
+    Some(if s.is_empty() { default.to_string() } else { s.to_string() })
+}
+
+pub fn prompt_yes_no(title: &str) -> bool {
+    print!("{} [y/N] ", title);
+    let _ = io::stdout().flush();
+    let mut buf = String::new();
+    io::stdin().read_line(&mut buf).unwrap_or(0);
+    matches!(buf.trim().to_lowercase().as_str(), "y" | "yes")
+}

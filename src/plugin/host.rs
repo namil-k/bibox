@@ -118,6 +118,40 @@ impl UiSink for NoUiSink {
     }
 }
 
+/// CLI 싱크. stdin이 터미널이면 묻고, 아니면(에이전트가 부를 때) 취소값을 즉시 답한다.
+pub struct CliSink;
+
+impl UiSink for CliSink {
+    fn ask(&mut self, plugin: &str, req: UiRequest) -> UiAnswer {
+        use std::io::IsTerminal;
+        if !std::io::stdin().is_terminal() {
+            return UiAnswer::cancel_for(&req);
+        }
+        match req {
+            UiRequest::Pick { title, items } => {
+                let items: Vec<crate::interactive::SelectItem> = items
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| crate::interactive::SelectItem { key: i.to_string(), display: s.clone() })
+                    .collect();
+                eprintln!("{}: {}", plugin, title.unwrap_or_default());
+                let picked = crate::interactive::interactive_select(&items).ok().flatten();
+                UiAnswer::Index { index: picked.and_then(|k| k.parse().ok()) }
+            }
+            UiRequest::Prompt { title, default } => UiAnswer::Text {
+                text: crate::interactive::prompt_line(&title.unwrap_or_else(|| plugin.to_string()), &default.unwrap_or_default()),
+            },
+            UiRequest::Confirm { title } => UiAnswer::Yes {
+                yes: crate::interactive::prompt_yes_no(&title.unwrap_or_else(|| plugin.to_string())),
+            },
+            UiRequest::Progress { text } => {
+                eprintln!("{}: {}", plugin, text);
+                UiAnswer::Ack {}
+            }
+        }
+    }
+}
+
 // ── 오류 ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -627,6 +661,16 @@ mod tests {
         let host = PluginHost::new(vec![m], HashSet::new(), BTreeMap::new(), env());
         let id = host.commands().find("m.go").unwrap();
         assert!(matches!(host.invoke(id, "key", ctx(&host, "m"), &mut NoUiSink), Err(PluginError::Spawn(_))));
+    }
+
+    #[test]
+    fn cli_sink_answers_cancel_when_stdin_is_not_a_terminal() {
+        // cargo test 아래서는 stdin이 TTY가 아니다. 그 경로만 검사한다.
+        let mut s = CliSink;
+        assert_eq!(s.ask("p", UiRequest::Pick { title: None, items: vec!["a".into()] }), UiAnswer::Index { index: None });
+        assert_eq!(s.ask("p", UiRequest::Prompt { title: None, default: None }), UiAnswer::Text { text: None });
+        assert_eq!(s.ask("p", UiRequest::Confirm { title: None }), UiAnswer::Yes { yes: false });
+        assert_eq!(s.ask("p", UiRequest::Progress { text: "x".into() }), UiAnswer::Ack {});
     }
 
     #[test]

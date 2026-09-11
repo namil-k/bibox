@@ -43,6 +43,32 @@ fn after_note_save(config: &Config, entry: Entry, note_path: PathBuf) {
     runner.host.shutdown();
 }
 
+/// `before_add`. 실패하면 경고를 내고 원래 항목으로 계속한다. 러너를 만들고 닫는다.
+fn run_before_add(config: &Config, entry: Entry) -> Entry {
+    let runner = crate::hooks::HookRunner::from_config(config);
+    let entry = run_before_add_with(&runner, entry);
+    runner.host.shutdown();
+    entry
+}
+
+/// `cmd_import`처럼 항목이 많을 때 러너 하나를 재사용한다.
+fn run_before_add_with(runner: &crate::hooks::HookRunner, entry: Entry) -> Entry {
+    if runner.host.hooks(crate::plugin::HookKind::BeforeAdd).is_empty() {
+        return entry;
+    }
+    let (entry, outcomes) = runner.before_add(entry, &mut crate::plugin::CliSink);
+    for o in &outcomes {
+        let failure = match &o.result {
+            Err(e) => Some(e.clone()),
+            Ok(f) => f.error.clone(),
+        };
+        if let Some(e) = failure {
+            eprintln!("bibox: warning: {} failed ({}); adding the entry unchanged", o.source, e);
+        }
+    }
+    entry
+}
+
 fn report_hook_outcome(runner: &crate::hooks::HookRunner, o: &crate::hooks::HookOutcome) {
     match &o.result {
         Err(e) => eprintln!("bibox: {}: {}", o.source, e),
@@ -293,6 +319,7 @@ pub async fn cmd_add(
                     updated_at: None,
                 };
 
+                let entry = run_before_add(config, entry);
                 if json {
                     println!("{}", serde_json::to_string_pretty(&entry)?);
                 } else {
@@ -368,6 +395,7 @@ pub async fn cmd_add(
                 created_at: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
                 updated_at: None,
             };
+            let entry = run_before_add(config, entry);
             if json {
                 println!("{}", serde_json::to_string_pretty(&entry)?);
             } else {
@@ -401,6 +429,7 @@ pub async fn cmd_add(
             if let Some(y) = year_arg { entry.year = Some(y); }
             if let Some(p) = publisher_arg { entry.publisher = Some(p); }
 
+            let entry = run_before_add(config, entry);
             if json {
                 println!("{}", serde_json::to_string_pretty(&entry)?);
             } else {
@@ -660,6 +689,7 @@ pub async fn cmd_add(
         updated_at: None,
     };
 
+    let entry = run_before_add(config, entry);
     if json {
         println!("{}", serde_json::to_string_pretty(&entry)?);
     } else {
@@ -1194,6 +1224,7 @@ pub fn cmd_import(file: PathBuf, to: Option<String>, config: &Config) -> Result<
 
     let mut added = 0;
     let mut pushed: Vec<Entry> = Vec::new();
+    let before_add_runner = crate::hooks::HookRunner::from_config(config);
     let mut merged: Vec<String> = vec![];
     let mut skipped: Vec<String> = vec![];
 
@@ -1315,10 +1346,12 @@ pub fn cmd_import(file: PathBuf, to: Option<String>, config: &Config) -> Result<
             updated_at: None,
         };
 
+        let entry = run_before_add_with(&before_add_runner, entry);
         pushed.push(entry.clone());
         db.entries.push(entry);
         added += 1;
     }
+    before_add_runner.host.shutdown();
 
     save_db(&db, &db_path)?;
     after_write(config, WriteReason::Import, pushed);
