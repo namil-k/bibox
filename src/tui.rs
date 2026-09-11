@@ -1816,9 +1816,29 @@ fn shortcut_hint(layer: &crate::keymap::Layer, action: Action) -> String {
         .unwrap_or_default()
 }
 
+/// 내장 10개 뒤에 `menu = true`인 플러그인 명령. 라벨은 매니페스트의 `desc`.
+fn context_menu_items(commands: &crate::plugin::PluginCommands) -> Vec<(String, Action)> {
+    let mut items: Vec<(String, Action)> = ContextMenuState::ITEMS
+        .iter()
+        .map(|(l, a)| (l.to_string(), *a))
+        .collect();
+    for (id, c) in commands.iter() {
+        if c.menu {
+            items.push((c.desc.clone(), Action::Plugin(id)));
+        }
+    }
+    items
+}
+
+impl App {
+    fn context_menu_items(&self) -> Vec<(String, Action)> {
+        context_menu_items(self.host.commands())
+    }
+}
+
 fn draw_context_menu(f: &mut Frame, app: &App, screen: Rect) {
-    let items = ContextMenuState::ITEMS;
-    let menu_w: u16 = 20;
+    let items = app.context_menu_items();
+    let menu_w: u16 = 30;
     let menu_h = items.len() as u16 + 2; // +2 for borders
 
     let x = if app.context_menu.x + menu_w > screen.width {
@@ -1843,7 +1863,7 @@ fn draw_context_menu(f: &mut Frame, app: &App, screen: Rect) {
             Style::default()
         };
         ListItem::new(Line::from(vec![
-            Span::styled(format!(" {:<12}", label), style),
+            Span::styled(format!(" {:<20}", label), style),
             Span::styled(format!("{:>3} ", key), style.add_modifier(Modifier::DIM)),
         ]))
     }).collect();
@@ -1879,7 +1899,7 @@ fn draw_message_popup(f: &mut Frame, msg: &str, area: Rect) {
 /// rather than being a block of hardcoded prose that drifts from the handlers.
 /// 화면에 나오는 섹션 순서. `Action::section()`이 돌려주는 값과 같아야 한다.
 const SECTION_ORDER: &[&str] = &[
-    "Navigation", "Selection", "Entry actions", "Editing", "Search and sort", "Application",
+    "Navigation", "Selection", "Entry actions", "Editing", "Search and sort", "Application", "Plugins",
 ];
 
 struct HelpRow {
@@ -1895,17 +1915,24 @@ struct HelpRow {
 /// 정렬돼 있어야 한다. 옛 `const HELP`는 손으로 그 순서를 맞춰 두었지만 키맵의
 /// 바인딩 순서는 그렇지 않으므로 여기서 정렬한다. 안정 정렬이라 같은 섹션 안의
 /// 순서는 키맵에 쓴 순서를 따른다.
-fn help_rows(layer: &crate::keymap::Layer) -> Vec<HelpRow> {
+fn help_rows(layer: &crate::keymap::Layer, commands: &crate::plugin::PluginCommands) -> Vec<HelpRow> {
     let mut rows: Vec<HelpRow> = layer
         .bindings
         .iter()
         .filter(|b| b.actions.first().is_some_and(|a| *a != Action::Noop))
         .map(|b| {
             let first = b.actions[0];
+            let (action, fallback_desc) = match first {
+                Action::Plugin(id) => match commands.get(id) {
+                    Some(c) => (c.full_name(), c.desc.clone()),
+                    None => (format!("{:?}", first), first.desc().to_string()),
+                },
+                other => (format!("{:?}", other), other.desc().to_string()),
+            };
             HelpRow {
                 keys: b.keys.iter().map(|k| crate::keymap::render_key(*k)).collect::<Vec<_>>().join(""),
-                action: format!("{:?}", first),
-                desc: b.desc.clone().unwrap_or_else(|| first.desc().to_string()),
+                action,
+                desc: b.desc.clone().unwrap_or(fallback_desc),
                 section: first.section(),
             }
         })
@@ -1949,7 +1976,7 @@ fn draw_help_popup(f: &mut Frame, app: &App, area: Rect) {
     let popup_area = centered_rect(90, height, area);
     f.render_widget(Clear, popup_area);
 
-    let all = help_rows(app.keymap.layer(layer_for(app.focus)));
+    let all = help_rows(app.keymap.layer(layer_for(app.focus)), app.host.commands());
     let rows = filter_rows(&all, &app.help_query);
 
     // Section headers are inserted between groups, so the row list the user sees
@@ -2481,7 +2508,8 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
 }
 
 fn handle_context_menu(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
-    let max = ContextMenuState::ITEMS.len().saturating_sub(1);
+    let items = app.context_menu_items();
+    let max = items.len().saturating_sub(1);
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => { app.mode = Mode::Normal; }
         KeyCode::Char('j') | KeyCode::Down => {
@@ -2496,7 +2524,7 @@ fn handle_context_menu(app: &mut App, key: crossterm::event::KeyEvent) -> Result
         }
         KeyCode::Char(c) => {
             let pressed = crate::keymap::render_key(KeyPress::new(KeyCode::Char(c), KeyModifiers::NONE));
-            if let Some(idx) = ContextMenuState::ITEMS
+            if let Some(idx) = items
                 .iter()
                 .position(|(_, a)| shortcut_hint(&app.keymap.entries, *a) == pressed)
             {
@@ -2510,8 +2538,11 @@ fn handle_context_menu(app: &mut App, key: crossterm::event::KeyEvent) -> Result
 
 fn execute_context_action(app: &mut App, idx: usize) {
     app.mode = Mode::Normal;
-    let Some((_, action)) = ContextMenuState::ITEMS.get(idx) else { return };
-    let _ = execute(app, *action, ExecCtx { count: 1 });
+    let Some((_, action)) = app.context_menu_items().get(idx).cloned() else { return };
+    match action {
+        Action::Plugin(id) => app.start_plugin_command(id, "menu"),
+        other => { let _ = execute(app, other, ExecCtx { count: 1 }); }
+    }
 }
 
 /// 액션 하나를 실행한다. 바디는 옛 `handle_normal`의 32갈래에서 그대로 옮겨 왔다.
@@ -2981,7 +3012,7 @@ fn handle_confirm(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool
 }
 
 fn handle_help(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
-    let all = help_rows(app.keymap.layer(layer_for(app.focus)));
+    let all = help_rows(app.keymap.layer(layer_for(app.focus)), app.host.commands());
     let total_rows = filter_rows(&all, &app.help_query).len();
     let max_scroll = total_rows.saturating_sub(1);
 
@@ -4234,7 +4265,7 @@ mod tests {
     }
 
     fn entries_help() -> Vec<super::HelpRow> {
-        super::help_rows(&default_keymap().entries)
+        super::help_rows(&default_keymap().entries, &crate::plugin::PluginCommands::default())
     }
 
     #[test]
@@ -4314,11 +4345,12 @@ mod tests {
         assert_eq!(collection_paths(&entries), Vec::<String>::new());
     }
 
-    use crate::keymap::{default_keymap, parse_key, Action, Binding as KmBinding, Layer as KmLayer};
+    use super::ContextMenuState;
+    use crate::keymap::{default_keymap, parse_key, Action, Binding as KmBinding, Layer as KmLayer, LayerId};
 
     #[test]
     fn help_rows_come_from_the_keymap() {
-        let rows = super::help_rows(&default_keymap().entries);
+        let rows = super::help_rows(&default_keymap().entries, &crate::plugin::PluginCommands::default());
         // 별칭이 한 행으로 합쳐지므로 키 칸은 "j  <Down>"이다.
         assert!(rows.iter().any(|r| r.keys.starts_with("j") && r.desc.contains("down one entry")));
     }
@@ -4332,7 +4364,7 @@ mod tests {
                 desc: None,
             }],
         };
-        let rows = super::help_rows(&layer);
+        let rows = super::help_rows(&layer, &crate::plugin::PluginCommands::default());
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].keys, "Z");
         assert_eq!(rows[0].desc, Action::Quit.desc());
@@ -4347,7 +4379,7 @@ mod tests {
                 desc: Some("나가기".to_string()),
             }],
         };
-        assert_eq!(super::help_rows(&layer)[0].desc, "나가기");
+        assert_eq!(super::help_rows(&layer, &crate::plugin::PluginCommands::default())[0].desc, "나가기");
     }
 
     #[test]
@@ -4359,14 +4391,14 @@ mod tests {
                 desc: None,
             }],
         };
-        assert_eq!(super::help_rows(&layer)[0].keys, "gg");
+        assert_eq!(super::help_rows(&layer, &crate::plugin::PluginCommands::default())[0].keys, "gg");
     }
 
     #[test]
     fn help_rows_are_grouped_by_section_in_a_fixed_order() {
         // draw_help_popup은 섹션이 바뀔 때마다 제목을 끼워 넣는다. 행이 섹션순으로
         // 정렬돼 있지 않으면 같은 제목이 여러 번 나온다.
-        let rows = super::help_rows(&default_keymap().entries);
+        let rows = super::help_rows(&default_keymap().entries, &crate::plugin::PluginCommands::default());
         let mut seen: Vec<&str> = Vec::new();
         for r in &rows {
             if seen.last() != Some(&r.section) {
@@ -4379,14 +4411,14 @@ mod tests {
 
     #[test]
     fn entry_only_keys_do_not_appear_in_the_collections_help() {
-        let rows = super::help_rows(&default_keymap().collections);
+        let rows = super::help_rows(&default_keymap().collections, &crate::plugin::PluginCommands::default());
         assert!(!rows.iter().any(|r| r.keys == "H"), "H does nothing in the collections panel");
     }
 
     #[test]
     fn alias_keys_share_one_help_row() {
         // j와 <Down>은 같은 동작이므로 한 행이어야 한다. 나누면 표가 알맹이 없이 길어진다.
-        let rows = super::help_rows(&default_keymap().entries);
+        let rows = super::help_rows(&default_keymap().entries, &crate::plugin::PluginCommands::default());
         let down: Vec<&super::HelpRow> = rows.iter().filter(|r| r.action == "EntryDown").collect();
         assert_eq!(down.len(), 1, "EntryDown should occupy one row");
         assert_eq!(down[0].keys, "j  <Down>");
@@ -4525,5 +4557,51 @@ mod tests {
         assert_eq!(plugin_ui_step(&mut k, KeyCode::Char('y')), Some(UiAnswer::Yes { yes: true }));
         assert_eq!(plugin_ui_step(&mut k, KeyCode::Char('n')), Some(UiAnswer::Yes { yes: false }));
         assert_eq!(plugin_ui_step(&mut k, KeyCode::Esc), Some(UiAnswer::Yes { yes: false }));
+    }
+
+    fn plugin_table() -> crate::plugin::PluginCommands {
+        use crate::plugin::manifest::{Command, Manifest};
+        let m = Manifest {
+            name: "tidy".into(), version: None, description: None, run: vec!["sh".into()],
+            commands: vec![
+                Command { id: "run".into(), desc: "Normalize the entry".into(), key: Some(vec![parse_key("=").unwrap()]), layers: vec![LayerId::Entries], menu: true },
+                Command { id: "quiet".into(), desc: "No menu".into(), key: None, layers: vec![LayerId::Entries], menu: false },
+            ],
+            hooks: vec![], cli: None, dir: "/tmp".into(),
+        };
+        let env = crate::plugin::PluginEnv { bin: "/bin/true".into(), config_dir: "/tmp".into(), db: "/tmp/db.json".into(), notes: "/tmp/n".into(), pdfs: "/tmp/p".into(), home: None };
+        crate::plugin::PluginHost::new(vec![m], Default::default(), Default::default(), env).commands().clone()
+    }
+
+    #[test]
+    fn help_shows_plugin_commands_in_a_last_plugins_section_by_full_name() {
+        let commands = plugin_table();
+        let r = crate::keymap::load_keymap_from_str("", &commands);
+        let rows = super::help_rows(&r.keymap.entries, &commands);
+        let row = rows.iter().find(|r| r.action == "tidy.run").expect("plugin row");
+        assert_eq!(row.section, "Plugins");
+        assert_eq!(row.keys, "=");
+        assert_eq!(row.desc, "Normalize the entry");
+        assert_eq!(rows.last().unwrap().section, "Plugins");
+    }
+
+    #[test]
+    fn help_falls_back_to_the_table_desc_when_a_user_rebinding_has_none() {
+        let commands = plugin_table();
+        let toml = "[normal.entries]\nprepend_keymap = [{ on = \"<C-t>\", run = \"tidy.quiet\" }]\n";
+        let r = crate::keymap::load_keymap_from_str(toml, &commands);
+        let rows = super::help_rows(&r.keymap.entries, &commands);
+        let row = rows.iter().find(|r| r.action == "tidy.quiet").unwrap();
+        assert_eq!(row.desc, "No menu");
+    }
+
+    #[test]
+    fn context_menu_appends_only_menu_commands_after_the_builtins() {
+        let commands = plugin_table();
+        let items = super::context_menu_items(&commands);
+        assert_eq!(items.len(), ContextMenuState::ITEMS.len() + 1);
+        let (label, action) = items.last().unwrap();
+        assert_eq!(label, "Normalize the entry");
+        assert_eq!(*action, Action::Plugin(commands.find("tidy.run").unwrap()));
     }
 }
