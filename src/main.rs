@@ -522,6 +522,7 @@ Issues detected:
   orphaned_pdf     - PDF on disk not linked to any entry        [fixable]
   missing_title    - Entry has no title
   orphaned_note    - Note file with no matching entry
+  plugin_problem   - A plugin.toml, its program, or its config has a problem
 
 Examples:
   bibox doctor            # diagnose only

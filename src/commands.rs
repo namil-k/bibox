@@ -4090,8 +4090,21 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
         }).unwrap_or(0)
     } else { 0 };
 
+    // ── 플러그인 검증 ────────────────────────────────────────────────────────
+    // 플러그인이 먼저 발견되어야 키맵이 `run = "<plugin>.<cmd>"` 참조를 해석한다.
+    let (host, mut plugin_problems) = crate::plugin::PluginHost::discover(config);
+    plugin_problems.extend(crate::plugin::cli::doctor_checks(&host, config));
+    for p in &plugin_problems {
+        issues.push(Issue {
+            kind: "plugin_problem".into(),
+            key: Some(p.plugin().to_string()),
+            detail: config.msgs.plugin_problem(p).trim_start().to_string(),
+            fixable: false,
+        });
+    }
+
     // ── 키맵 검증 ────────────────────────────────────────────────────────────
-    let km_report = crate::keymap::load_keymap(&crate::plugin::PluginCommands::default());
+    let km_report = crate::keymap::load_keymap(host.commands());
     for p in km_report.errors.iter().chain(km_report.warnings.iter()) {
         issues.push(Issue {
             kind: "keymap_problem".into(),
@@ -4136,6 +4149,7 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
         ("latex_escape",    "No LaTeX escapes in text",      "entries with LaTeX escapes"),
         ("orphaned_note",   "No orphaned notes",             "orphaned notes"),
         ("keymap_problem",  "keymap.toml is valid",          "keymap.toml problems"),
+        ("plugin_problem",  "Plugins load cleanly",          "plugin problems"),
     ];
 
     println!("  --- Checks {}", "-".repeat(44));
@@ -4160,7 +4174,8 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
 
     // Detail sections for each issue kind that has problems
     let kinds = ["malformed_entry", "bad_citekey", "duplicate_key", "missing_pdf", "orphaned_pdf",
-                  "missing_title", "dirty_title", "latex_escape", "orphaned_note", "keymap_problem"];
+                  "missing_title", "dirty_title", "latex_escape", "orphaned_note", "keymap_problem",
+                  "plugin_problem"];
     for kind in &kinds {
         let group: Vec<&Issue> = issues.iter().filter(|i| i.kind == *kind).collect();
         if group.is_empty() { continue; }
