@@ -339,6 +339,8 @@ pub struct App {
     // ── Plugins ──
     host: Arc<PluginHost>,
     plugin_run: Option<PluginRun>,
+    hooks: crate::hooks::HookRunner,
+    bg_hooks: Vec<Receiver<crate::hooks::HookOutcome>>,
 }
 
 /// Collect every collection path referenced by `entries`, sorted and deduplicated.
@@ -365,6 +367,7 @@ impl App {
         let db_path = crate::config::resolve_db_path(&config);
         let db = load_db(&db_path)?;
         let entries = db.entries;
+        let hooks = crate::hooks::HookRunner { host: Arc::clone(&host), git: config.git, db_path: db_path.clone() };
 
         let collections = collection_paths(&entries);
 
@@ -425,8 +428,10 @@ impl App {
             help_filtering: false,
             help_scroll: 0,
             context_menu: ContextMenuState { x: 0, y: 0, index: 0 },
+            hooks,
             host,
             plugin_run: None,
+            bg_hooks: Vec::new(),
         })
     }
 
@@ -633,11 +638,9 @@ impl App {
                 if path.exists() { let _ = std::fs::remove_file(&path); }
             }
             let key = entry.bibtex_key.clone();
+            let removed = entry.clone();
             self.entries.retain(|e| e.bibtex_key != key);
-            let db_path = crate::config::resolve_db_path(&self.config);
-            let mut db = load_db(&db_path)?;
-            db.entries = self.entries.clone();
-            save_db(&db, &db_path)?;
+            self.persist(crate::hooks::WriteReason::Delete, vec![removed], true)?;
             self.rebuild_collections();
             self.apply_filters();
         }
@@ -667,10 +670,7 @@ impl App {
         if let Some(snapshot) = self.undo_stack.pop() {
             self.redo_stack.push(self.entries.clone());
             self.entries = snapshot;
-            let db_path = crate::config::resolve_db_path(&self.config);
-            let mut db = load_db(&db_path)?;
-            db.entries = self.entries.clone();
-            save_db(&db, &db_path)?;
+            self.persist(crate::hooks::WriteReason::Undo, vec![], true)?;
             self.rebuild_collections();
             self.apply_filters();
             self.mode = Mode::Message(format!("Undo ({})", self.undo_stack.len()));
@@ -684,10 +684,7 @@ impl App {
         if let Some(snapshot) = self.redo_stack.pop() {
             self.undo_stack.push(self.entries.clone());
             self.entries = snapshot;
-            let db_path = crate::config::resolve_db_path(&self.config);
-            let mut db = load_db(&db_path)?;
-            db.entries = self.entries.clone();
-            save_db(&db, &db_path)?;
+            self.persist(crate::hooks::WriteReason::Redo, vec![], true)?;
             self.rebuild_collections();
             self.apply_filters();
             self.mode = Mode::Message(format!("Redo ({})", self.redo_stack.len()));
@@ -750,10 +747,8 @@ impl App {
                 e.updated_at = Some(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
             }
         }
-        let db_path = crate::config::resolve_db_path(&self.config);
-        let mut db = load_db(&db_path)?;
-        db.entries = self.entries.clone();
-        save_db(&db, &db_path)?;
+        let affected: Vec<Entry> = self.entries.iter().filter(|e| self.selected_keys.contains(&e.bibtex_key)).cloned().collect();
+        self.persist(crate::hooks::WriteReason::Edit, affected, true)?;
 
         let count = self.selected_keys.len();
         self.selected_keys.clear();
@@ -786,10 +781,8 @@ impl App {
         };
         self.picker = None;
         self.entries[idx].collections = new_cols;
-        let db_path = crate::config::resolve_db_path(&self.config);
-        let mut db = load_db(&db_path)?;
-        db.entries = self.entries.clone();
-        save_db(&db, &db_path)?;
+        let affected = vec![self.entries[idx].clone()];
+        self.persist(crate::hooks::WriteReason::Edit, affected, true)?;
         self.rebuild_collections();
         self.apply_filters();
         Ok(())
@@ -803,10 +796,8 @@ impl App {
         };
         self.picker = None;
         self.entries[idx].tags = new_tags;
-        let db_path = crate::config::resolve_db_path(&self.config);
-        let mut db = load_db(&db_path)?;
-        db.entries = self.entries.clone();
-        save_db(&db, &db_path)?;
+        let affected = vec![self.entries[idx].clone()];
+        self.persist(crate::hooks::WriteReason::Edit, affected, true)?;
         self.apply_filters();
         Ok(())
     }
@@ -919,6 +910,60 @@ fn plugin_ui_step(kind: &mut PluginUiKind, code: KeyCode) -> Option<UiAnswer> {
 }
 
 impl App {
+    /// 메모리의 항목을 디스크에 쓰고 `after_write`를 백그라운드로 발화한다.
+    /// `fire_hooks = false`는 훅 안에서 생긴 쓰기(재발화 방지)에만 쓴다.
+    fn persist(&mut self, reason: crate::hooks::WriteReason, affected: Vec<Entry>, fire_hooks: bool) -> Result<()> {
+        let db_path = crate::config::resolve_db_path(&self.config);
+        let mut db = load_db(&db_path)?;
+        db.entries = self.entries.clone();
+        save_db(&db, &db_path)?;
+        if fire_hooks {
+            self.fire_after_write(reason, affected);
+        }
+        Ok(())
+    }
+
+    fn fire_after_write(&mut self, reason: crate::hooks::WriteReason, affected: Vec<Entry>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.hooks.after_write_background(reason, affected, tx);
+        self.bg_hooks.push(rx);
+    }
+
+    fn fire_after_note_save(&mut self, entry: Entry, note_path: std::path::PathBuf) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.hooks.after_note_save_background(entry, note_path, tx);
+        self.bg_hooks.push(rx);
+    }
+
+    /// 백그라운드 훅 결과. 성공은 조용하고 message/error/apply/refresh만 다룬다.
+    /// 사용자가 팝업을 열어 둔 동안에는 메시지로 덮지 않고 조용히 버린다.
+    fn handle_hook_outcome(&mut self, o: crate::hooks::HookOutcome) {
+        let idle = matches!(self.mode, Mode::Normal);
+        match o.result {
+            Err(e) => {
+                if idle { self.mode = Mode::Message(format!("{}: {}", o.source, e)); }
+            }
+            Ok(f) => {
+                if let Some(e) = f.error {
+                    if idle { self.mode = Mode::Message(format!("{}: {}", o.source, e)); }
+                    return;
+                }
+                if let Some(apply) = f.apply {
+                    if let Err(e) = self.apply_plugin_entries(apply, false) {
+                        if idle { self.mode = Mode::Message(format!("{}: apply rejected: {}", o.source, e)); }
+                        return;
+                    }
+                }
+                if f.refresh {
+                    let _ = self.refresh_from_disk();
+                }
+                if let Some(m) = f.message {
+                    if idle { self.mode = Mode::Message(format!("{}: {}", o.source, m)); }
+                }
+            }
+        }
+    }
+
     /// 명령 요청의 컨텍스트. 다중 선택이 있으면 그것, 없으면 커서 항목 하나.
     fn plugin_context(&self, plugin: &str) -> crate::plugin::protocol::Context {
         let focus = match self.focus {
@@ -974,7 +1019,7 @@ impl App {
         }
         self.mode = Mode::Normal;
         if let Some(apply) = f.apply {
-            if let Err(e) = self.apply_plugin_entries(apply) {
+            if let Err(e) = self.apply_plugin_entries(apply, true) {
                 self.mode = Mode::Message(format!("{}: apply rejected: {}", plugin, e));
                 return;
             }
@@ -991,7 +1036,8 @@ impl App {
     }
 
     /// `apply`를 검증해 통째로 반영한다. undo 스냅샷을 찍는다.
-    fn apply_plugin_entries(&mut self, incoming: Vec<serde_json::Value>) -> Result<(), String> {
+    /// `fire_hooks = false`는 훅 결과의 apply(재발화 방지)에만 쓴다.
+    fn apply_plugin_entries(&mut self, incoming: Vec<serde_json::Value>, fire_hooks: bool) -> Result<(), String> {
         let updated = crate::plugin::protocol::validate_apply(&self.entries, None, &incoming)?;
         self.push_undo();
         for u in &updated {
@@ -999,10 +1045,7 @@ impl App {
                 *slot = u.clone();
             }
         }
-        let db_path = crate::config::resolve_db_path(&self.config);
-        let mut db = load_db(&db_path).map_err(|e| e.to_string())?;
-        db.entries = self.entries.clone();
-        save_db(&db, &db_path).map_err(|e| e.to_string())?;
+        self.persist(crate::hooks::WriteReason::Edit, updated, fire_hooks).map_err(|e| e.to_string())?;
         self.rebuild_collections();
         self.apply_filters();
         Ok(())
@@ -3477,6 +3520,9 @@ fn handle_file_picker(app: &mut App, key: crossterm::event::KeyEvent) -> Result<
                                 if let Some(e) = app.entries.iter_mut().find(|e| e.bibtex_key == key) {
                                     e.file_path = Some(format!("{}.pdf", key));
                                 }
+                                if let Some(e) = app.entries.iter().find(|e| e.bibtex_key == key).cloned() {
+                                    app.fire_after_write(crate::hooks::WriteReason::Edit, vec![e]);
+                                }
                                 app.mode = Mode::Message(format!("PDF attached: {}", dest));
                             }
                             Err(e) => { app.mode = Mode::Message(format!("Attach failed: {}", e)); }
@@ -3796,6 +3842,7 @@ fn handle_fetch_preview(app: &mut App, key: crossterm::event::KeyEvent) -> Resul
                 }
 
                 // Apply field changes to DB entry
+                let mut key_after = old_key.clone();
                 if let Some(entry) = db.entries.iter_mut().find(|e| e.bibtex_key == old_key) {
                     for (i, change) in preview.changes.iter().enumerate() {
                         if !preview.selected[i] || !change.changed { continue; }
@@ -3832,6 +3879,7 @@ fn handle_fetch_preview(app: &mut App, key: crossterm::event::KeyEvent) -> Resul
                         }
                     }
                     entry.updated_at = Some(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+                    key_after = entry.bibtex_key.clone();
                 }
                 save_db(&db, &db_path)?;
 
@@ -3839,6 +3887,9 @@ fn handle_fetch_preview(app: &mut App, key: crossterm::event::KeyEvent) -> Resul
                 app.entries = db.entries;
                 app.rebuild_collections();
                 app.apply_filters();
+                if let Some(e) = app.entries.iter().find(|e| e.bibtex_key == key_after).cloned() {
+                    app.fire_after_write(crate::hooks::WriteReason::Edit, vec![e]);
+                }
 
                 let applied = preview.selected.iter().filter(|s| **s).count();
                 app.mode = Mode::Message(format!("Updated {} field(s).", applied));
@@ -3900,6 +3951,9 @@ fn run_loop(
             if let Err(e) = status {
                 app.mode = Mode::Message(format!("Editor failed: {}", e));
             }
+            if let Some(e) = app.selected_entry().cloned() {
+                app.fire_after_note_save(e, note_path.clone());
+            }
             // Reload note if in note preview mode
             app.note_citekey.clear();
         }
@@ -3952,6 +4006,25 @@ fn run_loop(
             }
         }
 
+        // Poll background hooks. 성공은 조용하고, message/error/apply/refresh만 다룬다.
+        let mut finished: Vec<usize> = Vec::new();
+        let mut hook_events: Vec<crate::hooks::HookOutcome> = Vec::new();
+        for (i, rx) in app.bg_hooks.iter().enumerate() {
+            loop {
+                match rx.try_recv() {
+                    Ok(o) => hook_events.push(o),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => { finished.push(i); break; }
+                }
+            }
+        }
+        for i in finished.into_iter().rev() {
+            app.bg_hooks.remove(i);
+        }
+        for o in hook_events {
+            app.handle_hook_outcome(o);
+        }
+
         // Poll plugin command
         if app.plugin_run.is_some() {
             let (plugin, ev) = {
@@ -3992,6 +4065,9 @@ fn run_loop(
                     }
                     app.bg_result = None;
                     app.bg_fetch_key = None;
+                    if let Some(e) = app.entries.iter().find(|e| e.bibtex_key == result.key).cloned() {
+                        app.fire_after_write(crate::hooks::WriteReason::Edit, vec![e]);
+                    }
                     app.mode = Mode::Message(format!("PDF saved: {}", result.full_path));
                 }
                 Ok(Err(e)) => {

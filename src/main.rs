@@ -8,6 +8,7 @@ mod commands;
 mod config;
 mod crossref;
 mod git;
+mod hooks;
 mod i18n;
 mod interactive;
 mod keymap;

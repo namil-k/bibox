@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::bibtex::{entries_to_bibtex, entry_to_filename};
 use crate::config::Config;
 use crate::crossref;
-use crate::git;
+use crate::hooks::WriteReason;
 use crate::interactive::{interactive_select, SelectItem};
 use crate::models::{Entry, EntryType};
 use crate::pdf;
@@ -23,6 +23,45 @@ use crate::openlibrary;
 
 fn db_path_from_config(config: &Config) -> PathBuf {
     crate::config::resolve_db_path(config)
+}
+
+/// CLI 저장 뒤 훅. 동기로 돌고 message/error는 stderr로, after 훅의 apply는 반영한다.
+/// git auto-commit(`git = true`)도 여기서 일어난다.
+fn after_write(config: &Config, reason: WriteReason, affected: Vec<Entry>) {
+    let runner = crate::hooks::HookRunner::from_config(config);
+    for o in runner.after_write(reason, affected) {
+        report_hook_outcome(&runner, &o);
+    }
+    runner.host.shutdown();
+}
+
+fn after_note_save(config: &Config, entry: Entry, note_path: PathBuf) {
+    let runner = crate::hooks::HookRunner::from_config(config);
+    for o in runner.after_note_save(entry, note_path) {
+        report_hook_outcome(&runner, &o);
+    }
+    runner.host.shutdown();
+}
+
+fn report_hook_outcome(runner: &crate::hooks::HookRunner, o: &crate::hooks::HookOutcome) {
+    match &o.result {
+        Err(e) => eprintln!("bibox: {}: {}", o.source, e),
+        Ok(f) => {
+            if let Some(e) = &f.error {
+                eprintln!("bibox: {}: {}", o.source, e);
+                return;
+            }
+            if let Some(apply) = &f.apply {
+                match crate::hooks::apply_from_hook(&runner.db_path, apply) {
+                    Ok(n) => eprintln!("bibox: {}: applied {} entries", o.source, n),
+                    Err(e) => eprintln!("bibox: {}: apply rejected: {}", o.source, e),
+                }
+            }
+            if let Some(m) = &f.message {
+                eprintln!("bibox: {}: {}", o.source, m);
+            }
+        }
+    }
 }
 
 fn prompt_confirm(msg: &str) -> bool {
@@ -259,11 +298,10 @@ pub async fn cmd_add(
                 } else {
                     println!("{}", config.msgs.added(&bibtex_key, entry.title.as_deref().unwrap_or("?")));
                 }
+                let pushed = entry.clone();
                 db.entries.push(entry);
                 save_db(&db, &db_path)?;
-                if config.git {
-                    git::auto_commit(&db_path, &format!("bibox: add {}", bibtex_key))?;
-                }
+                after_write(config, WriteReason::Add, vec![pushed]);
                 return Ok(());
             }
             Err(e) => {
@@ -335,11 +373,10 @@ pub async fn cmd_add(
             } else {
                 println!("{}", config.msgs.added(&bibtex_key, title));
             }
+            let pushed = entry.clone();
             db.entries.push(entry);
             save_db(&db, &db_path)?;
-            if config.git {
-                git::auto_commit(&db_path, &format!("bibox: add {}", bibtex_key))?;
-            }
+            after_write(config, WriteReason::Add, vec![pushed]);
             return Ok(());
         }
     }
@@ -369,12 +406,10 @@ pub async fn cmd_add(
             } else {
                 println!("Added: {} — {}", entry.bibtex_key, entry.title.as_deref().unwrap_or("?"));
             }
-            let key_clone = entry.bibtex_key.clone();
+            let pushed = entry.clone();
             db.entries.push(entry);
             save_db(&db, &db_path)?;
-            if config.git {
-                git::auto_commit(&db_path, &format!("bibox: add {}", key_clone))?;
-            }
+            after_write(config, WriteReason::Add, vec![pushed]);
             return Ok(());
         }
     }
@@ -635,12 +670,10 @@ pub async fn cmd_add(
                 .added(&entry.bibtex_key, entry.title.as_deref().unwrap_or("?"))
         );
     }
-    let add_key = entry.bibtex_key.clone();
+    let pushed = entry.clone();
     db.entries.push(entry);
     save_db(&db, &db_path)?;
-    if config.git {
-        git::auto_commit(&db_path, &format!("bibox: add {}", add_key))?;
-    }
+    after_write(config, WriteReason::Add, vec![pushed]);
 
     Ok(())
 }
@@ -1015,10 +1048,9 @@ pub async fn cmd_edit(
 
     let key = entry.bibtex_key.clone();
     entry.updated_at = Some(Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+    let snapshot = entry.clone();
     save_db(&db, &db_path)?;
-    if config.git {
-        git::auto_commit(&db_path, &format!("bibox: edit {}", key))?;
-    }
+    after_write(config, WriteReason::Edit, vec![snapshot]);
     println!("{}", config.msgs.updated(&key));
 
     Ok(())
@@ -1054,9 +1086,7 @@ pub fn cmd_delete(id_or_key: String, force: bool, config: &Config) -> Result<()>
     db.entries
         .retain(|e| e.bibtex_key != entry.bibtex_key && e.id != entry.id);
     save_db(&db, &db_path)?;
-    if config.git {
-        git::auto_commit(&db_path, &format!("bibox: delete {}", del_key))?;
-    }
+    after_write(config, WriteReason::Delete, vec![entry.clone()]);
     println!("{}", config.msgs.deleted(&del_key));
 
     Ok(())
@@ -1087,7 +1117,9 @@ pub fn cmd_collect(id_or_key: String, collections: Vec<String>, config: &Config)
     if !added.is_empty() {
         entry.updated_at = Some(Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
     }
+    let snapshot = entry.clone();
     save_db(&db, &db_path)?;
+    after_write(config, WriteReason::Edit, vec![snapshot]);
 
     if !added.is_empty() {
         println!("{}", config.msgs.collect_added(&key, &added.join(", ")));
@@ -1117,7 +1149,9 @@ pub fn cmd_uncollect(id_or_key: String, collection: String, config: &Config) -> 
     entry.collections.retain(|c| c != &collection);
     entry.updated_at = Some(Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
     let key = entry.bibtex_key.clone();
+    let snapshot = entry.clone();
     save_db(&db, &db_path)?;
+    after_write(config, WriteReason::Edit, vec![snapshot]);
     println!("{}", config.msgs.uncollected(&key, &collection));
 
     Ok(())
@@ -1159,6 +1193,7 @@ pub fn cmd_import(file: PathBuf, to: Option<String>, config: &Config) -> Result<
         .with_context(|| config.msgs.file_read_failed(&file.to_string_lossy()))?;
 
     let mut added = 0;
+    let mut pushed: Vec<Entry> = Vec::new();
     let mut merged: Vec<String> = vec![];
     let mut skipped: Vec<String> = vec![];
 
@@ -1280,14 +1315,13 @@ pub fn cmd_import(file: PathBuf, to: Option<String>, config: &Config) -> Result<
             updated_at: None,
         };
 
+        pushed.push(entry.clone());
         db.entries.push(entry);
         added += 1;
     }
 
     save_db(&db, &db_path)?;
-    if config.git {
-        git::auto_commit(&db_path, &format!("bibox: import {} entries", added))?;
-    }
+    after_write(config, WriteReason::Import, pushed);
 
     println!("{}", config.msgs.import_complete(added));
     if !merged.is_empty() {
@@ -1820,6 +1854,7 @@ pub fn cmd_init(path: PathBuf, migrate: bool, json: bool, config: &Config) -> Re
             }
             save_db(&new_db, &db_file)?;
             println!("Merged {} entries into new home.", new_db.entries.len());
+            after_write(config, WriteReason::Other, vec![]);
         }
 
         // Copy PDFs
@@ -2046,6 +2081,7 @@ pub fn cmd_sync(yes: bool, json: bool, config: &Config) -> Result<()> {
     }
 
     save_db(&db, &db_path)?;
+    after_write(config, WriteReason::Other, vec![]);
     if json {
         let result = serde_json::json!({
             "status": "complete",
@@ -2181,8 +2217,11 @@ pub fn cmd_note(
         }
         if let Some(e) = find_by_key_mut(&mut db, &entry.bibtex_key) {
             e.updated_at = Some(Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+            let snapshot = e.clone();
             let _ = save_db(&db, &db_path);
+            after_write(config, WriteReason::Edit, vec![snapshot]);
         }
+        after_note_save(config, entry.clone(), note_path.clone());
         return Ok(());
     }
 
@@ -2207,8 +2246,11 @@ pub fn cmd_note(
 
     if let Some(e) = find_by_key_mut(&mut db, &entry.bibtex_key) {
         e.updated_at = Some(Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+        let snapshot = e.clone();
         let _ = save_db(&db, &db_path);
+        after_write(config, WriteReason::Edit, vec![snapshot]);
     }
+    after_note_save(config, entry.clone(), note_path.clone());
     println!("{}", config.msgs.note_saved(&note_path.display().to_string()));
     Ok(())
 }
@@ -2335,6 +2377,7 @@ pub fn cmd_modify(
 
     // 7. Apply assignments
     let mut modified = 0usize;
+    let mut affected: Vec<Entry> = Vec::new();
     for &i in &matching_indices {
         let entry = &mut db.entries[i];
         for a in &parsed_assignments {
@@ -2374,10 +2417,12 @@ pub fn cmd_modify(
         }
         entry.updated_at = Some(Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
         modified += 1;
+        affected.push(entry.clone());
     }
 
     // 8. Save and report
     save_db(&db, &db_path)?;
+    after_write(config, WriteReason::Edit, affected);
     println!("Modified {} entries.", modified);
 
     Ok(())
@@ -2574,7 +2619,9 @@ pub fn cmd_review(
                     entry.updated_at = Some(Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
                     reviewed_count += 1;
                 }
+                let snapshot = entry.clone();
                 save_db(&db, &db_path)?;
+                after_write(config, WriteReason::Edit, vec![snapshot]);
                 println!("Reviewed: {}/{}", reviewed_count, total);
                 cursor += 1;
             }
@@ -2638,7 +2685,9 @@ pub fn cmd_review(
                             entry.tags.push(tag.clone());
                         }
                     }
+                    let snapshot = entry.clone();
                     save_db(&db, &db_path)?;
+                    after_write(config, WriteReason::Edit, vec![snapshot]);
                     println!("Tags added: {}", new_tags.join(", "));
                 }
             }
@@ -4239,6 +4288,7 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
         // Save DB once for all entry-level fixes
         if fixed > 0 {
             crate::storage::save_db(&db, &db_path)?;
+            after_write(config, WriteReason::Other, vec![]);
         }
 
         // Delete orphaned PDFs (file system, not DB)
