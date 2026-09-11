@@ -5,7 +5,7 @@ pub mod protocol;
 
 use std::path::{Path, PathBuf};
 
-pub use host::{CliSink, NoUiSink, PluginCmdId, PluginCommand, PluginCommands, PluginEnv, PluginError, PluginHost, UiSink};
+pub use host::{CliSink, NoUiSink, PluginCmdId, PluginCommands, PluginEnv, PluginError, PluginHost, UiSink};
 pub use manifest::{HookKind, Manifest, PluginProblem};
 
 /// `config.toml`, `keymap.toml`과 같은 디렉토리 아래 `plugins/`.

@@ -135,6 +135,7 @@ pub enum PluginProblem {
 }
 
 impl PluginProblem {
+    #[cfg(test)]
     pub fn is_error(&self) -> bool {
         matches!(self, PluginProblem::Manifest { .. })
     }

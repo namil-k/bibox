@@ -58,10 +58,12 @@ impl PluginCommands {
         self.list.iter().enumerate().map(|(i, c)| (PluginCmdId(i as u16), c))
     }
 
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.list.len()
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.list.is_empty()
     }
@@ -270,10 +272,6 @@ impl PluginHost {
         self.disabled.contains(name)
     }
 
-    pub fn env(&self) -> &PluginEnv {
-        &self.env
-    }
-
     /// 요청 컨텍스트. `config`는 `[plugins.<name>]`에서 `enabled`를 뺀 것, 없으면 `{}`.
     pub fn context(
         &self,
@@ -291,7 +289,8 @@ impl PluginHost {
         Context { focus, collection, entry, entries, config, paths: self.env.paths(), hook }
     }
 
-    /// 살아 있는 프로세스의 pid. 테스트와 doctor용.
+    /// 살아 있는 프로세스의 pid. 테스트용.
+    #[cfg(test)]
     pub fn pid(&self, plugin: &str) -> Option<u32> {
         let slot = self.slots.get(plugin)?;
         let guard = slot.child.lock().ok()?;
@@ -320,7 +319,8 @@ impl PluginHost {
         Ok(())
     }
 
-    /// 프로세스가 없으면 띄운다. 요청 없이 미리 띄우는 용도(테스트, 나중의 워밍업).
+    /// 프로세스가 없으면 띄운다. 요청 없이 미리 띄우는 용도(테스트. 워밍업이 필요해지면 cfg를 뗀다).
+    #[cfg(test)]
     pub fn ensure_running(&self, plugin: &str) -> Result<(), PluginError> {
         let slot = self.slots.get(plugin).ok_or_else(|| PluginError::Protocol(format!("no such plugin {}", plugin)))?;
         let running = slot.io.lock().unwrap_or_else(|p| p.into_inner()).is_some();
@@ -369,10 +369,7 @@ impl PluginHost {
 
         loop {
             let mut buf = String::new();
-            let n = match io.as_mut().expect("pipes present").stdout.read_line(&mut buf) {
-                Ok(n) => n,
-                Err(_) => 0,
-            };
+            let n = io.as_mut().expect("pipes present").stdout.read_line(&mut buf).unwrap_or(0);
             if n == 0 {
                 return Err(self.reap(slot, &mut io));
             }

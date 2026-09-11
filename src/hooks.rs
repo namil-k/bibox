@@ -79,12 +79,13 @@ impl HookRunner {
         }
     }
 
-    fn run_hooks(&self, kind: HookKind, trigger: &str, entry: Option<Entry>, entries: Vec<Entry>, hook: Value, ui: &mut dyn UiSink) -> Vec<HookOutcome> {
+    fn run_hooks(&self, kind: HookKind, entry: Option<Entry>, entries: Vec<Entry>, hook: Value, ui: &mut dyn UiSink) -> Vec<HookOutcome> {
+        let trigger = format!("hook:{}", kind.name());
         let mut out = Vec::new();
         for &id in self.host.hooks(kind) {
             let Some(cmd) = self.host.commands().get(id) else { continue };
             let ctx = self.host.context(&cmd.plugin, None, None, entry.clone(), entries.clone(), Some(hook.clone()));
-            let result = self.host.invoke(id, trigger, ctx, ui).map_err(|e| e.to_string());
+            let result = self.host.invoke(id, &trigger, ctx, ui).map_err(|e| e.to_string());
             out.push(HookOutcome { source: cmd.full_name(), result });
         }
         out
@@ -137,7 +138,7 @@ impl HookRunner {
             }
         }
         let hook = serde_json::json!({ "reason": reason.as_str(), "keys": keys });
-        out.extend(self.run_hooks(HookKind::AfterWrite, "hook:after_write", entries.first().cloned(), entries, hook, &mut NoUiSink));
+        out.extend(self.run_hooks(HookKind::AfterWrite, entries.first().cloned(), entries, hook, &mut NoUiSink));
         out
     }
 
@@ -152,7 +153,7 @@ impl HookRunner {
 
     pub fn after_note_save(&self, entry: Entry, note_path: PathBuf) -> Vec<HookOutcome> {
         let hook = serde_json::json!({ "note_path": note_path });
-        self.run_hooks(HookKind::AfterNoteSave, "hook:after_note_save", Some(entry.clone()), vec![entry], hook, &mut NoUiSink)
+        self.run_hooks(HookKind::AfterNoteSave, Some(entry.clone()), vec![entry], hook, &mut NoUiSink)
     }
 
     pub fn after_note_save_background(&self, entry: Entry, note_path: PathBuf, tx: Sender<HookOutcome>) {

@@ -81,7 +81,7 @@ pub fn cmd_plugin_list(json: bool, config: &Config) -> Result<()> {
         println!("(no plugins in {})", dir.display());
         return Ok(());
     }
-    println!("{:<20} {:<10} {:<28} {}", "NAME", "VERSION", "STATUS", "DESCRIPTION");
+    println!("{:<20} {:<10} {:<28} DESCRIPTION", "NAME", "VERSION", "STATUS");
     for (n, v, s, d) in rows {
         println!("{:<20} {:<10} {:<28} {}", n, v, s, d);
     }
@@ -298,12 +298,15 @@ pub fn doctor_checks(host: &PluginHost, config: &Config) -> Vec<PluginProblem> {
         }
     }
     for m in host.manifests() {
-        if !which(&m.run[0]) {
-            out.push(PluginProblem::ExecutableMissing { plugin: m.name.clone(), program: m.run[0].clone() });
-        }
-        if let Some(cli) = &m.cli {
-            if !which(&cli[0]) {
-                out.push(PluginProblem::ExecutableMissing { plugin: m.name.clone(), program: cli[0].clone() });
+        // 꺼진 플러그인은 시작하지 않으므로 "시작되지 않는다"는 경고가 맞지 않는다.
+        if !host.is_disabled(&m.name) {
+            if !which(&m.run[0]) {
+                out.push(PluginProblem::ExecutableMissing { plugin: m.name.clone(), program: m.run[0].clone() });
+            }
+            if let Some(cli) = &m.cli {
+                if !which(&cli[0]) {
+                    out.push(PluginProblem::ExecutableMissing { plugin: m.name.clone(), program: cli[0].clone() });
+                }
             }
         }
         if BUILTIN_SUBCOMMANDS.contains(&m.name.as_str()) {
