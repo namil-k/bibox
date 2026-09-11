@@ -14,9 +14,13 @@ def normalize_name(name):
         last, _, first = name.partition(",")
     else:
         parts = name.split(" ")
-        if len(parts) == 1:
+        if len(parts) > 1 and re.fullmatch(r"[A-Z]\.?", parts[-1]):
+            # "PARK S." : a trailing initial means the surname came first
+            last, first = parts[0], " ".join(parts[1:])
+        elif len(parts) == 1:
             return parts[0].title() if not parts[0].istitle() else parts[0]
-        last, first = parts[-1], " ".join(parts[:-1])
+        else:
+            last, first = parts[-1], " ".join(parts[:-1])
     last = last.strip()
     if last.islower() or last.isupper():
         last = last.title()
