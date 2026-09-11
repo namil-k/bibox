@@ -862,4 +862,69 @@ impl Msgs {
             (Lang::Ko, NameCollidesWithSubcommand { plugin }) => format!("  {}: 내장 서브커맨드와 이름이 같아 `bibox {}`가 플러그인에 닿지 않습니다", plugin, plugin),
         }
     }
+
+    // ── bibox plugin install / remove ──────────────────────────────────────
+
+    pub fn plugin_install_header(&self, name: &str, source: &str) -> String {
+        match self.lang {
+            Lang::En => format!("Install \"{}\" from {}?", name, source),
+            Lang::Ko => format!("{}에서 \"{}\"를 설치할까요?", source, name),
+        }
+    }
+
+    pub fn plugin_not_reviewed(&self) -> &'static str {
+        match self.lang {
+            Lang::En => "  Not in any registry. Nobody has reviewed this code.",
+            Lang::Ko => "  어느 레지스트리에도 없습니다. 아무도 이 코드를 검토하지 않았습니다.",
+        }
+    }
+
+    pub fn plugin_runs(&self, run: &str) -> String {
+        match self.lang {
+            Lang::En => format!("  Runs: {}", run),
+            Lang::Ko => format!("  실행: {}", run),
+        }
+    }
+
+    pub fn plugin_runs_as_you(&self) -> &'static str {
+        match self.lang {
+            Lang::En => "  This plugin will run on your machine with your permissions.",
+            Lang::Ko => "  이 플러그인은 이 기기에서 사용자의 권한으로 실행됩니다.",
+        }
+    }
+
+    pub fn plugin_install_question(&self) -> &'static str {
+        match self.lang {
+            Lang::En => "Install?",
+            Lang::Ko => "설치할까요?",
+        }
+    }
+
+    pub fn plugin_remove_question(&self, name: &str) -> String {
+        match self.lang {
+            Lang::En => format!("Remove plugin \"{}\" and its directory?", name),
+            Lang::Ko => format!("플러그인 \"{}\"와 그 디렉토리를 지울까요?", name),
+        }
+    }
+
+    pub fn plugin_installed(&self, name: &str, dir: &str) -> String {
+        match self.lang {
+            Lang::En => format!("Installed {} at {}", name, dir),
+            Lang::Ko => format!("{}를 {}에 설치했습니다", name, dir),
+        }
+    }
+
+    pub fn plugin_not_found(&self, name: &str) -> String {
+        match self.lang {
+            Lang::En => format!("No plugin named \"{}\" (see `bibox plugin list`)", name),
+            Lang::Ko => format!("\"{}\"라는 플러그인이 없습니다 (`bibox plugin list` 참조)", name),
+        }
+    }
+
+    pub fn plugin_no_cli(&self, name: &str) -> String {
+        match self.lang {
+            Lang::En => format!("Plugin \"{}\" has no [cli] section", name),
+            Lang::Ko => format!("플러그인 \"{}\"에 [cli] 절이 없습니다", name),
+        }
+    }
 }

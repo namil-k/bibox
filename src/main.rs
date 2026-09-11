@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 mod arxiv;
@@ -541,6 +542,55 @@ Examples:
         #[command(subcommand)]
         action: TemplateAction,
     },
+
+    /// Manage plugins (list, install, remove, enable, disable, new)
+    #[command(after_long_help = "\
+Plugins live in the config directory under plugins/<name>/ and are declared by plugin.toml.
+
+Examples:
+  bibox plugin list
+  bibox plugin install ./my-plugin                  # symlink a local directory (development)
+  bibox plugin install someone/bibox-kci            # clone a GitHub repository
+  bibox plugin install namil-k/bibox/plugins/summarize
+  bibox plugin disable summarize
+  bibox plugin new my-plugin                        # scaffold a working plugin")]
+    Plugin {
+        #[command(subcommand)]
+        action: PluginAction,
+    },
+
+    /// Run a plugin's command-line entry point (`bibox <plugin> ...`)
+    #[command(external_subcommand)]
+    External(Vec<OsString>),
+}
+
+#[derive(Subcommand)]
+enum PluginAction {
+    /// List installed plugins and their status
+    List {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Install from a local directory (symlink), owner/repo[/subdir], or a git URL
+    Install {
+        source: String,
+        /// Skip the confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Remove a plugin directory
+    Remove {
+        name: String,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Load the plugin again (removes `enabled = false` from config.toml)
+    Enable { name: String },
+    /// Keep the plugin installed but do not load it
+    Disable { name: String },
+    /// Create a working plugin skeleton in the plugins directory
+    New { name: String },
 }
 
 #[derive(Subcommand)]
@@ -793,6 +843,20 @@ async fn main() -> Result<()> {
                 TemplateAction::Delete { name } => commands::cmd_template_delete(&name, &config)?,
                 TemplateAction::Export { name } => commands::cmd_template_export(&name, &config)?,
             }
+        }
+
+        Some(Commands::Plugin { action }) => match action {
+            PluginAction::List { json } => plugin::cli::cmd_plugin_list(json, &config)?,
+            PluginAction::Install { source, yes } => plugin::cli::cmd_plugin_install(&source, yes, &config)?,
+            PluginAction::Remove { name, yes } => plugin::cli::cmd_plugin_remove(&name, yes, &config)?,
+            PluginAction::Enable { name } => plugin::cli::cmd_plugin_set_enabled(&name, true, &config)?,
+            PluginAction::Disable { name } => plugin::cli::cmd_plugin_set_enabled(&name, false, &config)?,
+            PluginAction::New { name } => plugin::cli::cmd_plugin_new(&name, &config)?,
+        },
+
+        Some(Commands::External(args)) => {
+            let code = plugin::cli::run_external(args, &config)?;
+            std::process::exit(code);
         }
     }
 
