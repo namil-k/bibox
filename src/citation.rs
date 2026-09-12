@@ -143,11 +143,18 @@ pub fn format(entry: &Entry, style: Style) -> String {
         return entry.bibtex_key.clone();
     }
     let names: Vec<Name> = entry.author.iter().map(|a| parse_name(a)).collect();
-    match style {
+    let raw = match style {
         Style::Apa => apa(entry, &names),
         Style::Ieee => ieee(entry, &names),
         Style::Chicago => chicago(entry, &names),
-    }
+    };
+    clean(&raw)
+}
+
+/// BibTeX의 대소문자 보호 중괄호(`{XR}`)와 LaTeX 표기(`Schr\"{o}dinger`)는 .bib 안의 것이다.
+/// 붙여 넣을 인용에는 남지 않아야 한다. 이스케이프를 먼저 풀어야 `{\l}` 같은 것이 잡힌다.
+fn clean(s: &str) -> String {
+    crate::commands::strip_bibtex_braces(&crate::commands::decode_latex(s))
 }
 
 /// 여러 항목은 줄바꿈으로. IEEE만 `[n] ` 번호를 붙인다.
@@ -338,6 +345,22 @@ mod tests {
         e.booktitle = Some("Proc. X".into());
         e.pages = Some("5--9".into());
         e
+    }
+
+    #[test]
+    fn bibtex_braces_and_latex_escapes_never_reach_the_citation() {
+        // 실제 라이브러리의 chen2024peapods 모양. 중괄호는 BibTeX의 대소문자 보호일 뿐이다
+        let mut e = article();
+        e.title = Some("{PEA-PODs}: Perceptual Evaluation in {XR} Displays".into());
+        e.journal = Some("{ACM} Transactions".into());
+        e.author = vec!["Schr\\\"{o}dinger, Erwin".into(), "{van der Berg}, Jan".into()];
+        let apa = format(&e, Style::Apa);
+        assert!(!apa.contains('{') && !apa.contains('}'), "{}", apa);
+        assert!(apa.contains("PEA-PODs: Perceptual Evaluation in XR Displays"), "{}", apa);
+        assert!(apa.contains("ACM Transactions"), "{}", apa);
+        assert!(apa.starts_with("Schrödinger, E., & van der Berg, J."), "{}", apa);
+        let ieee = format(&e, Style::Ieee);
+        assert!(!ieee.contains('{'), "{}", ieee);
     }
 
     #[test]

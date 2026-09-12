@@ -3114,7 +3114,7 @@ fn parse_ris(content: &str) -> ParsedEntries {
 
 /// Strip LaTeX-style curly braces used for case preservation: {Word} → Word.
 /// Handles nested braces. Does not strip quotes or other LaTeX commands.
-fn strip_bibtex_braces(s: &str) -> String {
+pub(crate) fn strip_bibtex_braces(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         if c != '{' && c != '}' {
@@ -3138,7 +3138,7 @@ fn strip_bibtex_braces(s: &str) -> String {
 
 /// Decode common LaTeX escape sequences to Unicode.
 /// Handles accented characters (\'{e} → é), special letters (\l → ł), etc.
-fn decode_latex(s: &str) -> String {
+pub(crate) fn decode_latex(s: &str) -> String {
     // First pass: named commands like {\l}, {\o}, {\aa}, {\ss}, etc.
     let named: &[(&str, &str)] = &[
         // Polish / Scandinavian / German special letters
