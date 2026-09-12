@@ -62,11 +62,6 @@ impl PluginCommands {
     pub fn len(&self) -> usize {
         self.list.len()
     }
-
-    #[cfg(test)]
-    pub fn is_empty(&self) -> bool {
-        self.list.is_empty()
-    }
 }
 
 // ── 실행 환경 ────────────────────────────────────────────────────────────────
@@ -238,10 +233,6 @@ impl PluginHost {
             }
         }
         PluginHost { manifests, slots, commands, hooks, config_tables, env }
-    }
-
-    pub fn empty(env: PluginEnv) -> PluginHost {
-        PluginHost::new(vec![], BTreeMap::new(), env)
     }
 
     pub fn commands(&self) -> &PluginCommands {

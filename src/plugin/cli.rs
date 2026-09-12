@@ -3,9 +3,9 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use crate::config::Config;
-use crate::plugin::host::{apply_env, PluginEnv};
+use crate::plugin::host::apply_env;
 use crate::plugin::manifest::{parse_manifest, PluginProblem};
-use crate::plugin::{discover, plugins_dir, Manifest, PluginHost};
+use crate::plugin::{discover, plugins_dir, Manifest, PluginEnv, PluginHost};
 
 /// 헬퍼의 단일 출처는 레포의 `plugins/lib/bibox_plugin.py`다. `plugin new`가 이 사본을 넣는다.
 pub const HELPER_PY: &str = include_str!("../../plugins/lib/bibox_plugin.py");

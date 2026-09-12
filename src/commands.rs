@@ -26,7 +26,7 @@ fn db_path_from_config(config: &Config) -> PathBuf {
 }
 
 /// CLI 저장 뒤 훅. 동기로 돌고 message/error는 stderr로, after 훅의 apply는 반영한다.
-/// git auto-commit(`git = true`)도 여기서 일어난다.
+/// git 커밋은 git-sync 내장 플러그인의 after_write 훅이 한다.
 fn after_write(config: &Config, reason: WriteReason, affected: Vec<Entry>) {
     let runner = crate::hooks::HookRunner::from_config(config);
     for o in runner.after_write(reason, affected) {
@@ -3742,7 +3742,6 @@ pub fn cmd_config(json: bool, config: &Config) -> Result<()> {
             "notes_dir": config.notes_dir.to_string_lossy(),
             "templates_dir": config.templates_dir.to_string_lossy(),
             "language": config.language,
-            "git": config.git,
             "line_numbers": format!("{:?}", config.line_numbers).to_lowercase(),
             "panel_ratio": config.panel_ratio,
             "bib_export_dir": config.bib_export_dir.to_string_lossy(),
@@ -3758,7 +3757,6 @@ pub fn cmd_config(json: bool, config: &Config) -> Result<()> {
         println!("Notes:        {}", config.notes_dir.display());
         println!("Templates:    {}", config.templates_dir.display());
         println!("Language:     {}", config.language);
-        println!("Git:          {}", config.git);
         println!("Line numbers: {:?}", config.line_numbers);
         println!("Panel ratio:  {:?}", config.panel_ratio);
         println!("Bib export:   {}", config.bib_export_dir.display());

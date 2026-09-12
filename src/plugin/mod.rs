@@ -126,9 +126,20 @@ impl host::PluginHost {
     /// 설정에서 호스트를 만든다. 매니페스트 문제는 돌려주되 호스트 구성은 계속한다.
     /// CLI 명령은 문제를 무시하고, TUI 시작 화면과 doctor가 보여준다.
     pub fn discover(config: &crate::config::Config) -> (host::PluginHost, Vec<PluginProblem>) {
+        Self::discover_with(config, false)
+    }
+
+    /// `builtins_only`는 훅 안에서 불린 bibox용이다. 외부 플러그인은 `$BIBOX_BIN`을 되불러
+    /// 무한 루프를 만들 수 있지만 내장은 그러지 않으므로, 내장만 두면 git-sync가 훅 안의
+    /// 쓰기도 커밋한다.
+    pub fn discover_with(config: &crate::config::Config, builtins_only: bool) -> (host::PluginHost, Vec<PluginProblem>) {
         seed_builtins(&plugins_dir());
-        let (manifests, mut problems) = discover(&plugins_dir());
-        problems.extend(obsolete_config_problems(config));
+        let (mut manifests, mut problems) = discover(&plugins_dir());
+        if builtins_only {
+            manifests.retain(|m| m.builtin.is_some());
+        } else {
+            problems.extend(obsolete_config_problems(config));
+        }
         let host = host::PluginHost::new(manifests, crate::config::plugin_tables(config), host::PluginEnv::from_config(config));
         (host, problems)
     }

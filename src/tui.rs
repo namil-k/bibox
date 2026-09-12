@@ -327,12 +327,6 @@ pub struct App {
     export_state: Option<ExportState>,
     // Settings state
     settings_idx: usize,
-    git_status_cache: String,
-    git_status_checked: bool,
-    git_fetching: bool,
-    git_fetch_result: std::sync::Arc<std::sync::Mutex<Option<String>>>,
-    git_syncing: bool,
-    git_sync_result: std::sync::Arc<std::sync::Mutex<Option<Result<String, String>>>>,
     // Panel areas for mouse hit-testing
     panel_areas: [Rect; 3],
     context_menu: ContextMenuState,
@@ -367,7 +361,7 @@ impl App {
         let db_path = crate::config::resolve_db_path(&config);
         let db = load_db(&db_path)?;
         let entries = db.entries;
-        let hooks = crate::hooks::HookRunner { host: Arc::clone(&host), git: config.git, db_path: db_path.clone() };
+        let hooks = crate::hooks::HookRunner { host: Arc::clone(&host), db_path: db_path.clone() };
 
         let collections = collection_paths(&entries);
 
@@ -417,12 +411,6 @@ impl App {
             selected_keys: std::collections::HashSet::new(),
             export_state: None,
             settings_idx: 0,
-            git_status_cache: String::new(),
-            git_status_checked: false,
-            git_fetching: false,
-            git_fetch_result: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            git_syncing: false,
-            git_sync_result: std::sync::Arc::new(std::sync::Mutex::new(None)),
             panel_areas: [Rect::default(); 3],
             help_query: String::new(),
             help_filtering: false,
@@ -2221,114 +2209,45 @@ fn pdf_dir_presets() -> Vec<std::path::PathBuf> {
     presets
 }
 
-fn get_git_status(home: &std::path::Path) -> String {
-    // Check if it's a git repo
-    let is_git = std::process::Command::new("git")
-        .args(["-C", &home.to_string_lossy(), "rev-parse", "--is-inside-work-tree"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    if !is_git { return "not a git repo".into(); }
+/// Settings 화면의 행. 0~7 편집 가능, 8 Home(읽기 전용). Git 행은 git-sync 플러그인으로 갔다.
+const SETTINGS_ROWS: usize = 9;
 
-    // Check for remote
-    let remote = std::process::Command::new("git")
-        .args(["-C", &home.to_string_lossy(), "remote"])
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .unwrap_or_default();
-    if remote.trim().is_empty() { return "no remote".into(); }
-
-    // Check for uncommitted changes
-    let status = std::process::Command::new("git")
-        .args(["-C", &home.to_string_lossy(), "status", "--porcelain"])
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .unwrap_or_default();
-    if !status.trim().is_empty() {
-        return format!("{} ● uncommitted changes", remote.trim());
-    }
-
-    // Fetch and check ahead/behind
-    let _ = std::process::Command::new("git")
-        .args(["-C", &home.to_string_lossy(), "fetch", "--quiet"])
-        .output();
-    let behind = std::process::Command::new("git")
-        .args(["-C", &home.to_string_lossy(), "rev-list", "--count", "HEAD..@{upstream}"])
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .and_then(|s| s.trim().parse::<usize>().ok())
-        .unwrap_or(0);
-
-    let branch = std::process::Command::new("git")
-        .args(["-C", &home.to_string_lossy(), "branch", "--show-current"])
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .unwrap_or_else(|| "master".into());
-
-    if behind > 0 {
-        format!("{}/{} ⚠ {} behind", remote.trim(), branch.trim(), behind)
-    } else {
-        format!("{}/{} ✓ up to date", remote.trim(), branch.trim())
-    }
-}
-
-fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
+fn settings_items(config: &Config) -> Vec<(String, bool)> {
     use crate::config::LineNumbers;
-    let popup_area = centered_rect(70, 20, area);
-    f.render_widget(Clear, popup_area);
-
-    let ln_label = match app.config.line_numbers {
+    let ln_label = match config.line_numbers {
         LineNumbers::Absolute => "absolute",
         LineNumbers::Relative => "relative",
         LineNumbers::None => "none",
     };
-    let ratio = app.config.panel_ratio;
-    let bib_dir = app.config.bib_export_dir.display().to_string();
-    let exp_dir = app.config.export_dir.display().to_string();
-
-    let home_label = match &app.config.home {
-        Some(h) => h.display().to_string(),
-        None => "(not set — use `bibox init <path>`)".into(),
-    };
-
-    const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-    let git_label = if app.git_fetching {
-        let frame = SPINNER_FRAMES[(app.spinner_tick / 3) % SPINNER_FRAMES.len()];
-        format!("{} checking...", frame)
-    } else if app.git_syncing {
-        let frame = SPINNER_FRAMES[(app.spinner_tick / 3) % SPINNER_FRAMES.len()];
-        format!("{} syncing...", frame)
-    } else {
-        app.git_status_cache.clone()
-    };
-
-    let ck_fmt = &app.config.citekey_format;
-
-    let scroll_label = if app.config.natural_scroll { "natural" } else { "standard" };
-    let status_bar_label = if app.config.status_bar { "shown" } else { "hidden" };
-    let pdf_dir_label = match &app.config.pdf_dir {
+    let ratio = config.panel_ratio;
+    let scroll_label = if config.natural_scroll { "natural" } else { "standard" };
+    let status_bar_label = if config.status_bar { "shown" } else { "hidden" };
+    let pdf_dir_label = match &config.pdf_dir {
         Some(p) => p.display().to_string(),
         None => "(default: home/pdfs/)".into(),
     };
-
-    let mut items: Vec<(String, bool)> = vec![
+    let home_label = match &config.home {
+        Some(h) => h.display().to_string(),
+        None => "(not set. use `bibox init <path>`)".into(),
+    };
+    vec![
         (format!("Line numbers     [{}]", ln_label), true),
         (format!("Panel ratio      [{}, {}, {}]", ratio[0], ratio[1], ratio[2]), true),
         (format!("Scroll direction [{}]", scroll_label), true),
         (format!("Status bar       [{}]", status_bar_label), true),
-        (format!("Bib export dir   [{}]", bib_dir), true),
-        (format!("Export dir       [{}]", exp_dir), true),
-        (format!("Citekey format   [{}]", ck_fmt), true),
+        (format!("Bib export dir   [{}]", config.bib_export_dir.display()), true),
+        (format!("Export dir       [{}]", config.export_dir.display()), true),
+        (format!("Citekey format   [{}]", config.citekey_format), true),
         (format!("PDF storage      [{}]", pdf_dir_label), true),
-    ];
-    // separator + read-only items
-    let readonly_start = items.len();
-    items.push((format!("Home             {}", home_label), false));
-    items.push((format!("Git              {}", git_label), false));
+        (format!("Home             {}", home_label), false),
+    ]
+}
+
+fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
+    let popup_area = centered_rect(70, 20, area);
+    f.render_widget(Clear, popup_area);
+    let items = settings_items(&app.config);
+    let readonly_start = 8;
 
     let mut lines = vec![
         Line::from(Span::styled("Settings", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
@@ -2352,19 +2271,9 @@ fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
         ]));
     }
 
-    // Show git hint when on Git row
-    if app.settings_idx == readonly_start + 1 && app.config.home.is_some() {
-        let hint = if app.git_status_checked {
-            "           [Enter: sync (pull → commit → push)]"
-        } else {
-            "           [Enter: check status]"
-        };
-        lines.push(Line::from(Span::styled(hint, Style::default().fg(Color::Cyan))));
-    }
-
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "↑↓ navigate  ←→ change value  Enter save/sync  Esc cancel",
+        "↑↓ navigate  ←→ change value  Enter save  Esc cancel",
         Style::default().fg(Color::DarkGray),
     )));
 
@@ -2890,8 +2799,6 @@ fn execute(app: &mut App, action: Action, ctx: ExecCtx) -> Result<Flow> {
 
         Action::Settings => {
             app.settings_idx = 0;
-            app.git_status_cache = "Press Enter to check".into();
-            app.git_status_checked = false;
             app.mode = Mode::Settings;
         }
 
@@ -3231,7 +3138,7 @@ fn handle_export_menu(app: &mut App, key: crossterm::event::KeyEvent) -> Result<
 
 fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
     use crate::config::LineNumbers;
-    let num_settings: usize = 10; // 0-7 editable, 8 home (ro), 9 git
+    let num_settings: usize = SETTINGS_ROWS;
 
     let download_dir = dirs::download_dir()
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")));
@@ -3401,69 +3308,6 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
                 );
                 app.mode = Mode::FilePicker(FilePickerContext::Home);
                 return Ok(false);
-            } else if app.settings_idx == 9 {
-                if let Some(ref home) = app.config.home {
-                    let home = crate::config::expand_tilde(home);
-                    if !app.git_status_checked {
-                        // First Enter: check status in background
-                        app.git_status_cache = String::new();
-                        app.git_fetching = true;
-                        let result_slot = std::sync::Arc::clone(&app.git_fetch_result);
-                        let home_clone = home.clone();
-                        std::thread::spawn(move || {
-                            let status = get_git_status(&home_clone);
-                            if let Ok(mut slot) = result_slot.lock() {
-                                *slot = Some(status);
-                            }
-                        });
-                        app.git_status_checked = true;
-                    } else {
-                        // Second Enter: sync in background
-                        app.git_status_cache = String::new();
-                        app.git_syncing = true;
-                        let result_slot = std::sync::Arc::clone(&app.git_sync_result);
-                        let home_str = home.to_string_lossy().to_string();
-                        std::thread::spawn(move || {
-                            let result = (|| -> Result<String, String> {
-                                // 1. Stage and commit local changes first
-                                let _ = std::process::Command::new("git")
-                                    .args(["-C", &home_str, "add", "."])
-                                    .output();
-                                let diff = std::process::Command::new("git")
-                                    .args(["-C", &home_str, "diff", "--cached", "--quiet"])
-                                    .output()
-                                    .map_err(|e| e.to_string())?;
-                                if !diff.status.success() {
-                                    let _ = std::process::Command::new("git")
-                                        .args(["-C", &home_str, "commit", "-m", "bibox sync"])
-                                        .output();
-                                }
-                                // 2. Pull with rebase (safe now - no unstaged changes)
-                                let pull = std::process::Command::new("git")
-                                    .args(["-C", &home_str, "pull", "--rebase"])
-                                    .output()
-                                    .map_err(|e| e.to_string())?;
-                                if !pull.status.success() {
-                                    return Err(format!("git pull failed: {}", String::from_utf8_lossy(&pull.stderr).trim()));
-                                }
-                                // 3. Push
-                                let push = std::process::Command::new("git")
-                                    .args(["-C", &home_str, "push"])
-                                    .output()
-                                    .map_err(|e| e.to_string())?;
-                                if !push.status.success() {
-                                    return Err(format!("git push failed: {}", String::from_utf8_lossy(&push.stderr).trim()));
-                                }
-                                Ok("Sync complete.".into())
-                            })();
-                            if let Ok(mut slot) = result_slot.lock() {
-                                *slot = Some(result);
-                            }
-                        });
-                    }
-                } else {
-                    app.mode = Mode::Message("No home set. Run `bibox init <path>` first.".into());
-                }
             } else {
                 // Save config
                 let _ = crate::config::save_config(&app.config);
@@ -3956,54 +3800,6 @@ fn run_loop(
             }
             // Reload note if in note preview mode
             app.note_citekey.clear();
-        }
-
-        // Poll git sync background result
-        let sync_result_arc = std::sync::Arc::clone(&app.git_sync_result);
-        if app.git_syncing {
-            app.spinner_tick = app.spinner_tick.wrapping_add(1);
-            if let Ok(mut slot) = sync_result_arc.try_lock() {
-                if let Some(result) = slot.take() {
-                    app.git_syncing = false;
-                    app.git_status_checked = false;
-                    match result {
-                        Ok(msg) => {
-                            let db_path = crate::config::resolve_db_path(&app.config);
-                            // Check for merge conflict markers before reloading
-                            let has_conflicts = std::fs::read_to_string(&db_path)
-                                .map(|s| s.contains("<<<<<<<"))
-                                .unwrap_or(false);
-                            if has_conflicts {
-                                app.mode = Mode::Message(
-                                    "Sync done but db.json has merge conflicts! Run `bibox doctor` to inspect.".into()
-                                );
-                            } else if let Ok(db) = load_db(&db_path) {
-                                app.entries = db.entries;
-                                app.rebuild_collections();
-                                app.apply_filters();
-                                app.mode = Mode::Message(msg);
-                            } else {
-                                app.mode = Mode::Message(
-                                    "Sync done but db.json could not be loaded. Run `bibox doctor`.".into()
-                                );
-                            }
-                        }
-                        Err(e) => { app.mode = Mode::Message(format!("Sync failed: {}", e)); }
-                    }
-                }
-            }
-        }
-
-        // Poll git fetch background result
-        let fetch_result_arc = std::sync::Arc::clone(&app.git_fetch_result);
-        if app.git_fetching {
-            app.spinner_tick = app.spinner_tick.wrapping_add(1);
-            if let Ok(mut slot) = fetch_result_arc.try_lock() {
-                if let Some(status) = slot.take() {
-                    app.git_status_cache = status;
-                    app.git_fetching = false;
-                }
-            }
         }
 
         // Poll background hooks. 성공은 조용하고, message/error/apply/refresh만 다룬다.
@@ -4679,5 +4475,15 @@ mod tests {
         let (label, action) = items.last().unwrap();
         assert_eq!(label, "Normalize the entry");
         assert_eq!(*action, Action::Plugin(commands.find("tidy.run").unwrap()));
+    }
+    #[test]
+    fn settings_rows_end_at_home_and_have_no_git_row() {
+        let config = crate::config::Config::default();
+        let items = super::settings_items(&config);
+        assert_eq!(items.len(), super::SETTINGS_ROWS);
+        assert!(items.last().unwrap().0.starts_with("Home"));
+        assert!(!items.last().unwrap().1, "home is read-only");
+        assert!(items.iter().all(|(label, _)| !label.starts_with("Git")));
+        assert_eq!(items.iter().filter(|(_, editable)| *editable).count(), 8);
     }
 }

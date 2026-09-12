@@ -33,50 +33,31 @@ impl WriteReason {
         }
     }
 
-    /// 기존 auto-commit 메시지와 같은 모양. "bibox: add kim2025", "bibox: import 12 entries".
-    pub fn commit_message(&self, keys: &[String]) -> String {
-        match (self, keys.len()) {
-            (WriteReason::Undo, _) => "bibox: undo".to_string(),
-            (WriteReason::Redo, _) => "bibox: redo".to_string(),
-            (WriteReason::Other, _) => "bibox: update".to_string(),
-            (WriteReason::Import, n) => format!("bibox: import {} entries", n),
-            (r, 1) => format!("bibox: {} {}", r.as_str(), keys[0]),
-            (r, n) => format!("bibox: {} {} entries", r.as_str(), n),
-        }
-    }
 }
 
-/// 훅 하나의 결과. `source`는 "git" 또는 "<plugin>.<command>".
+/// 훅 하나의 결과. `source`는 "<plugin>.<command>".
 #[derive(Debug)]
 pub struct HookOutcome {
     pub source: String,
     pub result: Result<Final, String>,
 }
 
-/// 저장 이벤트를 받아 git auto-commit과 플러그인 훅을 같은 자리에서 발화한다.
+/// 저장 이벤트를 받아 플러그인 훅을 발화한다. git 커밋도 git-sync 내장 플러그인의 훅이다.
 /// `Clone`이라 백그라운드 스레드로 들고 갈 수 있다.
 #[derive(Clone)]
 pub struct HookRunner {
     pub host: Arc<PluginHost>,
-    pub git: bool,
     pub db_path: PathBuf,
 }
 
 impl HookRunner {
     /// CLI용. 매니페스트 문제는 무시한다(doctor와 TUI 시작 화면이 보여준다).
     pub fn from_config(config: &Config) -> HookRunner {
-        // 훅 안에서 불린 bibox는 플러그인 훅을 다시 발화하지 않는다(프로세스 경계를 넘는 무한 루프 방지).
-        // 헬퍼가 `$BIBOX_BIN`을 되부를 때 이 변수를 붙인다. git auto-commit은 그대로 한다.
-        let host = if std::env::var_os("BIBOX_IN_HOOK").is_some() {
-            PluginHost::empty(crate::plugin::PluginEnv::from_config(config))
-        } else {
-            PluginHost::discover(config).0
-        };
-        HookRunner {
-            host: Arc::new(host),
-            git: config.git,
-            db_path: crate::config::resolve_db_path(config),
-        }
+        // 훅 안에서 불린 bibox는 외부 플러그인 훅을 다시 발화하지 않는다(프로세스 경계를 넘는 무한 루프 방지).
+        // 내장 플러그인은 그대로 둔다. git-sync가 훅 안의 쓰기도 커밋해야 하기 때문이다.
+        let in_hook = std::env::var_os("BIBOX_IN_HOOK").is_some();
+        let (host, _) = PluginHost::discover_with(config, in_hook);
+        HookRunner { host: Arc::new(host), db_path: crate::config::resolve_db_path(config) }
     }
 
     fn run_hooks(&self, kind: HookKind, entry: Option<Entry>, entries: Vec<Entry>, hook: Value, ui: &mut dyn UiSink) -> Vec<HookOutcome> {
@@ -128,18 +109,11 @@ impl HookRunner {
         (current, outcomes)
     }
 
-    /// 동기. git auto-commit이 먼저, 그다음 플러그인 훅(알파벳순). UI 없음.
+    /// 동기. 플러그인 훅을 알파벳순으로. UI 없음.
     pub fn after_write(&self, reason: WriteReason, entries: Vec<Entry>) -> Vec<HookOutcome> {
         let keys: Vec<String> = entries.iter().map(|e| e.bibtex_key.clone()).collect();
-        let mut out = Vec::new();
-        if self.git {
-            if let Err(w) = crate::git::auto_commit_quiet(&self.db_path, &reason.commit_message(&keys)) {
-                out.push(HookOutcome { source: "git".to_string(), result: Err(w) });
-            }
-        }
         let hook = serde_json::json!({ "reason": reason.as_str(), "keys": keys });
-        out.extend(self.run_hooks(HookKind::AfterWrite, entries.first().cloned(), entries, hook, &mut NoUiSink));
-        out
+        self.run_hooks(HookKind::AfterWrite, entries.first().cloned(), entries, hook, &mut NoUiSink)
     }
 
     pub fn after_write_background(&self, reason: WriteReason, entries: Vec<Entry>, tx: Sender<HookOutcome>) {
@@ -198,17 +172,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn commit_messages_match_the_old_auto_commit_texts() {
-        assert_eq!(WriteReason::Add.commit_message(&["kim2025".into()]), "bibox: add kim2025");
-        assert_eq!(WriteReason::Edit.commit_message(&["kim2025".into()]), "bibox: edit kim2025");
-        assert_eq!(WriteReason::Delete.commit_message(&["kim2025".into()]), "bibox: delete kim2025");
-        assert_eq!(WriteReason::Import.commit_message(&["a".into(), "b".into(), "c".into()]), "bibox: import 3 entries");
-        assert_eq!(WriteReason::Edit.commit_message(&["a".into(), "b".into()]), "bibox: edit 2 entries");
-        assert_eq!(WriteReason::Undo.commit_message(&[]), "bibox: undo");
-        assert_eq!(WriteReason::Other.commit_message(&[]), "bibox: update");
-    }
-
     fn runner_with(script: &str, hook: &str) -> (HookRunner, PathBuf) {
         static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -227,7 +190,7 @@ mod tests {
             notes: dir.join("n"), pdfs: dir.join("p"), home: None,
         };
         let host = Arc::new(crate::plugin::PluginHost::new(vec![m], Default::default(), env));
-        (HookRunner { host, git: false, db_path: dir.join("db.json") }, dir)
+        (HookRunner { host, db_path: dir.join("db.json") }, dir)
     }
 
     #[test]
@@ -282,7 +245,7 @@ mod tests {
         let m = parse_manifest(&dir, text, &mut problems).unwrap();
         let env = crate::plugin::PluginEnv { bin: "/bin/true".into(), config_dir: dir.clone(), db: dir.join("db.json"), notes: dir.join("n"), pdfs: dir.join("p"), home: None };
         let host = Arc::new(crate::plugin::PluginHost::new(vec![m], Default::default(), env));
-        let r = HookRunner { host, git: false, db_path: dir.join("db.json") };
+        let r = HookRunner { host, db_path: dir.join("db.json") };
         let (e, out) = r.before_add(entry("1", "a"), &mut crate::plugin::NoUiSink);
         assert!(out[0].result.is_ok(), "{:?}", out[0].result);
         assert_eq!(e.title.as_deref(), Some("Tidied"));
@@ -306,13 +269,14 @@ mod tests {
     }
 
     #[test]
-    fn from_config_inside_a_hook_has_no_plugin_hooks_but_keeps_git() {
+    fn from_config_inside_a_hook_loads_only_builtins() {
         std::env::set_var("BIBOX_IN_HOOK", "1");
-        let mut config = crate::config::Config::default();
-        config.git = true;
+        let config = crate::config::Config::default();
         let r = HookRunner::from_config(&config);
         std::env::remove_var("BIBOX_IN_HOOK");
-        assert!(r.host.commands().is_empty());
-        assert!(r.git);
+        // 실제 사용자 디렉토리를 읽으므로 무엇이 있는지는 단정하지 않는다. 외부 플러그인이 없다는 것만 본다.
+        for (_, c) in r.host.commands().iter() {
+            assert!(crate::plugin::builtin::find(&c.plugin).is_some(), "{} is not a builtin", c.plugin);
+        }
     }
 }
