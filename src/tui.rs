@@ -86,6 +86,7 @@ enum Mode {
     Loading(String),
     ExportMenu,
     Settings,
+    SettingsInput(SettingsInput),
     FilePicker(FilePickerContext),
     FetchPreview,
     SearchResultPicker,
@@ -184,10 +185,79 @@ enum ConfirmAction {
 
 enum FilePickerContext {
     AttachPdf(String),  // citekey
-    BibExportDir,
-    ExportDir,
-    PdfDir,
-    Home,
+    /// `settings::Item.id`. 고르면 Settings로 돌아온다.
+    Setting(String),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingsFocus {
+    Sections,
+    Rows,
+}
+
+/// Settings 팝업의 상태. 선택기나 확인 팝업을 다녀와도 위치가 남도록 `App`에 둔다.
+struct SettingsState {
+    focus: SettingsFocus,
+    /// `settings::Section::ALL`의 인덱스
+    section: usize,
+    /// 오른쪽 칸 행 인덱스(`settings_pane_rows` 결과 기준)
+    row: usize,
+    /// 아래 줄에 한 번 보이는 알림. (문구, 오류인가). 다음 키에 사라진다.
+    notice: Option<(String, bool)>,
+}
+
+impl SettingsState {
+    fn new() -> Self {
+        SettingsState { focus: SettingsFocus::Sections, section: 0, row: 0, notice: None }
+    }
+
+    fn section(&self) -> crate::settings::Section {
+        crate::settings::Section::ALL[self.section]
+    }
+}
+
+/// 오른쪽 칸의 행. `Item`만 h/l/Enter를 받는다.
+#[derive(Debug, Clone, PartialEq)]
+enum PaneRow {
+    Header(String),
+    Text(String),
+    Blank,
+    /// `App::settings_items()`의 인덱스
+    Item(usize),
+}
+
+fn selectable(row: &PaneRow) -> bool {
+    matches!(row, PaneRow::Item(_))
+}
+
+fn first_selectable(rows: &[PaneRow]) -> usize {
+    rows.iter().position(selectable).unwrap_or(0)
+}
+
+/// 선택 가능한 다음/이전 행. 없으면 제자리.
+fn move_cursor(rows: &[PaneRow], from: usize, delta: i32) -> usize {
+    let mut i = from as i64;
+    loop {
+        i += delta as i64;
+        if i < 0 || i as usize >= rows.len() {
+            return from;
+        }
+        if selectable(&rows[i as usize]) {
+            return i as usize;
+        }
+    }
+}
+
+enum InputTarget {
+    /// `settings::Item.id`
+    Item(String),
+}
+
+/// int/string 항목의 입력 팝업. 플러그인 UI의 prompt와 같은 모양.
+struct SettingsInput {
+    title: String,
+    buf: String,
+    target: InputTarget,
 }
 
 struct BgTaskResult {
@@ -327,7 +397,7 @@ pub struct App {
     // Export menu state
     export_state: Option<ExportState>,
     // Settings state
-    settings_idx: usize,
+    settings: SettingsState,
     // Panel areas for mouse hit-testing
     panel_areas: [Rect; 3],
     context_menu: ContextMenuState,
@@ -411,7 +481,7 @@ impl App {
             redo_stack: Vec::new(),
             selected_keys: std::collections::HashSet::new(),
             export_state: None,
-            settings_idx: 0,
+            settings: SettingsState::new(),
             panel_areas: [Rect::default(); 3],
             help_query: String::new(),
             help_filtering: false,
@@ -952,6 +1022,26 @@ fn plugin_ui_step(kind: &mut PluginUiKind, code: KeyCode) -> Option<UiAnswer> {
 }
 
 impl App {
+    fn open_settings(&mut self, section: crate::settings::Section) {
+        self.settings = SettingsState::new();
+        self.settings.section = crate::settings::Section::ALL.iter().position(|s| *s == section).unwrap_or(0);
+        let items = self.settings_items();
+        let rows = settings_pane_rows(self, &items);
+        self.settings.row = first_selectable(&rows);
+        self.mode = Mode::Settings;
+    }
+
+    fn settings_items(&self) -> Vec<crate::settings::Item> {
+        crate::settings::core_items()
+    }
+
+    /// 값을 바꾼 직후마다 부른다. 실패는 알림 줄에.
+    fn save_settings(&mut self) {
+        if let Err(e) = crate::config::save_config(&self.config) {
+            self.settings.notice = Some((format!("Could not save config.toml: {}", e), true));
+        }
+    }
+
     /// 메모리의 항목을 디스크에 쓰고 `after_write`를 백그라운드로 발화한다.
     /// `fire_hooks = false`는 훅 안에서 생긴 쓰기(재발화 방지)에만 쓴다.
     fn persist(&mut self, reason: crate::hooks::WriteReason, affected: Vec<Entry>, fire_hooks: bool) -> Result<()> {
@@ -1258,6 +1348,12 @@ fn draw(f: &mut Frame, app: &mut App) {
         }
         Mode::Settings => {
             draw_settings_popup(f, app, size);
+        }
+        Mode::SettingsInput(_) => {
+            draw_settings_popup(f, app, size);
+            if let Mode::SettingsInput(input) = &app.mode {
+                draw_settings_input(f, input, size);
+            }
         }
         Mode::ContextMenu => {
             draw_context_menu(f, app, size);
@@ -2249,91 +2345,130 @@ fn draw_export_popup(f: &mut Frame, es: &ExportState, area: Rect) {
     f.render_widget(popup, popup_area);
 }
 
-fn pdf_dir_presets() -> Vec<std::path::PathBuf> {
-    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    let mut presets = Vec::new();
-    // iCloud (macOS)
-    let icloud = home.join("Library/Mobile Documents/com~apple~CloudDocs/bibox-pdfs");
-    presets.push(icloud);
-    // Google Drive
-    presets.push(home.join("Google Drive/bibox-pdfs"));
-    // Dropbox
-    presets.push(home.join("Dropbox/bibox-pdfs"));
-    // ~/Documents/bibox-pdfs
-    presets.push(home.join("Documents/bibox-pdfs"));
-    presets
+/// 현재 절(또는 페이지, 검색)의 오른쪽 칸 행. 커서 이동과 그리기가 같은 목록을 본다.
+fn settings_pane_rows(app: &App, items: &[crate::settings::Item]) -> Vec<PaneRow> {
+    let section = app.settings.section();
+    items
+        .iter()
+        .enumerate()
+        .filter(|(_, it)| it.section == section)
+        .map(|(i, _)| PaneRow::Item(i))
+        .collect()
 }
 
-/// Settings 화면의 행. 0~7 편집 가능, 8 Home(읽기 전용). Git 행은 git-sync 플러그인으로 갔다.
-const SETTINGS_ROWS: usize = 9;
-
-fn settings_items(config: &Config) -> Vec<(String, bool)> {
-    use crate::config::LineNumbers;
-    let ln_label = match config.line_numbers {
-        LineNumbers::Absolute => "absolute",
-        LineNumbers::Relative => "relative",
-        LineNumbers::None => "none",
-    };
-    let ratio = config.panel_ratio;
-    let scroll_label = if config.natural_scroll { "natural" } else { "standard" };
-    let status_bar_label = if config.status_bar { "shown" } else { "hidden" };
-    let pdf_dir_label = match &config.pdf_dir {
-        Some(p) => p.display().to_string(),
-        None => "(default: home/pdfs/)".into(),
-    };
-    let home_label = match &config.home {
-        Some(h) => h.display().to_string(),
-        None => "(not set. use `bibox init <path>`)".into(),
-    };
-    vec![
-        (format!("Line numbers     [{}]", ln_label), true),
-        (format!("Panel ratio      [{}, {}, {}]", ratio[0], ratio[1], ratio[2]), true),
-        (format!("Scroll direction [{}]", scroll_label), true),
-        (format!("Status bar       [{}]", status_bar_label), true),
-        (format!("Bib export dir   [{}]", config.bib_export_dir.display()), true),
-        (format!("Export dir       [{}]", config.export_dir.display()), true),
-        (format!("Citekey format   [{}]", config.citekey_format), true),
-        (format!("PDF storage      [{}]", pdf_dir_label), true),
-        (format!("Home             {}", home_label), false),
-    ]
+/// 칸 폭에 맞춰 단어 단위로 접는다. 하드 랩은 여기서만 한다.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(8);
+    let mut out = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width {
+            out.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() || out.is_empty() {
+        out.push(line);
+    }
+    out
 }
 
 fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
-    let popup_area = centered_rect(70, 20, area);
+    use crate::settings::Section;
+    let height = (area.height * 7 / 10).max(12).min(area.height);
+    let popup_area = centered_rect(80, height, area);
     f.render_widget(Clear, popup_area);
-    let items = settings_items(&app.config);
-    let readonly_start = 8;
+    let block = Block::default().borders(Borders::ALL).title(" Settings ");
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
 
-    let mut lines = vec![
-        Line::from(Span::styled("Settings", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
-        Line::from(""),
-    ];
-    for (i, (label, editable)) in items.iter().enumerate() {
-        if i == readonly_start {
-            lines.push(Line::from(Span::styled("  ─────────────────────────────", Style::default().fg(Color::DarkGray))));
-        }
-        let arrow = if i == app.settings_idx { "▶ " } else { "  " };
-        let style = if !editable {
-            Style::default().fg(Color::DarkGray)
-        } else if i == app.settings_idx {
-            Style::default().fg(Color::Cyan)
-        } else {
-            Style::default()
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(inner);
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(12), Constraint::Length(1), Constraint::Min(1)])
+        .split(vertical[0]);
+
+    // 왼쪽: 절
+    let st = &app.settings;
+    let left_focused = st.focus == SettingsFocus::Sections;
+    let mut left = Vec::new();
+    for (i, s) in Section::ALL.iter().enumerate() {
+        let selected = i == st.section;
+        let style = match (selected, left_focused) {
+            (true, true) => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            (true, false) => Style::default().fg(Color::Cyan),
+            _ => Style::default(),
         };
-        lines.push(Line::from(vec![
-            Span::styled(arrow, Style::default().fg(Color::Yellow)),
-            Span::styled(label.as_str(), style),
-        ]));
+        let mark = if selected { ">" } else { " " };
+        left.push(Line::from(Span::styled(format!("{}{}", mark, s.label()), style)));
     }
+    f.render_widget(Paragraph::new(left), columns[0]);
+    let divider: Vec<Line> = (0..columns[1].height).map(|_| Line::from(Span::styled("│", Style::default().fg(Color::DarkGray)))).collect();
+    f.render_widget(Paragraph::new(divider), columns[1]);
 
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "↑↓ navigate  ←→ change value  Enter save  Esc cancel",
-        Style::default().fg(Color::DarkGray),
-    )));
+    // 오른쪽: 행. Text는 접히므로 행 하나가 여러 줄이 될 수 있다.
+    let items = app.settings_items();
+    let rows = settings_pane_rows(app, &items);
+    let right = columns[2];
+    let width = right.width as usize;
+    let mut lines: Vec<(Option<usize>, Line)> = Vec::new();
+    for (ri, row) in rows.iter().enumerate() {
+        let is_cursor = ri == st.row && st.focus == SettingsFocus::Rows;
+        match row {
+            PaneRow::Header(h) => lines.push((Some(ri), Line::from(Span::styled(h.clone(), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))))),
+            PaneRow::Blank => lines.push((Some(ri), Line::from(""))),
+            PaneRow::Text(t) => {
+                for (k, l) in wrap_words(t, width.saturating_sub(1)).into_iter().enumerate() {
+                    lines.push((if k == 0 { Some(ri) } else { None }, Line::from(Span::styled(l, Style::default().fg(Color::Gray)))));
+                }
+            }
+            PaneRow::Item(i) => {
+                let it = &items[*i];
+                let mark = if is_cursor { "> " } else { "  " };
+                let val = crate::settings::value(it, &app.config);
+                let head = format!("{}{:<18} [{}]", mark, it.label, val);
+                let style = if is_cursor { Style::default().fg(Color::Cyan) } else { Style::default() };
+                let mut spans = vec![Span::styled(head.clone(), style)];
+                let used = head.chars().count();
+                if !it.desc.is_empty() && used + 3 < width {
+                    let room = width - used - 2;
+                    let desc: String = it.desc.chars().take(room).collect();
+                    spans.push(Span::styled(format!("  {}", desc), Style::default().fg(Color::DarkGray)));
+                }
+                lines.push((Some(ri), Line::from(spans)));
+            }
+        }
+    }
+    // 커서 줄이 보이도록 창을 민다
+    let cursor_line = lines.iter().position(|(r, _)| *r == Some(st.row)).unwrap_or(0);
+    let visible = right.height as usize;
+    let start = if cursor_line >= visible { cursor_line + 1 - visible } else { 0 };
+    let shown: Vec<Line> = lines.into_iter().skip(start).take(visible).map(|(_, l)| l).collect();
+    f.render_widget(Paragraph::new(shown), right);
 
-    let popup = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Settings "));
-    f.render_widget(popup, popup_area);
+    // 아래 줄: 알림 또는 키 안내
+    let footer = match &st.notice {
+        Some((text, is_err)) => Line::from(Span::styled(text.clone(), Style::default().fg(if *is_err { Color::Red } else { Color::Green }))),
+        None => Line::from(Span::styled("Tab switch  j/k move  h/l change  Enter edit  Esc close", Style::default().fg(Color::DarkGray))),
+    };
+    f.render_widget(Paragraph::new(footer), vertical[1]);
+}
+
+fn draw_settings_input(f: &mut Frame, input: &SettingsInput, area: Rect) {
+    let popup_area = centered_rect(60, 5, area);
+    f.render_widget(Clear, popup_area);
+    let text = Paragraph::new(vec![
+        Line::from(Span::styled(input.title.clone(), Style::default().fg(Color::Yellow))),
+        Line::from(format!("> {}▏", input.buf)),
+    ])
+    .block(Block::default().borders(Borders::ALL).title(" Settings "));
+    f.render_widget(text, popup_area);
 }
 
 // ── Event loop ───────────────────────────────────────────────────────────────
@@ -2507,6 +2642,7 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
         Mode::TagEditor => handle_picker(app, key, true),
         Mode::ExportMenu => handle_export_menu(app, key),
         Mode::Settings => handle_settings(app, key),
+        Mode::SettingsInput(_) => handle_settings_input(app, key),
         Mode::FilePicker(_) => handle_file_picker(app, key),
         Mode::FetchPreview => handle_fetch_preview(app, key),
         Mode::SearchResultPicker => handle_search_result_picker(app, key),
@@ -2860,8 +2996,7 @@ fn execute(app: &mut App, action: Action, ctx: ExecCtx) -> Result<Flow> {
         }
 
         Action::Settings => {
-            app.settings_idx = 0;
-            app.mode = Mode::Settings;
+            app.open_settings(crate::settings::Section::General);
         }
 
         Action::Noop => {}
@@ -3199,197 +3334,120 @@ fn handle_export_menu(app: &mut App, key: crossterm::event::KeyEvent) -> Result<
 }
 
 fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
-    use crate::config::LineNumbers;
-    let num_settings: usize = SETTINGS_ROWS;
+    use crate::settings::{Kind, Section};
+    app.settings.notice = None;
+    let items = app.settings_items();
+    let rows = settings_pane_rows(app, &items);
+    let focus = app.settings.focus;
 
-    let download_dir = dirs::download_dir()
-        .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")));
-    let home_dir = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
-    let cwd = std::path::PathBuf::from(".");
-
-    let dir_presets: Vec<std::path::PathBuf> = vec![
-        cwd.clone(),
-        download_dir.clone(),
-        home_dir.join("Documents"),
-        home_dir.join("Desktop"),
-    ];
-
-    match key.code {
-        KeyCode::Up | KeyCode::Char('k') => {
-            if app.settings_idx > 0 { app.settings_idx -= 1; }
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            if app.settings_idx < num_settings - 1 { app.settings_idx += 1; }
-        }
-        KeyCode::Right | KeyCode::Char('l') => {
-            match app.settings_idx {
-                0 => {
-                    app.config.line_numbers = match app.config.line_numbers {
-                        LineNumbers::Absolute => LineNumbers::Relative,
-                        LineNumbers::Relative => LineNumbers::None,
-                        LineNumbers::None => LineNumbers::Absolute,
-                    };
-                }
-                1 => {
-                    app.config.panel_ratio = match app.config.panel_ratio {
-                        [2, 4, 4] => [1, 5, 4],
-                        [1, 5, 4] => [2, 3, 5],
-                        [2, 3, 5] => [1, 4, 5],
-                        [1, 4, 5] => [3, 4, 3],
-                        _ => [2, 4, 4],
-                    };
-                }
-                2 => { app.config.natural_scroll = !app.config.natural_scroll; }
-                3 => { app.config.status_bar = !app.config.status_bar; }
-                4 => {
-                    let cur = &app.config.bib_export_dir;
-                    let pos = dir_presets.iter().position(|d| d == cur).unwrap_or(0);
-                    app.config.bib_export_dir = dir_presets[(pos + 1) % dir_presets.len()].clone();
-                }
-                5 => {
-                    let cur = &app.config.export_dir;
-                    let pos = dir_presets.iter().position(|d| d == cur).unwrap_or(0);
-                    app.config.export_dir = dir_presets[(pos + 1) % dir_presets.len()].clone();
-                }
-                6 => {
-                    let presets = crate::config::CITEKEY_PRESETS;
-                    let pos = presets.iter().position(|p| *p == app.config.citekey_format).unwrap_or(0);
-                    app.config.citekey_format = presets[(pos + 1) % presets.len()].to_string();
-                }
-                7 => {
-                    // Toggle pdf_dir: None -> some cloud presets
-                    let cloud_presets = pdf_dir_presets();
-                    let cur = app.config.pdf_dir.clone();
-                    let pos = cur.and_then(|c| cloud_presets.iter().position(|p| *p == c)).map(|p| p + 1).unwrap_or(0);
-                    if pos < cloud_presets.len() {
-                        app.config.pdf_dir = Some(cloud_presets[pos].clone());
-                    } else {
-                        app.config.pdf_dir = None;
-                    }
-                }
-                _ => {} // 7,8 are read-only
-            }
-        }
-        KeyCode::Left | KeyCode::Char('h') => {
-            match app.settings_idx {
-                0 => {
-                    app.config.line_numbers = match app.config.line_numbers {
-                        LineNumbers::Absolute => LineNumbers::None,
-                        LineNumbers::Relative => LineNumbers::Absolute,
-                        LineNumbers::None => LineNumbers::Relative,
-                    };
-                }
-                1 => {
-                    app.config.panel_ratio = match app.config.panel_ratio {
-                        [2, 4, 4] => [3, 4, 3],
-                        [3, 4, 3] => [1, 4, 5],
-                        [1, 4, 5] => [2, 3, 5],
-                        [2, 3, 5] => [1, 5, 4],
-                        _ => [2, 4, 4],
-                    };
-                }
-                2 => { app.config.natural_scroll = !app.config.natural_scroll; }
-                3 => { app.config.status_bar = !app.config.status_bar; }
-                4 => {
-                    let cur = &app.config.bib_export_dir;
-                    let pos = dir_presets.iter().position(|d| d == cur).unwrap_or(0);
-                    let prev = if pos == 0 { dir_presets.len() - 1 } else { pos - 1 };
-                    app.config.bib_export_dir = dir_presets[prev].clone();
-                }
-                5 => {
-                    let cur = &app.config.export_dir;
-                    let pos = dir_presets.iter().position(|d| d == cur).unwrap_or(0);
-                    let prev = if pos == 0 { dir_presets.len() - 1 } else { pos - 1 };
-                    app.config.export_dir = dir_presets[prev].clone();
-                }
-                6 => {
-                    let presets = crate::config::CITEKEY_PRESETS;
-                    let pos = presets.iter().position(|p| *p == app.config.citekey_format).unwrap_or(0);
-                    let prev = if pos == 0 { presets.len() - 1 } else { pos - 1 };
-                    app.config.citekey_format = presets[prev].to_string();
-                }
-                7 => {
-                    let cloud_presets = pdf_dir_presets();
-                    let cur = app.config.pdf_dir.clone();
-                    let pos = cur.and_then(|c| cloud_presets.iter().position(|p| *p == c));
-                    match pos {
-                        Some(0) => { app.config.pdf_dir = None; }
-                        Some(p) => { app.config.pdf_dir = Some(cloud_presets[p - 1].clone()); }
-                        None => {
-                            if !cloud_presets.is_empty() {
-                                app.config.pdf_dir = Some(cloud_presets.last().unwrap().clone());
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        KeyCode::Enter => {
-            // Dir picker for path settings (4=bib_export_dir, 5=export_dir, 7=pdf_dir, 8=home)
-            if app.settings_idx == 4 {
-                let start = app.config.bib_export_dir.clone();
-                app.file_picker_state = Some(
-                    ratatree::FilePickerState::builder()
-                        .start_dir(start)
-                        .mode(ratatree::PickerMode::DirsOnly)
-                        .build()
-                );
-                app.mode = Mode::FilePicker(FilePickerContext::BibExportDir);
-                return Ok(false);
-            } else if app.settings_idx == 5 {
-                let start = app.config.export_dir.clone();
-                app.file_picker_state = Some(
-                    ratatree::FilePickerState::builder()
-                        .start_dir(start)
-                        .mode(ratatree::PickerMode::DirsOnly)
-                        .build()
-                );
-                app.mode = Mode::FilePicker(FilePickerContext::ExportDir);
-                return Ok(false);
-            } else if app.settings_idx == 7 {
-                let start = app.config.pdf_dir.clone()
-                    .or_else(|| app.config.home.as_ref().map(|h| crate::config::expand_tilde(h).join("pdfs")))
-                    .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")));
-                app.file_picker_state = Some(
-                    ratatree::FilePickerState::builder()
-                        .start_dir(start)
-                        .mode(ratatree::PickerMode::DirsOnly)
-                        .build()
-                );
-                app.mode = Mode::FilePicker(FilePickerContext::PdfDir);
-                return Ok(false);
-            } else if app.settings_idx == 8 {
-                let start = app.config.home.clone()
-                    .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")));
-                app.file_picker_state = Some(
-                    ratatree::FilePickerState::builder()
-                        .start_dir(start)
-                        .mode(ratatree::PickerMode::DirsOnly)
-                        .build()
-                );
-                app.mode = Mode::FilePicker(FilePickerContext::Home);
-                return Ok(false);
-            } else {
-                // Save config
-                let _ = crate::config::save_config(&app.config);
-                app.mode = Mode::Message("Settings saved.".into());
-            }
-        }
-        KeyCode::Esc => {
-            if let Ok(cfg) = crate::config::load_config() {
-                app.config.line_numbers = cfg.line_numbers;
-                app.config.panel_ratio = cfg.panel_ratio;
-                app.config.bib_export_dir = cfg.bib_export_dir;
-                app.config.export_dir = cfg.export_dir;
-                app.config.citekey_format = cfg.citekey_format;
-                // 토글 두 개도 되돌린다. Esc는 취소이므로 저장하지 않은 변경은 남으면 안 된다.
-                app.config.natural_scroll = cfg.natural_scroll;
-                app.config.status_bar = cfg.status_bar;
-            }
+    match (focus, key.code) {
+        (_, KeyCode::Esc) | (_, KeyCode::Char(',')) => {
             app.mode = Mode::Normal;
         }
+        (_, KeyCode::Tab) => {
+            app.settings.focus = if focus == SettingsFocus::Sections { SettingsFocus::Rows } else { SettingsFocus::Sections };
+            if app.settings.focus == SettingsFocus::Rows && !rows.get(app.settings.row).is_some_and(selectable) {
+                app.settings.row = first_selectable(&rows);
+            }
+        }
+        (SettingsFocus::Sections, KeyCode::Up) | (SettingsFocus::Sections, KeyCode::Char('k')) => {
+            app.settings.section = app.settings.section.saturating_sub(1);
+            let rows = settings_pane_rows(app, &items);
+            app.settings.row = first_selectable(&rows);
+        }
+        (SettingsFocus::Sections, KeyCode::Down) | (SettingsFocus::Sections, KeyCode::Char('j')) => {
+            app.settings.section = (app.settings.section + 1).min(Section::ALL.len() - 1);
+            let rows = settings_pane_rows(app, &items);
+            app.settings.row = first_selectable(&rows);
+        }
+        (SettingsFocus::Sections, KeyCode::Enter) | (SettingsFocus::Sections, KeyCode::Right) | (SettingsFocus::Sections, KeyCode::Char('l')) => {
+            app.settings.focus = SettingsFocus::Rows;
+            app.settings.row = first_selectable(&rows);
+        }
+        (SettingsFocus::Rows, KeyCode::Up) | (SettingsFocus::Rows, KeyCode::Char('k')) => {
+            app.settings.row = move_cursor(&rows, app.settings.row, -1);
+        }
+        (SettingsFocus::Rows, KeyCode::Down) | (SettingsFocus::Rows, KeyCode::Char('j')) => {
+            app.settings.row = move_cursor(&rows, app.settings.row, 1);
+        }
+        (SettingsFocus::Rows, KeyCode::Left) | (SettingsFocus::Rows, KeyCode::Char('h')) => {
+            if let Some(PaneRow::Item(i)) = rows.get(app.settings.row) {
+                if crate::settings::step(&items[*i], &mut app.config, -1) {
+                    app.save_settings();
+                }
+            }
+        }
+        (SettingsFocus::Rows, KeyCode::Right) | (SettingsFocus::Rows, KeyCode::Char('l')) => {
+            if let Some(PaneRow::Item(i)) = rows.get(app.settings.row) {
+                if crate::settings::step(&items[*i], &mut app.config, 1) {
+                    app.save_settings();
+                }
+            }
+        }
+        (SettingsFocus::Rows, KeyCode::Enter) => {
+            if let Some(PaneRow::Item(i)) = rows.get(app.settings.row) {
+                let it = &items[*i];
+                match &it.kind {
+                    Kind::Bool { .. } | Kind::Choice(_) => {
+                        if crate::settings::step(it, &mut app.config, 1) {
+                            app.save_settings();
+                        }
+                    }
+                    Kind::Int | Kind::Str => {
+                        app.mode = Mode::SettingsInput(SettingsInput {
+                            title: it.label.clone(),
+                            buf: crate::settings::value(it, &app.config),
+                            target: InputTarget::Item(it.id.clone()),
+                        });
+                    }
+                    Kind::Path { .. } => {
+                        let current = crate::settings::value(it, &app.config);
+                        let start = if current.starts_with('(') {
+                            app.config.home.as_ref().map(|h| crate::config::expand_tilde(h)).unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")))
+                        } else {
+                            crate::config::expand_tilde(std::path::Path::new(&current))
+                        };
+                        app.file_picker_state = Some(
+                            ratatree::FilePickerState::builder()
+                                .start_dir(start)
+                                .mode(ratatree::PickerMode::DirsOnly)
+                                .build(),
+                        );
+                        app.mode = Mode::FilePicker(FilePickerContext::Setting(it.id.clone()));
+                    }
+                }
+            }
+        }
         _ => {}
+    }
+    Ok(false)
+}
+
+fn handle_settings_input(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
+    let done: Option<Option<String>> = match &mut app.mode {
+        Mode::SettingsInput(input) => match key.code {
+            KeyCode::Char(c) => { input.buf.push(c); None }
+            KeyCode::Backspace => { input.buf.pop(); None }
+            KeyCode::Enter => Some(Some(input.buf.clone())),
+            KeyCode::Esc => Some(None),
+            _ => None,
+        },
+        _ => None,
+    };
+    let Some(result) = done else { return Ok(false) };
+    let Mode::SettingsInput(input) = std::mem::replace(&mut app.mode, Mode::Settings) else { return Ok(false) };
+    if let Some(text) = result {
+        match input.target {
+            InputTarget::Item(id) => {
+                let items = app.settings_items();
+                if let Some(it) = items.iter().find(|i| i.id == id) {
+                    match crate::settings::set(it, &mut app.config, &text) {
+                        Ok(()) => app.save_settings(),
+                        Err(e) => app.settings.notice = Some((e, true)),
+                    }
+                }
+            }
+        }
     }
     Ok(false)
 }
@@ -3434,28 +3492,21 @@ fn handle_file_picker(app: &mut App, key: crossterm::event::KeyEvent) -> Result<
                             Err(e) => { app.mode = Mode::Message(format!("Attach failed: {}", e)); }
                         }
                     }
-                    FilePickerContext::BibExportDir => {
-                        app.config.bib_export_dir = path;
-                    }
-                    FilePickerContext::ExportDir => {
-                        app.config.export_dir = path;
-                    }
-                    FilePickerContext::PdfDir => {
-                        app.config.pdf_dir = Some(path.clone());
-                        app.config.bibox_dir = crate::config::expand_tilde(&path);
-                    }
-                    FilePickerContext::Home => {
-                        app.config.home = Some(path.clone());
-                        let expanded = crate::config::expand_tilde(&path);
-                        app.config.bibox_dir = expanded.join("pdfs");
-                        app.config.notes_dir = expanded.join("notes");
+                    FilePickerContext::Setting(id) => {
+                        let items = app.settings_items();
+                        if let Some(it) = items.iter().find(|i| i.id == id) {
+                            crate::settings::set_path(it, &mut app.config, path);
+                            app.save_settings();
+                        }
+                        app.mode = Mode::Settings;
                     }
                 }
             }
         }
         Some(ratatree::PickerResult::Cancelled) => {
+            let back_to_settings = matches!(app.mode, Mode::FilePicker(FilePickerContext::Setting(_)));
             app.file_picker_state = None;
-            app.mode = Mode::Normal;
+            app.mode = if back_to_settings { Mode::Settings } else { Mode::Normal };
         }
         _ => {}
     }
@@ -4493,6 +4544,22 @@ mod tests {
         assert_eq!(plugin_ui_step(&mut k, KeyCode::Esc), Some(UiAnswer::Yes { yes: false }));
     }
 
+    #[test]
+    fn settings_cursor_skips_headers_and_stops_at_the_ends() {
+        use super::PaneRow::{self, *};
+        use super::{first_selectable, move_cursor};
+        let rows = vec![Header("General".into()), Item(0), Item(1), Blank, Header("Export".into()), Item(2)];
+        assert_eq!(first_selectable(&rows), 1);
+        assert_eq!(move_cursor(&rows, 1, 1), 2);
+        assert_eq!(move_cursor(&rows, 2, 1), 5, "skips the blank and the header");
+        assert_eq!(move_cursor(&rows, 5, 1), 5, "stays at the end");
+        assert_eq!(move_cursor(&rows, 5, -1), 2);
+        assert_eq!(move_cursor(&rows, 1, -1), 1, "stays at the start");
+        let none: Vec<PaneRow> = vec![Header("x".into())];
+        assert_eq!(first_selectable(&none), 0);
+        assert_eq!(move_cursor(&none, 0, 1), 0);
+    }
+
     fn plugin_table() -> crate::plugin::PluginCommands {
         use crate::plugin::manifest::{Command, Manifest};
         let m = Manifest {
@@ -4537,15 +4604,5 @@ mod tests {
         let (label, action) = items.last().unwrap();
         assert_eq!(label, "Normalize the entry");
         assert_eq!(*action, Action::Plugin(commands.find("tidy.run").unwrap()));
-    }
-    #[test]
-    fn settings_rows_end_at_home_and_have_no_git_row() {
-        let config = crate::config::Config::default();
-        let items = super::settings_items(&config);
-        assert_eq!(items.len(), super::SETTINGS_ROWS);
-        assert!(items.last().unwrap().0.starts_with("Home"));
-        assert!(!items.last().unwrap().1, "home is read-only");
-        assert!(items.iter().all(|(label, _)| !label.starts_with("Git")));
-        assert_eq!(items.iter().filter(|(_, editable)| *editable).count(), 8);
     }
 }
