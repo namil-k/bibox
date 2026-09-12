@@ -3657,6 +3657,7 @@ echo "Quadratic complexity..." | bibox note vaswani2017attention --stdin --secti
 bibox note vaswani2017attention --show
 
 # 5. Push to git
+# When the home is a git repository the built-in git-sync plugin already commits every write; run `bibox plugin list` to check it is installed.
 # Push to git (use the home path from `bibox init`)
 cd <bibox-home> && git add . && git commit -m "add vaswani2017attention" && git push
 ```
@@ -3717,9 +3718,9 @@ A plugin is a directory under `<config_dir>/bibox/plugins/<name>/` with a `plugi
 ```bash
 bibox plugin list                                      # what is installed and whether it loaded
 bibox plugin new my-plugin                             # skeleton: plugin.toml, main.py, bibox_plugin.py (Python helper)
-bibox plugin install namil-k/bibox/plugins/entry-tidy  # from GitHub (owner/repo/subdir), asks before installing
+bibox plugin install namil-k/bibox/plugins/summarize   # from GitHub (owner/repo/subdir), asks before installing
 bibox plugin install ./my-plugin                       # symlink a local directory
-bibox plugin disable my-plugin                         # keep it installed, stop loading it
+bibox plugin install git-sync                          # put a removed built-in plugin back (no network)
 bibox plugin remove my-plugin
 ```
 
@@ -3732,7 +3733,7 @@ Test a plugin without the TUI: `printf '<request json>\n' | python3 main.py`. Se
 ## Tips
 
 - Run `bibox config --json` to get all paths (home, db, pdfs, notes, config.toml location).
-- The home path is the git-syncable directory. Get it from `bibox config --json` -> `home` field.
+- The home path is the git-syncable directory. Get it from `bibox config --json` -> `home` field. The git-sync built-in plugin commits db.json and notes after every write.
 - `pdf_dir` in config output shows where PDFs are actually stored (may differ from home).
 - All `--json` output goes to stdout. Errors go to stderr.
 - When a command fails, the exit code is non-zero.
@@ -4396,7 +4397,7 @@ pub fn cmd_agent_guide(json: bool) -> Result<()> {
             "version": env!("CARGO_PKG_VERSION"),
             "plugins": {
                 "dir": crate::plugin::plugins_dir().to_string_lossy(),
-                "commands": ["plugin list", "plugin install <source>", "plugin remove <name>", "plugin enable <name>", "plugin disable <name>", "plugin new <name>"],
+                "commands": ["plugin list", "plugin install <source|built-in name>", "plugin remove <name>", "plugin new <name>", "plugin run <built-in name>"],
                 "protocol": "one JSON object per line on stdin/stdout; a line with \"ui\" is a popup request, a line without it is the final answer; see README",
             },
         });

@@ -39,7 +39,7 @@ For humans: browse and edit in the TUI. For agents: manage entries and notes thr
 - **Export** - BibTeX, YAML, RIS, CSV, notes (`.md`). Include PDFs. Copy to clipboard. Zip it up.
 - **Templates** - Built-in and custom note templates with `{{variable}}` substitution
 - **Doctor** - `bibox doctor` diagnoses and auto-repairs DB issues: bad citekeys, LaTeX escapes, orphaned files
-- **Plugins** - Any executable becomes a bibox command, a context-menu item or a save hook. Declared by `plugin.toml`, talks JSON over stdin/stdout, can open bibox's own popups. Ships with entry-tidy, copy-citation, summarize (Claude) and git-push
+- **Plugins** - Any executable becomes a bibox command, a context-menu item or a save hook. Declared by `plugin.toml`, talks JSON over stdin/stdout, can open bibox's own popups. Built-in plugins ship inside the binary and can be removed like any other; git sync is one.
 
 ## Install
 
@@ -147,16 +147,18 @@ bibox
 | `w` | Open paper web page in browser |
 | `e` | Export menu (selected / collection / all) |
 | `y` | Copy citekey to clipboard |
+| `Y` | Copy a formatted citation (APA, IEEE or Chicago) to clipboard |
 | `d` | Delete entry |
 | `c` | Manage collections (works on multi-selected entries too) |
 | `t` | Edit tags |
 | `N` | Edit note in `$EDITOR` |
 | `Ctrl+z` | Undo |
 | `Ctrl+y` | Redo |
-| `,` | Settings (line numbers, panel ratio, citekey format, export dirs, PDF storage, git sync) |
+| `,` | Settings (line numbers, panel ratio, citekey format, export dirs, PDF storage) |
 | `?` | Help |
 | `q` | Quit |
 | `Esc` | Clear selection (or quit if nothing selected) |
+| `gs` / `gt` | Sync / status of the git-backed portable home (git-sync built-in plugin) |
 | **Mouse** | |
 | Left click | Select entry/collection, switch panel focus, click preview tabs |
 | Right click | Context menu (open, export, delete, etc.) |
@@ -208,7 +210,7 @@ prepend_keymap = [
 
 Action names say what they move, not which panel has focus, so binding `entry_down` inside `[normal.preview]` is allowed and does what it says.
 
-Plugin commands are bound by `<plugin>.<command>`, for example `run = "entry-tidy.tidy"`. Their default keys sit below the built-in ones, so a built-in key always wins; the help screen lists live plugin commands under Plugins.
+Plugin commands are bound by `<plugin>.<command>`, for example `run = "git-sync.sync"`. Their default keys sit below the built-in ones, so a built-in key always wins; the help screen lists live plugin commands under Plugins.
 
 **When it breaks.** A bad `keymap.toml` never stops bibox. Every problem is reported before the TUI opens and the default keymap is used for that run, so you are never locked out by your own config. `bibox doctor` reports the same problems without opening the TUI, and `bibox doctor --json` gives them to an editor.
 
@@ -227,6 +229,7 @@ bibox list ml                       # List entries in a collection
 
 ```bash
 bibox show kim2025rust              # Full entry details
+bibox show kim2025rust --cite apa   # One formatted citation (apa, ieee, chicago)
 ```
 
 ```bash
@@ -409,7 +412,9 @@ bibox init ~/bibox
 # Sync with Git (db + notes only, PDFs stored separately)
 cd ~/bibox && git init && git add . && git commit -m "init"
 
-# Or use the TUI: press , → Git → Enter to check status → Enter to sync
+# The git-sync plugin (built in, installed by default) commits db.json and notes on every write
+# once this folder is a git repository. Press g t for status and g s to pull --rebase and push.
+# Settings: [plugins.git-sync] include_pdfs = true / push_on_write = true in config.toml.
 
 # Store PDFs in iCloud, Google Drive, Dropbox, etc.
 # Add to ~/.config/bibox/config.toml:
@@ -424,12 +429,12 @@ A plugin is a directory with a `plugin.toml` and a program in any language. bibo
 
 ```
 ~/Library/Application Support/bibox/plugins/   (Linux: ~/.config/bibox/plugins/)
-  entry-tidy/
+  summarize/
     plugin.toml
     main.py
 ```
 
-**Install.** `bibox plugin install namil-k/bibox/plugins/summarize` clones from GitHub, `bibox plugin install ./my-plugin` symlinks a local directory, `bibox plugin list` shows what is loaded, `bibox plugin disable <name>` keeps it installed but off. Installing from a repository shows where the code comes from and what it runs, then asks. Nobody has reviewed code that is not in a registry.
+**Install.** `bibox plugin install namil-k/bibox/plugins/summarize` clones from GitHub, `bibox plugin install ./my-plugin` symlinks a local directory, `bibox plugin list` shows what is installed and where it came from (`built-in`, `local`, `git`, `dir`), `bibox plugin remove <name>` deletes it. Turning a plugin off is removing it; a built-in comes back with `bibox plugin install <name>` and needs no network. Installing from a repository shows where the code comes from and what it runs, then asks. Nobody has reviewed code that is not in a registry.
 
 **Write one.** `bibox plugin new my-plugin` creates a working skeleton with a Python helper. The whole contract for other languages is four lines:
 
@@ -446,34 +451,34 @@ A line with `"ui"` asks bibox to show something (`pick`, `prompt`, `confirm`, `p
 
 ```toml
 api = 1
-name = "entry-tidy"                  # must equal the directory name
+name = "summarize"                   # must equal the directory name
 run = "python3 main.py"              # split on spaces, no shell; cwd is the plugin directory
 
 [[commands]]
-id = "tidy"
-desc = "Normalize the selected entries"
-key = "="                            # default key; users override it in keymap.toml as run = "entry-tidy.tidy"
+id = "summarize"
+desc = "Summarize the PDF into the note"
+key = "S"                            # default key; users override it in keymap.toml as run = "summarize.summarize"
 menu = true                          # right-click menu
 
 [[hooks]]
-on = "before_add"                    # before_add | after_write | after_note_save
-run = "tidy"
+on = "after_write"                   # before_add | after_write | after_note_save
+run = "summarize"
 
-[cli]                                # optional: `bibox entry-tidy ...` runs this with your stdio
+[cli]                                # optional: `bibox summarize ...` runs this with your stdio
 run = "python3 cli.py"
 ```
 
-`before_add` runs before an entry is saved and may return `apply` to change it; if the plugin fails the entry is added unchanged. `after_write` and `after_note_save` run in the background after the save and cannot open popups. Plugin settings live in `config.toml` under `[plugins.<name>]` and arrive as `context.config`; `enabled = false` turns a plugin off.
+`before_add` runs before an entry is saved and may return `apply` to change it; if the plugin fails the entry is added unchanged. `after_write` and `after_note_save` run in the background after the save and cannot open popups. Plugin settings live in `config.toml` under `[plugins.<name>]` and arrive as `context.config`.
 
 **Environment.** Every plugin process gets `BIBOX_BIN`, `BIBOX_CONFIG_DIR`, `BIBOX_DB_PATH`, `BIBOX_NOTES_DIR`, `BIBOX_PDF_DIR`, `BIBOX_HOME` (when set) and `BIBOX_PLUGIN_DIR`. To change the library, call `$BIBOX_BIN` (`modify`, `note --stdin`, `add --json`) and return `refresh`, or return `apply` for a few entries. The plugin's stderr goes to `plugins/<name>/stderr.log`, truncated on every start.
 
 **When it breaks.** A broken plugin never stops bibox. Manifest problems are shown before the TUI opens and by `bibox doctor`. A plugin that exits, hangs (press Esc) or prints something that is not JSON is reported in the status line and restarted on the next call. Default keys that collide with built-in keys are dropped with a warning; bind them yourself in `keymap.toml`.
 
-**Included plugins** (`plugins/` in this repository): `entry-tidy` (`=`, also a `before_add` hook), `copy-citation` (`Y`, APA / IEEE / Chicago to the clipboard), `summarize` (`S`, PDF to the note's Summary section with Claude; needs `pip install anthropic` and `ANTHROPIC_API_KEY`), `git-push` (pushes after every write; needs `git = true`).
+**Built-in plugins** live inside the bibox binary and appear in `bibox plugin list` as `built-in`: `git-sync` (commits db.json and notes on every write when the portable home is a git repository; `g s` syncs, `g t` shows status). Remove one like any plugin; `bibox plugin install git-sync` puts it back. **Example plugin** (`plugins/` in this repository): `summarize` (`S`, PDF to the note's Summary section with Claude; needs `pip install anthropic` and `ANTHROPIC_API_KEY`).
 
 ## Settings
 
-Press `,` in the TUI, or run `bibox config` to see all current settings and paths.
+Press `,` in the TUI, or run `bibox config` to see all current settings and paths. Plugin settings go under `[plugins.<name>]`, for example `[plugins.git-sync] include_pdfs = true`.
 
 ```toml
 line_numbers = "absolute"              # absolute, relative, none
