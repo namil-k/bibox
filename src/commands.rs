@@ -3722,13 +3722,14 @@ bibox plugin install namil-k/bibox/plugins/summarize   # from GitHub (owner/repo
 bibox plugin install ./my-plugin                       # symlink a local directory
 bibox plugin install git-sync                          # put a removed built-in plugin back (no network)
 bibox plugin remove my-plugin
+# TUI: press , then Plugins for the same list, an Installed toggle and each plugin's declared settings
 ```
 
 Protocol: one JSON object per line on stdin/stdout. bibox sends `{"type":"command","id":"<cmd>","trigger":"key|menu|hook:<name>","context":{"entry":...,"entries":[...],"config":{...},"paths":{...}}}`. The plugin may send `{"ui":"pick|prompt|confirm|progress",...}` lines (bibox answers each with one line), then one final line without `"ui"`: `{"message":"..."}`, `{"apply":[<full entries>]}`, `{"refresh":true}` or `{"error":"..."}`. Flush stdout after every line.
 
 Every plugin process gets `BIBOX_BIN` (call it for `modify`, `note --stdin`, `add --json` and return `refresh`), `BIBOX_CONFIG_DIR`, `BIBOX_DB_PATH`, `BIBOX_NOTES_DIR`, `BIBOX_PDF_DIR`, `BIBOX_PLUGIN_DIR`. Inside a hook the helper sets `BIBOX_IN_HOOK=1` on that call so it does not fire hooks again. The plugin's stderr is in `plugins/<name>/stderr.log`, truncated on every start.
 
-Test a plugin without the TUI: `printf '<request json>\n' | python3 main.py`. See the README's Plugins section for `plugin.toml` fields and `[plugins.<name>]` settings in config.toml.
+Test a plugin without the TUI: `printf '<request json>\n' | python3 main.py`. See the README's Plugins section for `plugin.toml` fields (including `[[settings]]`) and `[plugins.<name>]` settings in config.toml.
 
 ## Tips
 

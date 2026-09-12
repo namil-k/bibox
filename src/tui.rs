@@ -3240,6 +3240,10 @@ fn execute(app: &mut App, action: Action, ctx: ExecCtx) -> Result<Flow> {
             app.open_settings(crate::settings::Section::General);
         }
 
+        Action::Plugins => {
+            app.open_settings(crate::settings::Section::Plugins);
+        }
+
         Action::Noop => {}
     }
     Ok(Flow::Continue)

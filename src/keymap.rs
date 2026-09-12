@@ -140,6 +140,7 @@ pub enum Action {
     Tags,
     AttachPdf,
     Settings,
+    Plugins,
     Noop,
     // ── normal.entries 전용 ──
     EntryDown,
@@ -187,7 +188,7 @@ impl Action {
         &[
             Quit, Cancel, Undo, Redo, NextPreviewTab, Search, CopyCitekey, CopyCitation, OpenPdf,
             OpenWeb, FetchMetadata, ExportMenu, Delete, Help, EditNote, SortMenu,
-            Collections, Tags, AttachPdf, Settings, Noop,
+            Collections, Tags, AttachPdf, Settings, Plugins, Noop,
             EntryDown, EntryUp, EntryTop, EntryBottom, EntryScreenTop, EntryScreenMiddle,
             EntryScreenBottom, EntryHalfPageDown, EntryHalfPageUp, ToggleSelect, SelectAll,
             FocusCollections, FocusPreview,
@@ -219,7 +220,7 @@ impl Action {
 
             Search | SortMenu => "Search and sort",
 
-            Help | Settings | Quit | Noop => "Application",
+            Help | Settings | Plugins | Quit | Noop => "Application",
 
             Plugin(_) => "Plugins",
         }
@@ -249,6 +250,7 @@ impl Action {
             Tags => "Edit the tags attached to the entry",
             AttachPdf => "Pick a PDF from disk and attach it to the current entry",
             Settings => "Open the settings screen",
+            Plugins => "Open Settings on the plugin list",
             Noop => "Do nothing (used to disable a key)",
 
             EntryDown => "Move down one entry",

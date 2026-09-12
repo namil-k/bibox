@@ -154,7 +154,7 @@ bibox
 | `N` | Edit note in `$EDITOR` |
 | `Ctrl+z` | Undo |
 | `Ctrl+y` | Redo |
-| `,` | Settings (line numbers, panel ratio, citekey format, export dirs, PDF storage) |
+| `,` | Settings: General, Appearance, Export, Plugins. `Tab` switches columns, `h`/`l` change a value, `/` searches every setting |
 | `?` | Help |
 | `q` | Quit |
 | `Esc` | Clear selection (or quit if nothing selected) |
@@ -414,7 +414,7 @@ cd ~/bibox && git init && git add . && git commit -m "init"
 
 # The git-sync plugin (built in, installed by default) commits db.json and notes on every write
 # once this folder is a git repository. Press g t for status and g s to pull --rebase and push.
-# Settings: [plugins.git-sync] include_pdfs = true / push_on_write = true in config.toml.
+# Settings: , then Plugins > git-sync, or [plugins.git-sync] include_pdfs = true / push_on_write = true in config.toml.
 
 # Store PDFs in iCloud, Google Drive, Dropbox, etc.
 # Add to ~/.config/bibox/config.toml:
@@ -435,6 +435,8 @@ A plugin is a directory with a `plugin.toml` and a program in any language. bibo
 ```
 
 **Install.** `bibox plugin install namil-k/bibox/plugins/summarize` clones from GitHub, `bibox plugin install ./my-plugin` symlinks a local directory, `bibox plugin list` shows what is installed and where it came from (`built-in`, `local`, `git`, `dir`), `bibox plugin remove <name>` deletes it. Turning a plugin off is removing it; a built-in comes back with `bibox plugin install <name>` and needs no network. Installing from a repository shows where the code comes from and what it runs, then asks. Nobody has reviewed code that is not in a registry.
+
+**In the TUI.** `,` then Plugins lists what is installed and which built-in plugins are not. `Enter` opens a plugin page: description, an `Installed` toggle (`h`/`l`; removing an external plugin asks first) and the settings the plugin declares. `Install from…` at the end of the list takes `owner/repo`, a git URL or a local path and shows the same confirmation as the CLI.
 
 **Write one.** `bibox plugin new my-plugin` creates a working skeleton with a Python helper. The whole contract for other languages is four lines:
 
@@ -464,11 +466,18 @@ menu = true                          # right-click menu
 on = "after_write"                   # before_add | after_write | after_note_save
 run = "summarize"
 
+[[settings]]                         # optional: shown on the plugin page and written to [plugins.summarize] in config.toml
+key = "model"
+type = "choice"                      # bool | int | string | choice
+choices = ["claude-opus-5", "claude-sonnet-5"]
+default = "claude-opus-5"
+desc = "Claude model for the summary"
+
 [cli]                                # optional: `bibox summarize ...` runs this with your stdio
 run = "python3 cli.py"
 ```
 
-`before_add` runs before an entry is saved and may return `apply` to change it; if the plugin fails the entry is added unchanged. `after_write` and `after_note_save` run in the background after the save and cannot open popups. Plugin settings live in `config.toml` under `[plugins.<name>]` and arrive as `context.config`.
+`before_add` runs before an entry is saved and may return `apply` to change it; if the plugin fails the entry is added unchanged. `after_write` and `after_note_save` run in the background after the save and cannot open popups. Plugin settings live in `config.toml` under `[plugins.<name>]` and arrive as `context.config`. Declared settings get a typed row on the plugin page and `bibox doctor` warns about values of the wrong type and keys that match no declaration (with a spelling suggestion). bibox does not fill in defaults: read `context.config` with a fallback as before.
 
 **Environment.** Every plugin process gets `BIBOX_BIN`, `BIBOX_CONFIG_DIR`, `BIBOX_DB_PATH`, `BIBOX_NOTES_DIR`, `BIBOX_PDF_DIR`, `BIBOX_HOME` (when set) and `BIBOX_PLUGIN_DIR`. To change the library, call `$BIBOX_BIN` (`modify`, `note --stdin`, `add --json`) and return `refresh`, or return `apply` for a few entries. The plugin's stderr goes to `plugins/<name>/stderr.log`, truncated on every start.
 
@@ -478,7 +487,7 @@ run = "python3 cli.py"
 
 ## Settings
 
-Press `,` in the TUI, or run `bibox config` to see all current settings and paths. Plugin settings go under `[plugins.<name>]`, for example `[plugins.git-sync] include_pdfs = true`.
+Press `,` in the TUI: sections on the left (General, Appearance, Export, Plugins), values on the right. `Tab` moves between the columns, `j`/`k` move, `h`/`l` change a value, `Enter` opens a directory picker or a text prompt, `/` searches every setting including plugin settings (`git-sync/push`, or a word from a description such as `commit`). Changes are saved as you make them; `Esc` closes. `bibox config` prints the same settings and paths. Plugin settings go under `[plugins.<name>]`, for example `[plugins.git-sync] include_pdfs = true`, and appear on the plugin's page in the Plugins section.
 
 ```toml
 line_numbers = "absolute"              # absolute, relative, none
