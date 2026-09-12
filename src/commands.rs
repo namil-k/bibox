@@ -1552,6 +1552,43 @@ pub fn cmd_export(
     Ok(())
 }
 
+/// 서지 파일 하나를 `dir/<base>_<타임스탬프>.<ext>`에 쓴다. 터미널에 아무것도 찍지 않는다(TUI용).
+/// `format`은 bibtex | yaml | ris | csv.
+pub fn export_to_file(entries: &[&Entry], format: &str, dir: &Path, base: &str) -> Result<PathBuf> {
+    let (ext, text) = match format.to_lowercase().as_str() {
+        "bibtex" => ("bib", entries_to_bibtex(entries)),
+        "yaml" => ("yaml", entries_to_yaml(entries)),
+        "ris" => ("ris", entries_to_ris(entries)),
+        "csv" => ("csv", entries_to_csv(entries)),
+        other => anyhow::bail!("Unknown format '{}'. Supported formats: bibtex, yaml, ris, csv", other),
+    };
+    std::fs::create_dir_all(dir)?;
+    let timestamp = Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let path = dir.join(format!("{}_{}.{}", base, timestamp, ext));
+    std::fs::write(&path, text)?;
+    Ok(path)
+}
+
+/// 항목들의 PDF를 `dir/<base>_pdfs_<날짜>/`로 복사한다. 터미널에 아무것도 찍지 않는다(TUI용).
+/// (만든 디렉토리, 복사한 수).
+pub fn copy_pdfs_to_dir(entries: &[&Entry], dir: &Path, base: &str, config: &Config) -> Result<(PathBuf, usize)> {
+    let date = Local::now().format("%Y%m%d").to_string();
+    let dest_dir = dir.join(format!("{}_pdfs_{}", base, date));
+    std::fs::create_dir_all(&dest_dir)?;
+    let mut copied = 0;
+    for entry in entries {
+        if let Some(fp) = &entry.file_path {
+            let src = config.bibox_dir.join(fp);
+            let filename = std::path::Path::new(fp).file_name().unwrap_or_default();
+            if src.exists() && !filename.is_empty() {
+                std::fs::copy(&src, dest_dir.join(filename))?;
+                copied += 1;
+            }
+        }
+    }
+    Ok((dest_dir, copied))
+}
+
 fn export_pdfs(
     entries: &[&Entry],
     col_name: &str,
@@ -4412,6 +4449,38 @@ pub fn cmd_agent_guide(json: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn export_fixture(key: &str) -> Entry {
+        Entry {
+            id: key.to_string(),
+            bibtex_key: key.to_string(),
+            entry_type: crate::models::EntryType::Article,
+            title: Some("Rust systems programming".to_string()),
+            author: vec!["Kim, Jinho".to_string()],
+            year: Some(2025),
+            journal: None, volume: None, number: None, pages: None, publisher: None, editor: None, edition: None,
+            isbn: None, booktitle: None, doi: None, url: None, abstract_text: None, tags: vec![], howpublished: None,
+            month: None, note: None, collections: vec![], file_path: None, created_at: String::new(), updated_at: None,
+        }
+    }
+
+    #[test]
+    fn export_to_file_writes_each_format_under_the_given_dir_and_returns_the_path() {
+        let dir = std::env::temp_dir().join(format!("bibox-export-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let a = export_fixture("kim2025rust");
+        let entries = vec![&a];
+        for (format, ext, head) in [("bibtex", "bib", "@article{kim2025rust"), ("yaml", "yaml", "kim2025rust"), ("ris", "ris", "TY  - JOUR")] {
+            let path = export_to_file(&entries, format, &dir, "gym").unwrap();
+            assert_eq!(path.parent(), Some(dir.as_path()));
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            assert!(name.starts_with("gym_") && name.ends_with(&format!(".{}", ext)), "{}", name);
+            let text = std::fs::read_to_string(&path).unwrap();
+            assert!(text.contains(head), "{} content: {}", format, text);
+        }
+        assert!(export_to_file(&entries, "docx", &dir, "gym").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn parse_ris_basic() {

@@ -580,6 +580,20 @@ impl Msgs {
         }
     }
 
+    pub fn exported_to(&self, n: usize, path: &str) -> String {
+        match self.lang {
+            Lang::En => format!("Exported {} entries to {}", n, path),
+            Lang::Ko => format!("{} 개 항목을 {}에 내보냈습니다", n, path),
+        }
+    }
+
+    pub fn reveal_question(&self) -> &'static str {
+        match self.lang {
+            Lang::En => "Reveal in file manager?",
+            Lang::Ko => "파일 관리자에서 열까요?",
+        }
+    }
+
     pub fn bibtex_saved(&self, path: &str, n: usize) -> String {
         match self.lang {
             Lang::En => format!("BibTeX saved: {} ({} entries)", path, n),

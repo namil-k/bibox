@@ -136,11 +136,33 @@ struct FetchPreviewState {
     index: usize,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, PartialEq)]
 enum ExportScope {
     Selected,
-    Collection,
+    /// 컬렉션 이름. 하위 컬렉션(`name/...`)을 포함한다. 컬렉션 패널의 규칙과 같다.
+    Collection(String),
     All,
+}
+
+/// `name`과 그 하위 컬렉션에 든 항목. 컬렉션 패널이 `gym`을 골랐을 때 보이는 것과 같은 집합.
+fn keys_in_collection(entries: &[Entry], name: &str) -> Vec<String> {
+    let prefix = format!("{}/", name);
+    entries
+        .iter()
+        .filter(|e| e.collections.iter().any(|c| c == name || c.starts_with(&prefix)))
+        .map(|e| e.bibtex_key.clone())
+        .collect()
+}
+
+/// `gym/method/x` -> [`gym/method/x`, `gym/method`, `gym`]. 현재 컬렉션과 그 상위 전부.
+fn collection_and_ancestors(name: &str) -> Vec<String> {
+    let mut out = vec![name.to_string()];
+    let mut cur = name;
+    while let Some(i) = cur.rfind('/') {
+        cur = &cur[..i];
+        out.push(cur.to_string());
+    }
+    out
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -178,6 +200,8 @@ struct ExportState {
 
 enum ConfirmAction {
     RemovePlugin(String),
+    /// 내보낸 파일과 항목 수. y면 파일 관리자에서 보여 준다.
+    RevealExport(std::path::PathBuf, usize),
     /// clone은 끝났고 사용자 확인을 기다리는 설치
     InstallStaged(crate::plugin::Staged),
     Delete(String),
@@ -1462,6 +1486,14 @@ fn draw(f: &mut Frame, app: &mut App) {
         Mode::Confirm(ConfirmAction::FetchMetaByTitle(_key, _title)) => {
             draw_confirm_popup(f, "No DOI. Search Crossref by title? (y/n)", size);
         }
+        Mode::Confirm(ConfirmAction::RevealExport(path, n)) => {
+            let lines = vec![
+                app.config.msgs.exported_to(*n, &tilde_path(path)),
+                String::new(),
+                format!("{} (y/n)", app.config.msgs.reveal_question()),
+            ];
+            draw_confirm_lines(f, &lines, size);
+        }
         Mode::Confirm(ConfirmAction::RemovePlugin(name)) => {
             let q = format!("{} (y/n)", app.config.msgs.plugin_remove_question(name));
             draw_settings_popup(f, app, size);
@@ -2232,6 +2264,24 @@ fn draw_confirm_popup(f: &mut Frame, msg: &str, area: Rect) {
         .block(Block::default().borders(Borders::ALL).title(" Confirm "))
         .style(Style::default().fg(Color::Red));
     f.render_widget(text, popup_area);
+}
+
+/// 홈 디렉토리를 `~`로 줄인 표시용 경로.
+fn tilde_path(path: &std::path::Path) -> String {
+    if let Some(home) = dirs::home_dir() {
+        if let Ok(rest) = path.strip_prefix(&home) {
+            return format!("~/{}", rest.display());
+        }
+    }
+    path.display().to_string()
+}
+
+/// macOS는 Finder에서 파일을 선택해 보여 주고, 그 밖에서는 디렉토리를 연다.
+fn reveal_in_file_manager(path: &std::path::Path) {
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg("-R").arg(path).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
+    #[cfg(not(target_os = "macos"))]
+    let _ = std::process::Command::new("xdg-open").arg(path.parent().unwrap_or(path)).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
 }
 
 fn draw_confirm_lines(f: &mut Frame, lines: &[String], area: Rect) {
@@ -3160,8 +3210,12 @@ fn execute(app: &mut App, action: Action, ctx: ExecCtx) -> Result<Flow> {
                 scope_options.push((ExportScope::Selected, format!("{} selected entries", app.selected_keys.len())));
             }
             if let Some(col) = app.current_collection() {
-                let count = app.filtered.len();
-                scope_options.push((ExportScope::Collection, format!("{} collection ({})", col, count)));
+                // 현재 컬렉션과 그 상위 전부. `gym/method`에서 `gym`째로 내보낼 수 있게
+                for name in collection_and_ancestors(col) {
+                    let count = keys_in_collection(&app.entries, &name).len();
+                    let label = format!("{} collection ({})", name, count);
+                    scope_options.push((ExportScope::Collection(name), label));
+                }
             }
             scope_options.push((ExportScope::All, format!("All entries ({})", app.entries.len())));
             app.export_state = Some(ExportState {
@@ -3354,6 +3408,9 @@ fn handle_confirm(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool
                 Mode::Confirm(ConfirmAction::Delete(_)) => {
                     app.delete_selected()?;
                     app.mode = Mode::Message("Entry deleted.".to_string());
+                }
+                Mode::Confirm(ConfirmAction::RevealExport(path, _)) => {
+                    reveal_in_file_manager(&path);
                 }
                 Mode::Confirm(ConfirmAction::RemovePlugin(name)) => {
                     // 페이지를 먼저 닫아야 reload 뒤 커서가 목록 기준으로 놓인다
@@ -3576,28 +3633,34 @@ fn handle_export_menu(app: &mut App, key: crossterm::event::KeyEvent) -> Result<
                 if es.section == 2 { es.include_pdf = !es.include_pdf; }
             }
             KeyCode::Enter => {
-                let scope = es.scope_options.get(es.scope_idx).map(|o| o.0).unwrap_or(ExportScope::All);
+                let scope = es.scope_options.get(es.scope_idx).map(|o| o.0.clone()).unwrap_or(ExportScope::All);
                 let format = formats.get(es.format_idx).copied().unwrap_or(ExportFormat::BibTeX);
                 let include_pdf = es.include_pdf;
-                // Collect entries based on scope
-                let keys: Vec<String> = match scope {
-                    ExportScope::Selected => app.selected_keys.iter().cloned().collect(),
-                    ExportScope::Collection => {
-                        app.filtered.iter().map(|&i| app.entries[i].bibtex_key.clone()).collect()
-                    }
-                    ExportScope::All => app.entries.iter().map(|e| e.bibtex_key.clone()).collect(),
+                // 범위별 항목과 파일 이름의 밑동. CLI와 같은 이름 규칙(selected / <컬렉션> / references)
+                let (keys, base): (Vec<String>, String) = match &scope {
+                    ExportScope::Selected => (app.selected_keys.iter().cloned().collect(), "selected".to_string()),
+                    ExportScope::Collection(name) => (keys_in_collection(&app.entries, name), name.replace('/', "_")),
+                    ExportScope::All => (app.entries.iter().map(|e| e.bibtex_key.clone()).collect(), "references".to_string()),
                 };
+                let entries: Vec<&Entry> = keys.iter().filter_map(|k| app.entries.iter().find(|e| &e.bibtex_key == k)).collect();
 
                 app.export_state = None;
                 app.mode = Mode::Normal;
 
-                // Run export via cmd_export
-                let result = crate::commands::cmd_export(
-                    keys, None, None, false, None, None, false, include_pdf, false,
-                    format.ext().to_string(), false, &app.config,
-                );
+                // .bib은 Bib export dir, 나머지는 Export dir. 터미널에 아무것도 찍지 않는다(raw mode).
+                let dir = if format == ExportFormat::BibTeX { &app.config.bib_export_dir } else { &app.config.export_dir };
+                let dir = crate::config::expand_tilde(dir);
+                let result = crate::commands::export_to_file(&entries, format.ext(), &dir, &base).and_then(|path| {
+                    if include_pdf {
+                        crate::commands::copy_pdfs_to_dir(&entries, &dir, &base, &app.config)?;
+                    }
+                    Ok(path)
+                });
                 match result {
-                    Ok(()) => { app.mode = Mode::Message("Export complete.".into()); }
+                    Ok(path) => {
+                        let n = entries.len();
+                        app.mode = Mode::Confirm(ConfirmAction::RevealExport(path, n));
+                    }
                     Err(e) => { app.mode = Mode::Message(format!("Export failed: {}", e)); }
                 }
             }
@@ -4936,6 +4999,21 @@ mod tests {
         assert_eq!(plugin_ui_step(&mut k, KeyCode::Char('y')), Some(UiAnswer::Yes { yes: true }));
         assert_eq!(plugin_ui_step(&mut k, KeyCode::Char('n')), Some(UiAnswer::Yes { yes: false }));
         assert_eq!(plugin_ui_step(&mut k, KeyCode::Esc), Some(UiAnswer::Yes { yes: false }));
+    }
+
+    #[test]
+    fn export_scope_offers_the_collection_and_every_ancestor_with_subcollection_counts() {
+        assert_eq!(super::collection_and_ancestors("gym/method/x"), vec!["gym/method/x", "gym/method", "gym"]);
+        assert_eq!(super::collection_and_ancestors("gym"), vec!["gym"]);
+        let mut a = entry_in(&["gym/method"]);
+        a.bibtex_key = "a".into();
+        let mut b = entry_in(&["gym"]);
+        b.bibtex_key = "b".into();
+        let mut c = entry_in(&["gymnastics"]);
+        c.bibtex_key = "c".into();
+        let entries = vec![a, b, c];
+        assert_eq!(super::keys_in_collection(&entries, "gym/method"), vec!["a"]);
+        assert_eq!(super::keys_in_collection(&entries, "gym"), vec!["a", "b"], "children included, gymnastics is not a child");
     }
 
     #[test]
