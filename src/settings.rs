@@ -467,6 +467,56 @@ pub fn set_path(item: &Item, config: &mut Config, path: PathBuf) {
     }
 }
 
+// ── 검색 ────────────────────────────────────────────────────────────────────
+
+/// 소문자, `/`와 `.`은 공백. `-`와 `_`는 그대로(`git-sync`가 잡히게).
+pub fn tokens(query: &str) -> Vec<String> {
+    query.to_lowercase().replace(['/', '.'], " ").split_whitespace().map(String::from).collect()
+}
+
+/// 조각이 전부 들어 있어야 한다(AND). 빈 조각 목록은 전부 잡는다.
+pub fn matches(haystack: &str, tokens: &[String]) -> bool {
+    let h = haystack.to_lowercase().replace(['/', '.'], " ");
+    tokens.iter().all(|t| h.contains(t.as_str()))
+}
+
+fn haystack(item: &Item) -> String {
+    format!("{} {} {} {}", item.section.label(), item.plugin.as_deref().unwrap_or(""), item.label, item.desc)
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Row {
+    Header(String),
+    Item(usize),
+    Plugin(String),
+}
+
+/// 절 순서로, 소속이 바뀔 때마다 머리 줄. Plugins 절은 플러그인 행 묶음 뒤에 플러그인별 설정 묶음.
+pub fn search(items: &[Item], plugins: &[(String, String)], query: &str) -> Vec<Row> {
+    let toks = tokens(query);
+    let mut out = Vec::new();
+    for section in [Section::General, Section::Appearance, Section::Export] {
+        let hits: Vec<usize> = items.iter().enumerate().filter(|(_, it)| it.section == section && matches(&haystack(it), &toks)).map(|(i, _)| i).collect();
+        if !hits.is_empty() {
+            out.push(Row::Header(section.label().to_string()));
+            out.extend(hits.into_iter().map(Row::Item));
+        }
+    }
+    let plugin_hits: Vec<&(String, String)> = plugins.iter().filter(|(n, d)| matches(&format!("plugins {} {}", n, d), &toks)).collect();
+    if !plugin_hits.is_empty() {
+        out.push(Row::Header(Section::Plugins.label().to_string()));
+        out.extend(plugin_hits.into_iter().map(|(n, _)| Row::Plugin(n.clone())));
+    }
+    for (name, _) in plugins {
+        let hits: Vec<usize> = items.iter().enumerate().filter(|(_, it)| it.plugin.as_deref() == Some(name) && matches(&haystack(it), &toks)).map(|(i, _)| i).collect();
+        if !hits.is_empty() {
+            out.push(Row::Header(format!("{} > {}", Section::Plugins.label(), name)));
+            out.extend(hits.into_iter().map(Row::Item));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -671,5 +721,57 @@ mod tests {
         let push = find(&items, "plugins.demo.push");
         assert!(set(push, &mut c, "true").is_ok());
         assert_eq!(c.plugins["demo"]["push"], toml::Value::Boolean(true));
+    }
+    fn plugin_list() -> Vec<(String, String)> {
+        vec![("demo".into(), "Commit the library on every write".into()), ("other".into(), "Something else".into())]
+    }
+
+    fn ids_of(rows: &[Row], items: &[Item]) -> Vec<String> {
+        rows.iter()
+            .map(|r| match r {
+                Row::Header(h) => format!("# {}", h),
+                Row::Item(i) => items[*i].id.clone(),
+                Row::Plugin(p) => format!("@{}", p),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tokens_lowercase_and_split_on_space_slash_and_dot() {
+        assert_eq!(tokens("Git-Sync/push"), vec!["git-sync", "push"]);
+        assert_eq!(tokens("a.b  c"), vec!["a", "b", "c"]);
+        assert!(tokens("   ").is_empty());
+        assert!(matches("Plugins demo push_on_write git push after commit", &tokens("demo/push")));
+        assert!(!matches("Appearance line numbers", &tokens("push")));
+    }
+
+    #[test]
+    fn search_groups_matches_by_section_and_plugin_in_order() {
+        let items = items(&[manifest_with_settings()]);
+        let rows = search(&items, &plugin_list(), "push");
+        assert_eq!(ids_of(&rows, &items), vec!["# Plugins > demo", "plugins.demo.push"]);
+        let rows = search(&items, &plugin_list(), "line");
+        assert_eq!(ids_of(&rows, &items), vec!["# Appearance", "appearance.line_numbers"]);
+        let rows = search(&items, &plugin_list(), "demo/push");
+        assert_eq!(ids_of(&rows, &items), vec!["# Plugins > demo", "plugins.demo.push"]);
+    }
+
+    #[test]
+    fn search_matches_descriptions_and_plugin_rows() {
+        let items = items(&[manifest_with_settings()]);
+        // "commit"은 demo 플러그인 설명과 push 설정의 desc("push after commit")에 있다
+        let rows = search(&items, &plugin_list(), "commit");
+        assert_eq!(ids_of(&rows, &items), vec!["# Plugins", "@demo", "# Plugins > demo", "plugins.demo.push"]);
+    }
+
+    #[test]
+    fn an_empty_query_lists_everything_with_headers() {
+        let items = items(&[manifest_with_settings()]);
+        let rows = search(&items, &plugin_list(), "");
+        let ids = ids_of(&rows, &items);
+        assert_eq!(ids[0], "# General");
+        assert!(ids.contains(&"# Appearance".to_string()) && ids.contains(&"# Export".to_string()));
+        assert!(ids.contains(&"@other".to_string()));
+        assert_eq!(ids.iter().filter(|s| !s.starts_with('#')).count(), 14 + 2);
     }
 }

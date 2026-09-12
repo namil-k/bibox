@@ -249,13 +249,29 @@ struct SettingsState {
     page: Option<String>,
     /// Plugins 절의 행. 열 때와 설치·제거 뒤에 다시 읽는다(디스크를 매 프레임 읽지 않으려고).
     plugins: Vec<PluginRow>,
+    /// 검색어. Some이면 오른쪽 칸이 검색 결과다.
+    query: Option<String>,
+    /// 글자가 검색어로 가는 중(`/` 직후). Enter로 끝내면 j/k h/l이 결과에서 동작한다.
+    typing: bool,
+    /// 검색 전 위치 (focus, section, row, page). Esc로 되돌린다.
+    saved: Option<(SettingsFocus, usize, usize, Option<String>)>,
     /// 아래 줄에 한 번 보이는 알림. (문구, 오류인가). 다음 키에 사라진다.
     notice: Option<(String, bool)>,
 }
 
 impl SettingsState {
     fn new() -> Self {
-        SettingsState { focus: SettingsFocus::Sections, section: 0, row: 0, page: None, plugins: Vec::new(), notice: None }
+        SettingsState {
+            focus: SettingsFocus::Sections,
+            section: 0,
+            row: 0,
+            page: None,
+            plugins: Vec::new(),
+            query: None,
+            typing: false,
+            saved: None,
+            notice: None,
+        }
     }
 
     fn section(&self) -> crate::settings::Section {
@@ -2509,6 +2525,17 @@ fn draw_export_popup(f: &mut Frame, es: &ExportState, area: Rect) {
 fn settings_pane_rows(app: &App, items: &[crate::settings::Item]) -> Vec<PaneRow> {
     use crate::settings::Section;
     let st = &app.settings;
+    if let Some(q) = &st.query {
+        let plugins: Vec<(String, String)> = st.plugins.iter().map(|p| (p.name.clone(), p.description.clone())).collect();
+        return crate::settings::search(items, &plugins, q)
+            .into_iter()
+            .map(|r| match r {
+                crate::settings::Row::Header(h) => PaneRow::Header(h),
+                crate::settings::Row::Item(i) => PaneRow::Item(i),
+                crate::settings::Row::Plugin(p) => PaneRow::Plugin(p),
+            })
+            .collect();
+    }
     if st.section() != Section::Plugins {
         return items.iter().enumerate().filter(|(_, it)| it.section == st.section()).map(|(i, _)| PaneRow::Item(i)).collect();
     }
@@ -2576,12 +2603,14 @@ fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
     // 왼쪽: 절
     let st = &app.settings;
     let left_focused = st.focus == SettingsFocus::Sections;
+    let dimmed = st.query.is_some();
     let mut left = Vec::new();
     for (i, s) in Section::ALL.iter().enumerate() {
         let selected = i == st.section;
-        let style = match (selected, left_focused) {
-            (true, true) => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            (true, false) => Style::default().fg(Color::Cyan),
+        let style = match (dimmed, selected, left_focused) {
+            (true, _, _) => Style::default().fg(Color::DarkGray),
+            (false, true, true) => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            (false, true, false) => Style::default().fg(Color::Cyan),
             _ => Style::default(),
         };
         let mark = if selected { ">" } else { " " };
@@ -2656,10 +2685,15 @@ fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(shown), right);
 
     // 아래 줄: 알림 또는 키 안내
-    let footer = match &st.notice {
-        Some((text, is_err)) => Line::from(Span::styled(text.clone(), Style::default().fg(if *is_err { Color::Red } else { Color::Green }))),
-        None => {
-            let hint = if st.page.is_some() { "j/k move  h/l change  Esc back to list" } else { "Tab switch  j/k move  h/l change  Enter edit  Esc close" };
+    let footer = match (&st.notice, &st.query) {
+        (Some((text, is_err)), _) => Line::from(Span::styled(text.clone(), Style::default().fg(if *is_err { Color::Red } else { Color::Green }))),
+        (None, Some(q)) => Line::from(vec![
+            Span::styled("/ ", Style::default().fg(Color::Yellow)),
+            Span::raw(format!("{}{}", q, if st.typing { "▏" } else { "" })),
+            Span::styled(if st.typing { "   Enter done  Esc clear" } else { "   j/k move  h/l change  Esc clear" }, Style::default().fg(Color::DarkGray)),
+        ]),
+        (None, None) => {
+            let hint = if st.page.is_some() { "j/k move  h/l change  Esc back to list" } else { "Tab switch  j/k move  h/l change  Enter edit  / search  Esc close" };
             Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray)))
         }
     };
@@ -3577,19 +3611,49 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
     use crate::settings::{Kind, Section};
     app.settings.notice = None;
     let items = app.settings_items();
+    if app.settings.typing {
+        match key.code {
+            KeyCode::Esc => settings_end_search(app),
+            KeyCode::Enter => { app.settings.typing = false; }
+            KeyCode::Backspace => {
+                if let Some(q) = app.settings.query.as_mut() { q.pop(); }
+                let rows = settings_pane_rows(app, &items);
+                app.settings.row = first_selectable(&rows);
+            }
+            KeyCode::Char(c) => {
+                if let Some(q) = app.settings.query.as_mut() { q.push(c); }
+                let rows = settings_pane_rows(app, &items);
+                app.settings.row = first_selectable(&rows);
+            }
+            _ => {}
+        }
+        return Ok(false);
+    }
     let rows = settings_pane_rows(app, &items);
     let focus = app.settings.focus;
 
     match (focus, key.code) {
+        (_, KeyCode::Char('/')) => {
+            if app.settings.query.is_none() {
+                app.settings.saved = Some((app.settings.focus, app.settings.section, app.settings.row, app.settings.page.clone()));
+            }
+            app.settings.query = Some(String::new());
+            app.settings.typing = true;
+            app.settings.focus = SettingsFocus::Rows;
+            let rows = settings_pane_rows(app, &items);
+            app.settings.row = first_selectable(&rows);
+        }
         (_, KeyCode::Esc) | (_, KeyCode::Char(',')) => {
-            if let Some(name) = app.settings.page.take() {
+            if app.settings.query.is_some() {
+                settings_end_search(app);
+            } else if let Some(name) = app.settings.page.take() {
                 let rows = settings_pane_rows(app, &items);
                 app.settings.row = rows.iter().position(|r| *r == PaneRow::Plugin(name.clone())).unwrap_or(0);
             } else {
                 app.mode = Mode::Normal;
             }
         }
-        (_, KeyCode::Tab) => {
+        (_, KeyCode::Tab) if app.settings.query.is_none() => {
             app.settings.focus = if focus == SettingsFocus::Sections { SettingsFocus::Rows } else { SettingsFocus::Sections };
             if app.settings.focus == SettingsFocus::Rows && !rows.get(app.settings.row).is_some_and(selectable) {
                 app.settings.row = first_selectable(&rows);
@@ -3621,6 +3685,10 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
         (SettingsFocus::Rows, KeyCode::Right) | (SettingsFocus::Rows, KeyCode::Char('l')) => settings_step(app, &items, &rows, 1),
         (SettingsFocus::Rows, KeyCode::Enter) => match rows.get(app.settings.row).cloned() {
             Some(PaneRow::Plugin(name)) => {
+                // 검색 결과에서 왔으면 검색 전 절이 아니라 Plugins 절의 페이지다
+                settings_end_search(app);
+                app.settings.section = Section::ALL.iter().position(|s| *s == Section::Plugins).unwrap_or(0);
+                app.settings.focus = SettingsFocus::Rows;
                 app.settings.page = Some(name);
                 let rows = settings_pane_rows(app, &items);
                 app.settings.row = first_selectable(&rows);
@@ -3670,6 +3738,18 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
         _ => {}
     }
     Ok(false)
+}
+
+/// 검색을 끝내고 검색 전 위치로. 검색어가 비어 있어도 같다.
+fn settings_end_search(app: &mut App) {
+    app.settings.query = None;
+    app.settings.typing = false;
+    if let Some((focus, section, row, page)) = app.settings.saved.take() {
+        app.settings.focus = focus;
+        app.settings.section = section;
+        app.settings.row = row;
+        app.settings.page = page;
+    }
 }
 
 /// h/l/Enter가 값을 바꾸는 자리. Installed 행은 내장이면 바로, 외부면 확인 팝업.
