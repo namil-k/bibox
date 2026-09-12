@@ -194,6 +194,10 @@ pub enum PluginProblem {
     ObsoleteGitSetting,
     /// `[plugins.x] enabled`. 지우기/깔기만 남았다.
     ObsoleteEnabledFlag { name: String },
+    /// doctor 전용. `[plugins.x] key`의 값이 `[[settings]]` 선언과 다른 타입이다.
+    SettingTypeMismatch { plugin: String, key: String, expected: String, found: String },
+    /// doctor 전용. `[plugins.x] key`가 선언에 없다. 선언이 하나라도 있는 플러그인만 검사한다.
+    UndeclaredSetting { plugin: String, key: String, suggestion: Option<String> },
 }
 
 impl PluginProblem {
@@ -209,7 +213,9 @@ impl PluginProblem {
             | PluginProblem::UnknownLayer { plugin, .. }
             | PluginProblem::BadHook { plugin, .. }
             | PluginProblem::ExecutableMissing { plugin, .. }
-            | PluginProblem::NameCollidesWithSubcommand { plugin } => plugin,
+            | PluginProblem::NameCollidesWithSubcommand { plugin }
+            | PluginProblem::SettingTypeMismatch { plugin, .. }
+            | PluginProblem::UndeclaredSetting { plugin, .. } => plugin,
             PluginProblem::NoManifest { dir } => dir,
             PluginProblem::ConfigWithoutPlugin { name } => name,
             PluginProblem::ObsoleteGitSetting => "config",

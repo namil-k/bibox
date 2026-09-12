@@ -370,7 +370,71 @@ pub fn run_external(args: Vec<OsString>, config: &Config) -> Result<i32> {
 
 // ── doctor ──────────────────────────────────────────────────────────────────
 
-/// 로드 시점에는 안 보는 검사들. `plugin.toml` 없는 디렉토리, PATH, 설정 고아, 이름 충돌.
+/// Levenshtein. 오타 제안(거리 2 이하)에만 쓴다.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.iter().enumerate() {
+        let mut cur = vec![i + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let cost = if ca == cb { 0 } else { 1 };
+            cur.push((prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1));
+        }
+        prev = cur;
+    }
+    prev[b.len()]
+}
+
+fn toml_type_name(v: &toml::Value) -> &'static str {
+    match v {
+        toml::Value::String(_) => "string",
+        toml::Value::Integer(_) => "int",
+        toml::Value::Float(_) => "float",
+        toml::Value::Boolean(_) => "bool",
+        toml::Value::Datetime(_) => "datetime",
+        toml::Value::Array(_) => "array",
+        toml::Value::Table(_) => "table",
+    }
+}
+
+/// `[[settings]]`를 선언한 플러그인에 한해 `[plugins.<name>]`을 대조한다.
+pub fn setting_problems(manifests: &[Manifest], config: &Config) -> Vec<PluginProblem> {
+    use crate::plugin::manifest::SettingKind;
+    let mut out = Vec::new();
+    for m in manifests {
+        if m.settings.is_empty() {
+            continue;
+        }
+        let Some(table) = config.plugins.get(&m.name) else { continue };
+        for (key, value) in table {
+            match m.settings.iter().find(|s| &s.key == key) {
+                Some(decl) => {
+                    if !decl.kind.accepts(value) {
+                        let (expected, found) = match &decl.kind {
+                            SettingKind::Choice(cs) => (format!("one of {}", cs.join(", ")), value.to_string()),
+                            k => (k.name().to_string(), toml_type_name(value).to_string()),
+                        };
+                        out.push(PluginProblem::SettingTypeMismatch { plugin: m.name.clone(), key: key.clone(), expected, found });
+                    }
+                }
+                None => {
+                    let suggestion = m
+                        .settings
+                        .iter()
+                        .map(|s| (edit_distance(key, &s.key), s.key.clone()))
+                        .filter(|(d, _)| *d <= 2)
+                        .min_by_key(|(d, _)| *d)
+                        .map(|(_, k)| k);
+                    out.push(PluginProblem::UndeclaredSetting { plugin: m.name.clone(), key: key.clone(), suggestion });
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 로드 시점에는 안 보는 검사들. `plugin.toml` 없는 디렉토리, PATH, 설정 고아, 이름 충돌, 설정 대조.
 pub fn doctor_checks(host: &PluginHost, config: &Config) -> Vec<PluginProblem> {
     let mut out = Vec::new();
     let dir = plugins_dir();
@@ -400,6 +464,7 @@ pub fn doctor_checks(host: &PluginHost, config: &Config) -> Vec<PluginProblem> {
             out.push(PluginProblem::NameCollidesWithSubcommand { plugin: m.name.clone() });
         }
     }
+    out.extend(setting_problems(host.manifests(), config));
     for name in config.plugins.keys() {
         if !host.manifests().iter().any(|m| &m.name == name) {
             out.push(PluginProblem::ConfigWithoutPlugin { name: name.clone() });
@@ -620,5 +685,52 @@ mod tests {
         assert!(std::fs::symlink_metadata(&dest).unwrap().file_type().is_symlink());
         assert!(install_local(&plugins, &src, &crate::i18n::Msgs::default()).is_err(), "twice is an error");
         let _ = std::fs::remove_dir_all(&root);
+    }
+    fn declared() -> Vec<Manifest> {
+        let text = "api = 1\nname = \"demo\"\nrun = \"sh\"\n\n[[settings]]\nkey = \"push_on_write\"\ntype = \"bool\"\ndefault = false\n\n[[settings]]\nkey = \"model\"\ntype = \"choice\"\nchoices = [\"a\", \"b\"]\ndefault = \"a\"\n";
+        let mut problems = vec![];
+        vec![parse_manifest(Path::new("/tmp/plugins/demo"), text, &mut problems).unwrap()]
+    }
+
+    fn config_with(plugins_toml: &str) -> Config {
+        toml::from_str(&format!("bibox_dir = \"/tmp/b\"\nsearch_case_sensitive = false\ndefault_page_size = 20\n{}", plugins_toml)).unwrap()
+    }
+
+    #[test]
+    fn a_wrongly_typed_value_is_a_type_mismatch() {
+        let p = setting_problems(&declared(), &config_with("[plugins.demo]\npush_on_write = \"yes\"\n"));
+        assert_eq!(p, vec![PluginProblem::SettingTypeMismatch { plugin: "demo".into(), key: "push_on_write".into(), expected: "bool".into(), found: "string".into() }]);
+    }
+
+    #[test]
+    fn a_choice_outside_the_list_names_the_choices() {
+        let p = setting_problems(&declared(), &config_with("[plugins.demo]\nmodel = \"zzz\"\n"));
+        assert_eq!(p, vec![PluginProblem::SettingTypeMismatch { plugin: "demo".into(), key: "model".into(), expected: "one of a, b".into(), found: "\"zzz\"".into() }]);
+    }
+
+    #[test]
+    fn an_undeclared_key_is_reported_with_a_close_suggestion() {
+        let p = setting_problems(&declared(), &config_with("[plugins.demo]\npush_on_wirte = true\nfoo = 1\n"));
+        assert_eq!(p, vec![
+            PluginProblem::UndeclaredSetting { plugin: "demo".into(), key: "foo".into(), suggestion: None },
+            PluginProblem::UndeclaredSetting { plugin: "demo".into(), key: "push_on_wirte".into(), suggestion: Some("push_on_write".into()) },
+        ]);
+    }
+
+    #[test]
+    fn a_plugin_without_declarations_is_not_checked() {
+        let text = "api = 1\nname = \"free\"\nrun = \"sh\"\n";
+        let mut problems = vec![];
+        let m = parse_manifest(Path::new("/tmp/plugins/free"), text, &mut problems).unwrap();
+        let p = setting_problems(&[m], &config_with("[plugins.free]\nanything = 1\n"));
+        assert!(p.is_empty());
+    }
+
+    #[test]
+    fn edit_distance_counts_edits() {
+        assert_eq!(edit_distance("push_on_write", "push_on_wirte"), 2);
+        assert_eq!(edit_distance("abc", "abc"), 0);
+        assert_eq!(edit_distance("", "abc"), 3);
+        assert_eq!(edit_distance("kitten", "sitting"), 3);
     }
 }

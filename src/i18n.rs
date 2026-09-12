@@ -875,6 +875,16 @@ impl Msgs {
             (Lang::Ko, ObsoleteGitSetting) => "  config.toml: `git = true`는 더 이상 쓰이지 않습니다. 포터블 홈이 git 저장소이면 git-sync 플러그인이 저장할 때마다 커밋합니다. 그 줄을 지우세요".to_string(),
             (Lang::En, ObsoleteEnabledFlag { name }) => format!("  config.toml: [plugins.{}] enabled is no longer supported; remove the plugin with `bibox plugin remove {}` instead", name, name),
             (Lang::Ko, ObsoleteEnabledFlag { name }) => format!("  config.toml: [plugins.{}]의 enabled는 더 이상 지원하지 않습니다. 대신 `bibox plugin remove {}`로 지우세요", name, name),
+            (Lang::En, SettingTypeMismatch { plugin, key, expected, found }) => format!("  config.toml: [plugins.{}] {}: expected {}, found {}", plugin, key, expected, found),
+            (Lang::Ko, SettingTypeMismatch { plugin, key, expected, found }) => format!("  config.toml: [plugins.{}] {}: {}이어야 하는데 {}입니다", plugin, key, expected, found),
+            (Lang::En, UndeclaredSetting { plugin, key, suggestion }) => match suggestion {
+                Some(s) => format!("  config.toml: [plugins.{}] {} is not a setting of {} (did you mean {}?)", plugin, key, plugin, s),
+                None => format!("  config.toml: [plugins.{}] {} is not a setting of {}", plugin, key, plugin),
+            },
+            (Lang::Ko, UndeclaredSetting { plugin, key, suggestion }) => match suggestion {
+                Some(s) => format!("  config.toml: [plugins.{}]의 {}는 {}의 설정이 아닙니다 ({}를 말한 건가요?)", plugin, key, plugin, s),
+                None => format!("  config.toml: [plugins.{}]의 {}는 {}의 설정이 아닙니다", plugin, key, plugin),
+            },
         }
     }
 
