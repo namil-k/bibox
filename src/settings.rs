@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 
 use crate::config::{expand_tilde, Config, LineNumbers, CITEKEY_PRESETS};
+use crate::plugin::{Manifest, SettingDecl, SettingKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
@@ -137,6 +138,7 @@ impl Core {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Target {
     Core(Core),
+    Plugin { name: String, decl: SettingDecl },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -188,11 +190,69 @@ pub fn core_items() -> Vec<Item> {
         .collect()
 }
 
+fn kind_of(k: &SettingKind) -> Kind {
+    match k {
+        SettingKind::Bool => Kind::Bool { on: "on", off: "off" },
+        SettingKind::Int => Kind::Int,
+        SettingKind::Str => Kind::Str,
+        SettingKind::Choice(cs) => Kind::Choice(cs.clone()),
+    }
+}
+
+/// 설치되어 로드된 플러그인의 `[[settings]]`. 매니페스트 순서, 선언 순서.
+pub fn plugin_items(manifests: &[Manifest]) -> Vec<Item> {
+    let mut out = Vec::new();
+    for m in manifests {
+        for d in &m.settings {
+            out.push(Item {
+                id: format!("plugins.{}.{}", m.name, d.key),
+                section: Section::Plugins,
+                plugin: Some(m.name.clone()),
+                label: d.key.clone(),
+                desc: d.desc.clone().unwrap_or_default(),
+                kind: kind_of(&d.kind),
+                target: Target::Plugin { name: m.name.clone(), decl: d.clone() },
+            });
+        }
+    }
+    out
+}
+
+pub fn items(manifests: &[Manifest]) -> Vec<Item> {
+    let mut all = core_items();
+    all.extend(plugin_items(manifests));
+    all
+}
+
 // ── 값 읽기 ─────────────────────────────────────────────────────────────────
+
+/// `[plugins.<name>]`의 값. 없거나 타입이 다르면 선언의 default.
+fn plugin_value(config: &Config, name: &str, decl: &SettingDecl) -> toml::Value {
+    config
+        .plugins
+        .get(name)
+        .and_then(|t| t.get(&decl.key))
+        .filter(|v| decl.kind.accepts(v))
+        .cloned()
+        .unwrap_or_else(|| decl.default.clone())
+}
+
+fn plugin_write(config: &mut Config, name: &str, key: &str, v: toml::Value) {
+    config.plugins.entry(name.to_string()).or_default().insert(key.to_string(), v);
+}
+
+fn toml_display(v: &toml::Value) -> String {
+    match v {
+        toml::Value::String(s) => s.clone(),
+        toml::Value::Boolean(b) => (if *b { "on" } else { "off" }).to_string(),
+        other => other.to_string(),
+    }
+}
 
 pub fn value(item: &Item, config: &Config) -> String {
     match &item.target {
         Target::Core(c) => core_value(*c, config),
+        Target::Plugin { name, decl } => toml_display(&plugin_value(config, name, decl)),
     }
 }
 
@@ -263,6 +323,24 @@ fn cycle(len: usize, current: Option<usize>, delta: i32) -> usize {
 /// h/l. config를 고쳤으면 true.
 pub fn step(item: &Item, config: &mut Config, delta: i32) -> bool {
     match (&item.target, &item.kind) {
+        (Target::Plugin { name, decl }, Kind::Bool { .. }) => {
+            let cur = plugin_value(config, name, decl).as_bool().unwrap_or(false);
+            plugin_write(config, name, &decl.key, toml::Value::Boolean(!cur));
+            true
+        }
+        (Target::Plugin { name, decl }, Kind::Int) => {
+            let cur = plugin_value(config, name, decl).as_integer().unwrap_or(0);
+            plugin_write(config, name, &decl.key, toml::Value::Integer(cur + delta as i64));
+            true
+        }
+        (Target::Plugin { name, decl }, Kind::Choice(choices)) => {
+            let cur = plugin_value(config, name, decl);
+            let pos = cur.as_str().and_then(|s| choices.iter().position(|c| c == s));
+            let next = cycle(choices.len(), pos, delta);
+            plugin_write(config, name, &decl.key, toml::Value::String(choices[next].clone()));
+            true
+        }
+        (Target::Plugin { .. }, Kind::Str) | (Target::Plugin { .. }, Kind::Path { .. }) => false,
         (Target::Core(c), Kind::Bool { on, off }) => {
             let cur = core_value(*c, config);
             apply_core(*c, config, if cur == *on { off } else { on });
@@ -315,6 +393,32 @@ pub fn step(item: &Item, config: &mut Config, delta: i32) -> bool {
 pub fn set(item: &Item, config: &mut Config, text: &str) -> Result<(), String> {
     let text = text.trim();
     match (&item.target, &item.kind) {
+        (Target::Plugin { name, decl }, Kind::Bool { on, off }) => {
+            let v = match text {
+                t if t == *on || t == "true" => true,
+                t if t == *off || t == "false" => false,
+                other => return Err(format!("expected {} or {}, got \"{}\"", on, off, other)),
+            };
+            plugin_write(config, name, &decl.key, toml::Value::Boolean(v));
+            Ok(())
+        }
+        (Target::Plugin { name, decl }, Kind::Int) => {
+            let n: i64 = text.parse().map_err(|_| format!("not a number: \"{}\"", text))?;
+            plugin_write(config, name, &decl.key, toml::Value::Integer(n));
+            Ok(())
+        }
+        (Target::Plugin { name, decl }, Kind::Str) => {
+            plugin_write(config, name, &decl.key, toml::Value::String(text.to_string()));
+            Ok(())
+        }
+        (Target::Plugin { name, decl }, Kind::Choice(choices)) => {
+            if !choices.iter().any(|x| x == text) {
+                return Err(format!("\"{}\" is not one of: {}", text, choices.join(", ")));
+            }
+            plugin_write(config, name, &decl.key, toml::Value::String(text.to_string()));
+            Ok(())
+        }
+        (Target::Plugin { .. }, Kind::Path { .. }) => Err("not editable".to_string()),
         (Target::Core(c), Kind::Bool { on, off }) => {
             let v = match text {
                 t if t == *on || t == "on" || t == "true" => on,
@@ -497,5 +601,75 @@ mod tests {
         assert!(step(lang, &mut c, 1));
         assert_eq!(c.language, "ko");
         assert_eq!(c.msgs.no_entries(), "항목이 없습니다.");
+    }
+    fn manifest_with_settings() -> crate::plugin::Manifest {
+        let text = "api = 1\nname = \"demo\"\nrun = \"sh\"\n\n[[settings]]\nkey = \"push\"\ntype = \"bool\"\ndefault = false\ndesc = \"push after commit\"\n\n[[settings]]\nkey = \"n\"\ntype = \"int\"\ndefault = 4\n\n[[settings]]\nkey = \"model\"\ntype = \"choice\"\nchoices = [\"a\", \"b\"]\ndefault = \"a\"\n\n[[settings]]\nkey = \"label\"\ntype = \"string\"\ndefault = \"x\"\n";
+        let mut problems = vec![];
+        crate::plugin::manifest::parse_manifest(std::path::Path::new("/tmp/plugins/demo"), text, &mut problems).expect("manifest")
+    }
+
+    #[test]
+    fn plugin_items_follow_the_core_items_and_carry_the_plugin_name() {
+        let items = items(&[manifest_with_settings()]);
+        assert_eq!(items.len(), 14);
+        let p = &items[10];
+        assert_eq!(p.id, "plugins.demo.push");
+        assert_eq!(p.section, Section::Plugins);
+        assert_eq!(p.plugin.as_deref(), Some("demo"));
+        assert_eq!(p.label, "push");
+        assert_eq!(p.desc, "push after commit");
+        assert_eq!(p.kind, Kind::Bool { on: "on", off: "off" });
+        assert_eq!(items[13].kind, Kind::Str);
+    }
+
+    #[test]
+    fn a_plugin_setting_steps_write_into_the_plugins_table() {
+        let items = items(&[manifest_with_settings()]);
+        let mut c = Config::default();
+        let push = find(&items, "plugins.demo.push");
+        assert_eq!(value(push, &c), "off");
+        assert!(step(push, &mut c, 1));
+        assert_eq!(c.plugins["demo"]["push"], toml::Value::Boolean(true));
+        assert_eq!(value(push, &c), "on");
+        let n = find(&items, "plugins.demo.n");
+        assert!(step(n, &mut c, 1));
+        assert_eq!(c.plugins["demo"]["n"], toml::Value::Integer(5));
+        assert!(step(n, &mut c, -1));
+        assert_eq!(value(n, &c), "4");
+        let model = find(&items, "plugins.demo.model");
+        assert!(step(model, &mut c, -1));
+        assert_eq!(value(model, &c), "b", "wraps");
+        let label = find(&items, "plugins.demo.label");
+        assert!(!step(label, &mut c, 1), "strings are not stepped");
+    }
+
+    #[test]
+    fn a_wrongly_typed_value_shows_the_default_until_overwritten() {
+        let items = items(&[manifest_with_settings()]);
+        let mut c = Config::default();
+        c.plugins.entry("demo".into()).or_default().insert("push".into(), toml::Value::String("yes".into()));
+        let push = find(&items, "plugins.demo.push");
+        assert_eq!(value(push, &c), "off");
+        assert!(step(push, &mut c, 1));
+        assert_eq!(c.plugins["demo"]["push"], toml::Value::Boolean(true));
+    }
+
+    #[test]
+    fn set_parses_plugin_values_and_rejects_bad_ones() {
+        let items = items(&[manifest_with_settings()]);
+        let mut c = Config::default();
+        let n = find(&items, "plugins.demo.n");
+        assert!(set(n, &mut c, "abc").is_err());
+        assert!(set(n, &mut c, "12").is_ok());
+        assert_eq!(c.plugins["demo"]["n"], toml::Value::Integer(12));
+        let model = find(&items, "plugins.demo.model");
+        assert!(set(model, &mut c, "zzz").is_err());
+        assert!(set(model, &mut c, "b").is_ok());
+        let label = find(&items, "plugins.demo.label");
+        assert!(set(label, &mut c, "hello world").is_ok());
+        assert_eq!(c.plugins["demo"]["label"], toml::Value::String("hello world".into()));
+        let push = find(&items, "plugins.demo.push");
+        assert!(set(push, &mut c, "true").is_ok());
+        assert_eq!(c.plugins["demo"]["push"], toml::Value::Boolean(true));
     }
 }

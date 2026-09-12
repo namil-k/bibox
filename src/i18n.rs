@@ -929,6 +929,13 @@ impl Msgs {
         }
     }
 
+    pub fn plugin_removed(&self, name: &str) -> String {
+        match self.lang {
+            Lang::En => format!("Removed {}", name),
+            Lang::Ko => format!("{}를 지웠습니다", name),
+        }
+    }
+
     pub fn plugin_not_found(&self, name: &str) -> String {
         match self.lang {
             Lang::En => format!("No plugin named \"{}\" (see `bibox plugin list`)", name),

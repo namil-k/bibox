@@ -177,6 +177,7 @@ struct ExportState {
 }
 
 enum ConfirmAction {
+    RemovePlugin(String),
     Delete(String),
     FetchPdf(String),
     OpenBrowser(String, String), // (citekey, url)
@@ -187,6 +188,46 @@ enum FilePickerContext {
     AttachPdf(String),  // citekey
     /// `settings::Item.id`. 고르면 Settings로 돌아온다.
     Setting(String),
+}
+
+/// Plugins 절의 한 행. 설치된 것은 `list_rows`에서, 설치 안 된 내장은 `BUILTINS`에서.
+#[derive(Debug, Clone)]
+struct PluginRow {
+    name: String,
+    version: String,
+    /// built-in | local | git | dir | error
+    source: String,
+    /// error 행은 문제 문구
+    description: String,
+    installed: bool,
+    builtin: bool,
+}
+
+fn plugin_rows() -> Vec<PluginRow> {
+    let dir = crate::plugin::plugins_dir();
+    let mut rows: Vec<PluginRow> = crate::plugin::cli::list_rows(&dir)
+        .into_iter()
+        .map(|r| PluginRow { name: r.name, version: r.version, source: r.source, description: r.description, installed: true, builtin: r.builtin })
+        .collect();
+    for b in crate::plugin::builtin::BUILTINS {
+        if rows.iter().any(|r| r.name == b.name) {
+            continue;
+        }
+        let description = toml::from_str::<toml::Value>(b.manifest)
+            .ok()
+            .and_then(|v| v.get("description").and_then(|d| d.as_str()).map(String::from))
+            .unwrap_or_default();
+        rows.push(PluginRow {
+            name: b.name.to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            source: "built-in".to_string(),
+            description,
+            installed: false,
+            builtin: true,
+        });
+    }
+    rows.sort_by(|a, b| b.installed.cmp(&a.installed).then(a.name.cmp(&b.name)));
+    rows
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -202,13 +243,17 @@ struct SettingsState {
     section: usize,
     /// 오른쪽 칸 행 인덱스(`settings_pane_rows` 결과 기준)
     row: usize,
+    /// 열린 플러그인 페이지. None이면 목록.
+    page: Option<String>,
+    /// Plugins 절의 행. 열 때와 설치·제거 뒤에 다시 읽는다(디스크를 매 프레임 읽지 않으려고).
+    plugins: Vec<PluginRow>,
     /// 아래 줄에 한 번 보이는 알림. (문구, 오류인가). 다음 키에 사라진다.
     notice: Option<(String, bool)>,
 }
 
 impl SettingsState {
     fn new() -> Self {
-        SettingsState { focus: SettingsFocus::Sections, section: 0, row: 0, notice: None }
+        SettingsState { focus: SettingsFocus::Sections, section: 0, row: 0, page: None, plugins: Vec::new(), notice: None }
     }
 
     fn section(&self) -> crate::settings::Section {
@@ -224,10 +269,15 @@ enum PaneRow {
     Blank,
     /// `App::settings_items()`의 인덱스
     Item(usize),
+    /// Plugins 목록의 한 플러그인
+    Plugin(String),
+    /// 플러그인 페이지의 Installed 토글
+    Installed(String),
+    InstallFrom,
 }
 
 fn selectable(row: &PaneRow) -> bool {
-    matches!(row, PaneRow::Item(_))
+    matches!(row, PaneRow::Item(_) | PaneRow::Plugin(_) | PaneRow::Installed(_) | PaneRow::InstallFrom)
 }
 
 fn first_selectable(rows: &[PaneRow]) -> usize {
@@ -1024,6 +1074,7 @@ fn plugin_ui_step(kind: &mut PluginUiKind, code: KeyCode) -> Option<UiAnswer> {
 impl App {
     fn open_settings(&mut self, section: crate::settings::Section) {
         self.settings = SettingsState::new();
+        self.settings.plugins = plugin_rows();
         self.settings.section = crate::settings::Section::ALL.iter().position(|s| *s == section).unwrap_or(0);
         let items = self.settings_items();
         let rows = settings_pane_rows(self, &items);
@@ -1032,14 +1083,26 @@ impl App {
     }
 
     fn settings_items(&self) -> Vec<crate::settings::Item> {
-        crate::settings::core_items()
+        crate::settings::items(self.host.manifests())
     }
 
-    /// 값을 바꾼 직후마다 부른다. 실패는 알림 줄에.
+    /// 값을 바꾼 직후마다 부른다. 실패는 알림 줄에. 플러그인은 다음 요청부터 새 값을 본다.
     fn save_settings(&mut self) {
         if let Err(e) = crate::config::save_config(&self.config) {
             self.settings.notice = Some((format!("Could not save config.toml: {}", e), true));
         }
+        self.host.update_config_tables(crate::config::plugin_tables(&self.config));
+    }
+
+    /// 설치·제거 뒤. 호스트를 다시 만들고 키맵·도움말이 새 명령 표를 보게 한다.
+    /// 옛 호스트는 마지막 Arc가 떨어질 때 Drop이 프로세스를 정리한다.
+    fn reload_plugins(&mut self) {
+        let (host, _problems) = PluginHost::discover(&self.config);
+        let host = Arc::new(host);
+        self.keymap = crate::keymap::load_keymap(host.commands()).keymap;
+        self.hooks.host = Arc::clone(&host);
+        self.host = host;
+        self.settings.plugins = plugin_rows();
     }
 
     /// 메모리의 항목을 디스크에 쓰고 `after_write`를 백그라운드로 발화한다.
@@ -1313,6 +1376,11 @@ fn draw(f: &mut Frame, app: &mut App) {
         }
         Mode::Confirm(ConfirmAction::FetchMetaByTitle(_key, _title)) => {
             draw_confirm_popup(f, "No DOI. Search Crossref by title? (y/n)", size);
+        }
+        Mode::Confirm(ConfirmAction::RemovePlugin(name)) => {
+            let q = format!("{} (y/n)", app.config.msgs.plugin_remove_question(name));
+            draw_settings_popup(f, app, size);
+            draw_confirm_popup(f, &q, size);
         }
         Mode::FetchPreview => {
             if let Some(ref state) = app.fetch_preview {
@@ -2347,13 +2415,28 @@ fn draw_export_popup(f: &mut Frame, es: &ExportState, area: Rect) {
 
 /// 현재 절(또는 페이지, 검색)의 오른쪽 칸 행. 커서 이동과 그리기가 같은 목록을 본다.
 fn settings_pane_rows(app: &App, items: &[crate::settings::Item]) -> Vec<PaneRow> {
-    let section = app.settings.section();
-    items
-        .iter()
-        .enumerate()
-        .filter(|(_, it)| it.section == section)
-        .map(|(i, _)| PaneRow::Item(i))
-        .collect()
+    use crate::settings::Section;
+    let st = &app.settings;
+    if st.section() != Section::Plugins {
+        return items.iter().enumerate().filter(|(_, it)| it.section == st.section()).map(|(i, _)| PaneRow::Item(i)).collect();
+    }
+    match &st.page {
+        None => st.plugins.iter().map(|p| PaneRow::Plugin(p.name.clone())).collect(),
+        Some(name) => {
+            let mut rows = Vec::new();
+            let Some(p) = st.plugins.iter().find(|p| &p.name == name) else { return rows };
+            rows.push(PaneRow::Header(format!("{}  {}  {}", p.name, p.version, p.source)));
+            if !p.description.is_empty() {
+                rows.push(PaneRow::Text(p.description.clone()));
+            }
+            rows.push(PaneRow::Blank);
+            rows.push(PaneRow::Installed(p.name.clone()));
+            if p.installed && p.source != "error" {
+                rows.extend(items.iter().enumerate().filter(|(_, it)| it.plugin.as_deref() == Some(name)).map(|(i, _)| PaneRow::Item(i)));
+            }
+            rows
+        }
+    }
 }
 
 /// 칸 폭에 맞춰 단어 단위로 접는다. 하드 랩은 여기서만 한다.
@@ -2428,6 +2511,30 @@ fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
                     lines.push((if k == 0 { Some(ri) } else { None }, Line::from(Span::styled(l, Style::default().fg(Color::Gray)))));
                 }
             }
+            PaneRow::Plugin(name) => {
+                let p = st.plugins.iter().find(|p| &p.name == name);
+                let (status, source) = match p {
+                    Some(p) => (if p.installed { "installed" } else { "not installed" }, p.source.as_str()),
+                    None => ("", ""),
+                };
+                let mark = if is_cursor { "> " } else { "  " };
+                let style = if is_cursor { Style::default().fg(Color::Cyan) } else { Style::default() };
+                lines.push((Some(ri), Line::from(vec![
+                    Span::styled(format!("{}{:<14} {:<14}", mark, name, status), style),
+                    Span::styled(source.to_string(), Style::default().fg(Color::DarkGray)),
+                ])));
+            }
+            PaneRow::Installed(name) => {
+                let installed = st.plugins.iter().find(|p| &p.name == name).map(|p| p.installed).unwrap_or(false);
+                let mark = if is_cursor { "> " } else { "  " };
+                let style = if is_cursor { Style::default().fg(Color::Cyan) } else { Style::default() };
+                lines.push((Some(ri), Line::from(Span::styled(format!("{}{:<18} [{}]", mark, "Installed", if installed { "yes" } else { "no" }), style))));
+            }
+            PaneRow::InstallFrom => {
+                let mark = if is_cursor { "> " } else { "  " };
+                let style = if is_cursor { Style::default().fg(Color::Cyan) } else { Style::default().fg(Color::Yellow) };
+                lines.push((Some(ri), Line::from(Span::styled(format!("{}Install from…", mark), style))));
+            }
             PaneRow::Item(i) => {
                 let it = &items[*i];
                 let mark = if is_cursor { "> " } else { "  " };
@@ -2455,7 +2562,10 @@ fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
     // 아래 줄: 알림 또는 키 안내
     let footer = match &st.notice {
         Some((text, is_err)) => Line::from(Span::styled(text.clone(), Style::default().fg(if *is_err { Color::Red } else { Color::Green }))),
-        None => Line::from(Span::styled("Tab switch  j/k move  h/l change  Enter edit  Esc close", Style::default().fg(Color::DarkGray))),
+        None => {
+            let hint = if st.page.is_some() { "j/k move  h/l change  Esc back to list" } else { "Tab switch  j/k move  h/l change  Enter edit  Esc close" };
+            Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray)))
+        }
     };
     f.render_widget(Paragraph::new(footer), vertical[1]);
 }
@@ -3110,6 +3220,17 @@ fn handle_confirm(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool
                     app.delete_selected()?;
                     app.mode = Mode::Message("Entry deleted.".to_string());
                 }
+                Mode::Confirm(ConfirmAction::RemovePlugin(name)) => {
+                    match crate::plugin::cli::remove_plugin_files(&crate::plugin::plugins_dir(), &name) {
+                        Ok(()) => {
+                            app.reload_plugins();
+                            app.settings.notice = Some((app.config.msgs.plugin_removed(&name), false));
+                        }
+                        Err(e) => app.settings.notice = Some((e.to_string(), true)),
+                    }
+                    app.settings.page = None;
+                    app.mode = Mode::Settings;
+                }
                 Mode::Confirm(ConfirmAction::FetchPdf(key)) => {
                     let entry = app.entries.iter().find(|e| e.bibtex_key == key).cloned();
                     if let Some(entry) = entry {
@@ -3152,7 +3273,10 @@ fn handle_confirm(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool
                 _ => {}
             }
         }
-        KeyCode::Char('n') | KeyCode::Esc => { app.mode = Mode::Normal; }
+        KeyCode::Char('n') | KeyCode::Esc => {
+            let back = matches!(app.mode, Mode::Confirm(ConfirmAction::RemovePlugin(_)));
+            app.mode = if back { Mode::Settings } else { Mode::Normal };
+        }
         _ => {}
     }
     Ok(false)
@@ -3342,7 +3466,12 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
 
     match (focus, key.code) {
         (_, KeyCode::Esc) | (_, KeyCode::Char(',')) => {
-            app.mode = Mode::Normal;
+            if let Some(name) = app.settings.page.take() {
+                let rows = settings_pane_rows(app, &items);
+                app.settings.row = rows.iter().position(|r| *r == PaneRow::Plugin(name.clone())).unwrap_or(0);
+            } else {
+                app.mode = Mode::Normal;
+            }
         }
         (_, KeyCode::Tab) => {
             app.settings.focus = if focus == SettingsFocus::Sections { SettingsFocus::Rows } else { SettingsFocus::Sections };
@@ -3351,11 +3480,13 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
             }
         }
         (SettingsFocus::Sections, KeyCode::Up) | (SettingsFocus::Sections, KeyCode::Char('k')) => {
+            app.settings.page = None;
             app.settings.section = app.settings.section.saturating_sub(1);
             let rows = settings_pane_rows(app, &items);
             app.settings.row = first_selectable(&rows);
         }
         (SettingsFocus::Sections, KeyCode::Down) | (SettingsFocus::Sections, KeyCode::Char('j')) => {
+            app.settings.page = None;
             app.settings.section = (app.settings.section + 1).min(Section::ALL.len() - 1);
             let rows = settings_pane_rows(app, &items);
             app.settings.row = first_selectable(&rows);
@@ -3370,23 +3501,18 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
         (SettingsFocus::Rows, KeyCode::Down) | (SettingsFocus::Rows, KeyCode::Char('j')) => {
             app.settings.row = move_cursor(&rows, app.settings.row, 1);
         }
-        (SettingsFocus::Rows, KeyCode::Left) | (SettingsFocus::Rows, KeyCode::Char('h')) => {
-            if let Some(PaneRow::Item(i)) = rows.get(app.settings.row) {
-                if crate::settings::step(&items[*i], &mut app.config, -1) {
-                    app.save_settings();
-                }
+        (SettingsFocus::Rows, KeyCode::Left) | (SettingsFocus::Rows, KeyCode::Char('h')) => settings_step(app, &items, &rows, -1),
+        (SettingsFocus::Rows, KeyCode::Right) | (SettingsFocus::Rows, KeyCode::Char('l')) => settings_step(app, &items, &rows, 1),
+        (SettingsFocus::Rows, KeyCode::Enter) => match rows.get(app.settings.row).cloned() {
+            Some(PaneRow::Plugin(name)) => {
+                app.settings.page = Some(name);
+                let rows = settings_pane_rows(app, &items);
+                app.settings.row = first_selectable(&rows);
             }
-        }
-        (SettingsFocus::Rows, KeyCode::Right) | (SettingsFocus::Rows, KeyCode::Char('l')) => {
-            if let Some(PaneRow::Item(i)) = rows.get(app.settings.row) {
-                if crate::settings::step(&items[*i], &mut app.config, 1) {
-                    app.save_settings();
-                }
-            }
-        }
-        (SettingsFocus::Rows, KeyCode::Enter) => {
-            if let Some(PaneRow::Item(i)) = rows.get(app.settings.row) {
-                let it = &items[*i];
+            Some(PaneRow::Installed(_)) => settings_step(app, &items, &rows, 1),
+            Some(PaneRow::InstallFrom) => {}
+            Some(PaneRow::Item(i)) => {
+                let it = &items[i];
                 match &it.kind {
                     Kind::Bool { .. } | Kind::Choice(_) => {
                         if crate::settings::step(it, &mut app.config, 1) {
@@ -3417,10 +3543,45 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
                     }
                 }
             }
-        }
+            _ => {}
+        },
         _ => {}
     }
     Ok(false)
+}
+
+/// h/l/Enter가 값을 바꾸는 자리. Installed 행은 내장이면 바로, 외부면 확인 팝업.
+fn settings_step(app: &mut App, items: &[crate::settings::Item], rows: &[PaneRow], delta: i32) {
+    match rows.get(app.settings.row).cloned() {
+        Some(PaneRow::Item(i)) => {
+            if crate::settings::step(&items[i], &mut app.config, delta) {
+                app.save_settings();
+            }
+        }
+        Some(PaneRow::Installed(name)) => {
+            let Some(p) = app.settings.plugins.iter().find(|p| p.name == name).cloned() else { return };
+            let dir = crate::plugin::plugins_dir();
+            match (p.builtin, p.installed) {
+                (true, true) => match crate::plugin::cli::remove_plugin_files(&dir, &name) {
+                    Ok(()) => {
+                        app.reload_plugins();
+                        app.settings.notice = Some((app.config.msgs.plugin_removed(&name), false));
+                    }
+                    Err(e) => app.settings.notice = Some((e.to_string(), true)),
+                },
+                (true, false) => match crate::plugin::write_stub(&dir, &name) {
+                    Ok(dest) => {
+                        app.reload_plugins();
+                        app.settings.notice = Some((app.config.msgs.plugin_installed(&name, &dest.display().to_string()), false));
+                    }
+                    Err(e) => app.settings.notice = Some((e.to_string(), true)),
+                },
+                (false, true) => app.mode = Mode::Confirm(ConfirmAction::RemovePlugin(name)),
+                (false, false) => {}
+            }
+        }
+        _ => {}
+    }
 }
 
 fn handle_settings_input(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
@@ -4542,6 +4703,14 @@ mod tests {
         assert_eq!(plugin_ui_step(&mut k, KeyCode::Char('y')), Some(UiAnswer::Yes { yes: true }));
         assert_eq!(plugin_ui_step(&mut k, KeyCode::Char('n')), Some(UiAnswer::Yes { yes: false }));
         assert_eq!(plugin_ui_step(&mut k, KeyCode::Esc), Some(UiAnswer::Yes { yes: false }));
+    }
+
+    #[test]
+    fn selectable_rows_are_items_plugins_installed_and_install_from() {
+        use super::PaneRow::*;
+        use super::selectable;
+        assert!(selectable(&Item(0)) && selectable(&Plugin("a".into())) && selectable(&Installed("a".into())) && selectable(&InstallFrom));
+        assert!(!selectable(&Header("h".into())) && !selectable(&Text("t".into())) && !selectable(&Blank));
     }
 
     #[test]

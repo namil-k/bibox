@@ -238,17 +238,28 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn cmd_plugin_remove(name: &str, yes: bool, config: &Config) -> Result<()> {
-    let dest = plugins_dir().join(name);
-    let meta = std::fs::symlink_metadata(&dest).with_context(|| config.msgs.plugin_not_found(name))?;
-    if !yes && !crate::interactive::prompt_yes_no(&config.msgs.plugin_remove_question(name)) {
-        bail!("cancelled");
-    }
+/// 심링크면 링크만, 디렉토리면 통째로. TUI와 CLI가 같이 쓴다.
+pub fn remove_plugin_files(dir: &Path, name: &str) -> Result<()> {
+    let dest = dir.join(name);
+    let meta = std::fs::symlink_metadata(&dest).with_context(|| format!("no plugin directory {}", dest.display()))?;
     if meta.file_type().is_symlink() {
         std::fs::remove_file(&dest)?;
     } else {
         std::fs::remove_dir_all(&dest)?;
     }
+    Ok(())
+}
+
+pub fn cmd_plugin_remove(name: &str, yes: bool, config: &Config) -> Result<()> {
+    let dir = plugins_dir();
+    let dest = dir.join(name);
+    if std::fs::symlink_metadata(&dest).is_err() {
+        bail!("{}", config.msgs.plugin_not_found(name));
+    }
+    if !yes && !crate::interactive::prompt_yes_no(&config.msgs.plugin_remove_question(name)) {
+        bail!("cancelled");
+    }
+    remove_plugin_files(&dir, name)?;
     println!("Removed {}", dest.display());
     Ok(())
 }
@@ -452,5 +463,21 @@ mod tests {
         assert!(get("broken").description.contains("run or builtin"));
         assert!(rows.windows(2).all(|w| w[0].name <= w[1].name), "sorted");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn remove_plugin_files_unlinks_a_symlink_and_deletes_a_directory() {
+        let root = std::env::temp_dir().join(format!("bibox-rm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("plugin.toml"), "x").unwrap();
+        std::os::unix::fs::symlink(&src, root.join("linked")).unwrap();
+        std::fs::create_dir_all(root.join("plain")).unwrap();
+        remove_plugin_files(&root, "linked").unwrap();
+        assert!(!root.join("linked").exists() && src.join("plugin.toml").exists(), "source untouched");
+        remove_plugin_files(&root, "plain").unwrap();
+        assert!(!root.join("plain").exists());
+        assert!(remove_plugin_files(&root, "nope").is_err());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

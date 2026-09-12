@@ -5,7 +5,7 @@ use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use crate::config::Config;
 use crate::keymap::{KeyPress, LayerId};
@@ -194,7 +194,7 @@ pub struct PluginHost {
     slots: BTreeMap<String, Arc<PluginSlot>>,
     commands: PluginCommands,
     hooks: HashMap<HookKind, Vec<PluginCmdId>>,
-    config_tables: BTreeMap<String, Value>,
+    config_tables: RwLock<BTreeMap<String, Value>>,
     env: PluginEnv,
 }
 
@@ -232,11 +232,16 @@ impl PluginHost {
                 }
             }
         }
-        PluginHost { manifests, slots, commands, hooks, config_tables, env }
+        PluginHost { manifests, slots, commands, hooks, config_tables: RwLock::new(config_tables), env }
     }
 
     pub fn commands(&self) -> &PluginCommands {
         &self.commands
+    }
+
+    /// Settings 화면이 `[plugins.<name>]`을 바꾼 뒤 부른다. 다음 요청부터 새 값이 간다.
+    pub fn update_config_tables(&self, tables: BTreeMap<String, Value>) {
+        *self.config_tables.write().unwrap_or_else(|p| p.into_inner()) = tables;
     }
 
     pub fn hooks(&self, kind: HookKind) -> &[PluginCmdId] {
@@ -257,7 +262,13 @@ impl PluginHost {
         entries: Vec<Entry>,
         hook: Option<Value>,
     ) -> Context {
-        let mut config = self.config_tables.get(plugin).cloned().unwrap_or_else(|| Value::Object(Default::default()));
+        let mut config = self
+            .config_tables
+            .read()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(plugin)
+            .cloned()
+            .unwrap_or_else(|| Value::Object(Default::default()));
         if let Some(obj) = config.as_object_mut() {
             obj.remove("enabled");
         }
@@ -412,6 +423,13 @@ impl PluginHost {
     }
 }
 
+/// 호스트를 갈아 끼울 때(설치·제거) 옛 호스트의 프로세스가 고아로 남지 않도록.
+impl Drop for PluginHost {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
 /// 프로세스 그룹 전체에 SIGKILL. 플러그인이 띄운 자식까지 같이 죽여야 파이프가 닫힌다.
 /// pgid는 `process_group(0)`으로 띄웠으므로 pid와 같다.
 fn kill_group(child: &mut Child) {
@@ -512,6 +530,16 @@ mod tests {
         assert_eq!(host.hooks(HookKind::AfterWrite), &[id]);
         assert!(host.hooks(HookKind::BeforeAdd).is_empty());
         assert_eq!(host.manifests().len(), 1);
+    }
+
+    #[test]
+    fn updated_config_tables_reach_the_next_context() {
+        let (host, _) = host_for("alpha", "echo.sh");
+        assert_eq!(ctx(&host, "alpha").config, serde_json::json!({}));
+        let mut tables = BTreeMap::new();
+        tables.insert("alpha".to_string(), serde_json::json!({ "push": true }));
+        host.update_config_tables(tables);
+        assert_eq!(ctx(&host, "alpha").config, serde_json::json!({ "push": true }));
     }
 
     #[test]
