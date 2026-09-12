@@ -747,6 +747,17 @@ impl Msgs {
         }
     }
 
+    // ── 인용 복사 ──────────────────────────────────────────────────────────────
+
+    pub fn citation_copied(&self, style: &str, n: usize) -> String {
+        match (&self.lang, n) {
+            (Lang::En, 1) => format!("Copied {} citation", style),
+            (Lang::En, n) => format!("Copied {} {} citations", n, style),
+            (Lang::Ko, 1) => format!("{} 인용을 복사했습니다", style),
+            (Lang::Ko, n) => format!("{} 인용 {}개를 복사했습니다", style, n),
+        }
+    }
+
     // ── keymap.toml 로드 진단 ──────────────────────────────────────────────────
 
     pub fn keymap_fallback_header(&self) -> &'static str {

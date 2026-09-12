@@ -91,6 +91,7 @@ enum Mode {
     SearchResultPicker,
     ContextMenu,
     PluginUi(PluginUiState),
+    CitationStyle(usize),
 }
 
 struct ContextMenuState {
@@ -791,6 +792,59 @@ impl App {
     }
 }
 
+// ── Citation ────────────────────────────────────────────────────────────────
+
+fn handle_citation_style(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
+    let idx = match &app.mode {
+        Mode::CitationStyle(i) => *i,
+        _ => return Ok(false),
+    };
+    let styles = crate::citation::Style::all();
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => app.mode = Mode::CitationStyle(idx.saturating_sub(1)),
+        KeyCode::Down | KeyCode::Char('j') => app.mode = Mode::CitationStyle((idx + 1).min(styles.len() - 1)),
+        KeyCode::Enter => {
+            let style = styles[idx];
+            let (text, n) = {
+                let entries: Vec<&Entry> = if app.selected_keys.is_empty() {
+                    app.selected_entry().into_iter().collect()
+                } else {
+                    app.entries.iter().filter(|e| app.selected_keys.contains(&e.bibtex_key)).collect()
+                };
+                (crate::citation::format_many(&entries, style), entries.len())
+            };
+            if let Ok(mut ctx) = arboard::Clipboard::new() {
+                let _ = ctx.set_text(&text);
+            }
+            app.mode = Mode::Message(app.config.msgs.citation_copied(style.label(), n));
+        }
+        KeyCode::Esc | KeyCode::Char('q') => app.mode = Mode::Normal,
+        _ => {}
+    }
+    Ok(false)
+}
+
+fn draw_citation_popup(f: &mut Frame, idx: usize, area: Rect) {
+    let popup_area = centered_rect(40, 9, area);
+    f.render_widget(Clear, popup_area);
+    let mut lines = vec![
+        Line::from(Span::styled("Citation style", Style::default().fg(Color::Yellow))),
+        Line::from(""),
+    ];
+    for (i, s) in crate::citation::Style::all().iter().enumerate() {
+        let arrow = if i == idx { "▶ " } else { "  " };
+        let style = if i == idx { Style::default().fg(Color::Cyan) } else { Style::default() };
+        lines.push(Line::from(vec![
+            Span::styled(arrow, Style::default().fg(Color::Yellow)),
+            Span::styled(s.label(), style),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled("↑↓ select  Enter copy  Esc cancel", Style::default().fg(Color::DarkGray))));
+    let popup = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Copy citation "));
+    f.render_widget(popup, popup_area);
+}
+
 // ── Plugins ─────────────────────────────────────────────────────────────────
 
 /// 워커 스레드 -> 메인 루프.
@@ -1209,6 +1263,7 @@ fn draw(f: &mut Frame, app: &mut App) {
             draw_context_menu(f, app, size);
         }
         Mode::PluginUi(state) => draw_plugin_ui(f, state, size),
+        Mode::CitationStyle(idx) => draw_citation_popup(f, *idx, size),
         _ => {}
     }
 }
@@ -2456,6 +2511,7 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
         Mode::FetchPreview => handle_fetch_preview(app, key),
         Mode::SearchResultPicker => handle_search_result_picker(app, key),
         Mode::ContextMenu => handle_context_menu(app, key),
+        Mode::CitationStyle(_) => handle_citation_style(app, key),
     }
 }
 
@@ -2650,6 +2706,12 @@ fn execute(app: &mut App, action: Action, ctx: ExecCtx) -> Result<Flow> {
                 let bkey = entry.bibtex_key.clone();
                 if let Ok(mut ctx) = arboard::Clipboard::new() { let _ = ctx.set_text(&bkey); }
                 app.mode = Mode::Message(format!("Copied: {}", bkey));
+            }
+        }
+
+        Action::CopyCitation => {
+            if app.selected_entry().is_some() {
+                app.mode = Mode::CitationStyle(0);
             }
         }
 
@@ -4160,11 +4222,11 @@ mod tests {
 
     #[test]
     fn filter_rows_matches_text_that_only_appears_in_the_description() {
-        // "clipboard" appears in no key and no action name, only in a description.
+        // "clipboard" appears in no key and no action name, only in descriptions.
         let rows = entries_help();
         let hits = super::filter_rows(&rows, "clipboard");
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].action, "CopyCitekey");
+        let actions: Vec<&str> = hits.iter().map(|r| r.action.as_str()).collect();
+        assert_eq!(actions, vec!["CopyCitekey", "CopyCitation"]);
     }
 
     #[test]

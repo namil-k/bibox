@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 mod arxiv;
 mod bibtex;
+mod citation;
 mod commands;
 mod config;
 mod crossref;
@@ -197,6 +198,10 @@ Examples:
         /// Output as JSON (for scripting and AI agents)
         #[arg(long)]
         json: bool,
+
+        /// Print one formatted citation instead: apa, ieee or chicago
+        #[arg(long, value_name = "STYLE")]
+        cite: Option<String>,
     },
 
     /// Edit entry metadata. When --doi is provided, re-fetches from Crossref (preserving existing values)
@@ -704,8 +709,8 @@ async fn main() -> Result<()> {
             commands::cmd_search(query, collection, field, json, &config)?;
         }
 
-        Some(Commands::Show { key, json }) => {
-            commands::cmd_show(key, json, &config)?;
+        Some(Commands::Show { key, json, cite }) => {
+            commands::cmd_show(key, json, cite, &config)?;
         }
 
         Some(Commands::Edit {

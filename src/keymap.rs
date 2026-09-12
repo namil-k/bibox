@@ -127,6 +127,7 @@ pub enum Action {
     NextPreviewTab,
     Search,
     CopyCitekey,
+    CopyCitation,
     OpenPdf,
     OpenWeb,
     FetchMetadata,
@@ -184,7 +185,7 @@ impl Action {
     pub fn all() -> &'static [Action] {
         use Action::*;
         &[
-            Quit, Cancel, Undo, Redo, NextPreviewTab, Search, CopyCitekey, OpenPdf,
+            Quit, Cancel, Undo, Redo, NextPreviewTab, Search, CopyCitekey, CopyCitation, OpenPdf,
             OpenWeb, FetchMetadata, ExportMenu, Delete, Help, EditNote, SortMenu,
             Collections, Tags, AttachPdf, Settings, Noop,
             EntryDown, EntryUp, EntryTop, EntryBottom, EntryScreenTop, EntryScreenMiddle,
@@ -211,7 +212,7 @@ impl Action {
 
             ToggleSelect | SelectAll | Cancel => "Selection",
 
-            OpenPdf | OpenWeb | FetchMetadata | AttachPdf | CopyCitekey | EditNote
+            OpenPdf | OpenWeb | FetchMetadata | AttachPdf | CopyCitekey | CopyCitation | EditNote
             | ExportMenu | Delete => "Entry actions",
 
             Collections | Tags | Undo | Redo => "Editing",
@@ -235,6 +236,7 @@ impl Action {
             NextPreviewTab => "Cycle the preview panel between Info, Note and PDF",
             Search => "Filter entries by title, author, key or tag; filters collections when that panel has focus",
             CopyCitekey => "Copy the BibTeX citation key to the system clipboard",
+            CopyCitation => "Copy a formatted citation (APA, IEEE or Chicago) to the clipboard",
             OpenPdf => "Open the attached PDF, or offer to fetch one when missing",
             OpenWeb => "Open the entry DOI or URL in the default browser",
             FetchMetadata => "Look the entry up by DOI, or search by title when it has none",
@@ -385,6 +387,7 @@ fn global_bindings() -> Vec<Binding> {
         b("<Tab>", &[NextPreviewTab]),
         b("/", &[Search]),
         b("y", &[CopyCitekey]),
+        b("Y", &[CopyCitation]),
         b("o", &[OpenPdf]),
         b("w", &[OpenWeb]),
         b("f", &[FetchMetadata]),
@@ -1003,6 +1006,7 @@ mod tests {
             ("<Tab>", &[Action::NextPreviewTab]),
             ("/", &[Action::Search]),
             ("y", &[Action::CopyCitekey]),
+            ("Y", &[Action::CopyCitation]),
             ("o", &[Action::OpenPdf]),
             ("w", &[Action::OpenWeb]),
             ("f", &[Action::FetchMetadata]),
@@ -1466,5 +1470,13 @@ mod tests {
         let a = Action::Plugin(crate::plugin::PluginCmdId(0));
         assert_eq!(a.section(), "Plugins");
         assert!(!a.desc().is_empty());
+    }
+    #[test]
+    fn copy_citation_is_a_global_entry_action_on_capital_y() {
+        let km = default_keymap();
+        for layer in [&km.collections, &km.entries, &km.preview] {
+            assert_eq!(resolve(layer, &[], kp("Y")), Resolution::Run(vec![Action::CopyCitation]));
+        }
+        assert_eq!(Action::CopyCitation.section(), "Entry actions");
     }
 }

@@ -871,13 +871,24 @@ pub fn cmd_search(
 
 // ── show ─────────────────────────────────────────────────────────────────────
 
-pub fn cmd_show(id_or_key: String, json: bool, config: &Config) -> Result<()> {
+/// `show --cite <style>`. 스크립트와 pandoc 파이프라인용.
+pub fn cite_line(entry: &Entry, style: &str) -> Result<String> {
+    let s = crate::citation::Style::parse(style)
+        .ok_or_else(|| anyhow::anyhow!("unknown citation style \"{}\" (apa, ieee, chicago)", style))?;
+    Ok(crate::citation::format(entry, s))
+}
+
+pub fn cmd_show(id_or_key: String, json: bool, cite: Option<String>, config: &Config) -> Result<()> {
     let db_path = db_path_from_config(config);
     let db = load_db(&db_path)?;
 
     let entry = find_by_key(&db, &id_or_key)
         .with_context(|| config.msgs.entry_not_found(&id_or_key))?;
 
+    if let Some(style) = cite {
+        println!("{}", cite_line(entry, &style)?);
+        return Ok(());
+    }
     if json {
         println!("{}", serde_json::to_string_pretty(entry)?);
         return Ok(());
@@ -4594,5 +4605,18 @@ ER  -
             !out.is_ascii(),
             "Korean locale should not fall back to the English string, got: {out}"
         );
+    }
+    #[test]
+    fn cite_line_formats_a_known_style_and_rejects_an_unknown_one() {
+        let e = crate::models::Entry {
+            id: "1".into(), bibtex_key: "k".into(), entry_type: crate::models::EntryType::Article,
+            title: Some("T".into()), author: vec!["Kim, Jinho".into()], year: Some(2025), journal: None,
+            volume: None, number: None, pages: None, publisher: None, editor: None, edition: None, isbn: None,
+            booktitle: None, doi: None, url: None, abstract_text: None, tags: vec![], howpublished: None,
+            month: None, note: None, collections: vec![], file_path: None, created_at: String::new(), updated_at: None,
+        };
+        assert_eq!(cite_line(&e, "apa").unwrap(), "Kim, J. (2025). T.");
+        let err = cite_line(&e, "mla").unwrap_err().to_string();
+        assert!(err.contains("unknown citation style") && err.contains("apa, ieee, chicago"), "{}", err);
     }
 }
