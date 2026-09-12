@@ -178,6 +178,8 @@ struct ExportState {
 
 enum ConfirmAction {
     RemovePlugin(String),
+    /// clone은 끝났고 사용자 확인을 기다리는 설치
+    InstallStaged(crate::plugin::Staged),
     Delete(String),
     FetchPdf(String),
     OpenBrowser(String, String), // (citekey, url)
@@ -301,6 +303,8 @@ fn move_cursor(rows: &[PaneRow], from: usize, delta: i32) -> usize {
 enum InputTarget {
     /// `settings::Item.id`
     Item(String),
+    /// Install from… 의 입력
+    InstallSource,
 }
 
 /// int/string 항목의 입력 팝업. 플러그인 UI의 prompt와 같은 모양.
@@ -419,6 +423,7 @@ pub struct App {
     bg_fetch_key: Option<String>,
     bg_meta_result: Option<std::sync::mpsc::Receiver<Result<(String, crate::crossref::Metadata)>>>,
     bg_search_result: Option<std::sync::mpsc::Receiver<Result<(String, Vec<crate::crossref::SearchResult>)>>>,
+    bg_install: Option<std::sync::mpsc::Receiver<Result<crate::plugin::Staged>>>,
     fetch_preview: Option<FetchPreviewState>,
     search_picker: Option<SearchResultPickerState>,
     file_picker_state: Option<ratatree::FilePickerState>,
@@ -514,6 +519,7 @@ impl App {
             bg_fetch_key: None,
             bg_meta_result: None,
             bg_search_result: None,
+            bg_install: None,
             fetch_preview: None,
             search_picker: None,
             file_picker_state: None,
@@ -1094,6 +1100,55 @@ impl App {
         self.host.update_config_tables(crate::config::plugin_tables(&self.config));
     }
 
+    /// Install from… 의 입력. 내장과 로컬은 바로, 저장소는 clone 스레드 뒤 확인 팝업.
+    fn start_install(&mut self, source: String) {
+        use crate::plugin::cli::{parse_source, Source};
+        let dir = crate::plugin::plugins_dir();
+        match parse_source(&source) {
+            Source::Builtin(name) => match (|| -> Result<std::path::PathBuf> {
+                std::fs::create_dir_all(&dir)?;
+                if dir.join(&name).exists() {
+                    anyhow::bail!("{} already exists", dir.join(&name).display());
+                }
+                Ok(crate::plugin::write_stub(&dir, &name)?)
+            })() {
+                Ok(dest) => {
+                    self.reload_plugins();
+                    self.settings.notice = Some((self.config.msgs.plugin_installed(&name, &dest.display().to_string()), false));
+                }
+                Err(e) => self.settings.notice = Some((self.config.msgs.plugin_install_failed(&e.to_string()), true)),
+            },
+            Source::Local(path) => match crate::plugin::install_local(&dir, &path, &self.config.msgs) {
+                Ok((name, dest)) => {
+                    self.reload_plugins();
+                    self.settings.notice = Some((self.config.msgs.plugin_installed(&name, &dest.display().to_string()), false));
+                }
+                Err(e) => self.settings.notice = Some((self.config.msgs.plugin_install_failed(&e.to_string()), true)),
+            },
+            Source::GitHub { owner, repo, subdir } => {
+                self.spawn_clone(dir, format!("https://github.com/{}/{}.git", owner, repo), subdir, source);
+            }
+            Source::Url(url) => self.spawn_clone(dir, url, None, source),
+        }
+    }
+
+    fn spawn_clone(&mut self, dir: std::path::PathBuf, url: String, subdir: Option<std::path::PathBuf>, shown: String) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let label = shown.clone();
+        std::thread::spawn(move || {
+            let r = crate::plugin::stage_from_git(&dir, &url, subdir.as_deref(), &shown);
+            // 받는 쪽이 사라졌으면(Esc) clone을 치운다
+            if let Err(unsent) = tx.send(r) {
+                if let Ok(staged) = unsent.0 {
+                    crate::plugin::discard_staged(staged);
+                }
+            }
+        });
+        self.bg_install = Some(rx);
+        self.spinner_tick = 0;
+        self.mode = Mode::Loading(self.config.msgs.plugin_cloning(&label));
+    }
+
     /// 설치·제거 뒤. 호스트를 다시 만들고 키맵·도움말이 새 명령 표를 보게 한다.
     /// 옛 호스트는 마지막 Arc가 떨어질 때 Drop이 프로세스를 정리한다.
     fn reload_plugins(&mut self) {
@@ -1103,6 +1158,20 @@ impl App {
         self.hooks.host = Arc::clone(&host);
         self.host = host;
         self.settings.plugins = plugin_rows();
+        self.settings_fix_cursor();
+    }
+
+    /// 행 목록이 바뀐 뒤(설치·제거, 페이지 닫기) 커서를 선택 가능한 행에 둔다.
+    /// 범위 밖이면 가장 가까운 위쪽 행, 그것도 없으면 첫 행.
+    fn settings_fix_cursor(&mut self) {
+        let items = self.settings_items();
+        let rows = settings_pane_rows(self, &items);
+        let r = self.settings.row.min(rows.len().saturating_sub(1));
+        self.settings.row = if rows.get(r).is_some_and(selectable) {
+            r
+        } else {
+            (0..=r).rev().find(|i| rows.get(*i).is_some_and(selectable)).unwrap_or_else(|| first_selectable(&rows))
+        };
     }
 
     /// 메모리의 항목을 디스크에 쓰고 `after_write`를 백그라운드로 발화한다.
@@ -1381,6 +1450,19 @@ fn draw(f: &mut Frame, app: &mut App) {
             let q = format!("{} (y/n)", app.config.msgs.plugin_remove_question(name));
             draw_settings_popup(f, app, size);
             draw_confirm_popup(f, &q, size);
+        }
+        Mode::Confirm(ConfirmAction::InstallStaged(staged)) => {
+            let m = &app.config.msgs;
+            let lines = vec![
+                m.plugin_install_header(&staged.name, &staged.source),
+                m.plugin_not_reviewed().to_string(),
+                m.plugin_runs(&staged.run),
+                m.plugin_runs_as_you().to_string(),
+                String::new(),
+                format!("{} (y/n)", m.plugin_install_question()),
+            ];
+            draw_settings_popup(f, app, size);
+            draw_confirm_lines(f, &lines, size);
         }
         Mode::FetchPreview => {
             if let Some(ref state) = app.fetch_preview {
@@ -2136,6 +2218,16 @@ fn draw_confirm_popup(f: &mut Frame, msg: &str, area: Rect) {
     f.render_widget(text, popup_area);
 }
 
+fn draw_confirm_lines(f: &mut Frame, lines: &[String], area: Rect) {
+    let popup_area = centered_rect(70, (lines.len() as u16 + 2).max(5), area);
+    f.render_widget(Clear, popup_area);
+    let text: Vec<Line> = lines.iter().map(|l| Line::from(l.as_str())).collect();
+    let p = Paragraph::new(text)
+        .block(Block::default().borders(Borders::ALL).title(" Confirm "))
+        .style(Style::default().fg(Color::Red));
+    f.render_widget(p, popup_area);
+}
+
 fn draw_message_popup(f: &mut Frame, msg: &str, area: Rect) {
     let popup_area = centered_rect(60, 5, area);
     f.render_widget(Clear, popup_area);
@@ -2421,7 +2513,11 @@ fn settings_pane_rows(app: &App, items: &[crate::settings::Item]) -> Vec<PaneRow
         return items.iter().enumerate().filter(|(_, it)| it.section == st.section()).map(|(i, _)| PaneRow::Item(i)).collect();
     }
     match &st.page {
-        None => st.plugins.iter().map(|p| PaneRow::Plugin(p.name.clone())).collect(),
+        None => {
+            let mut rows: Vec<PaneRow> = st.plugins.iter().map(|p| PaneRow::Plugin(p.name.clone())).collect();
+            rows.push(PaneRow::InstallFrom);
+            rows
+        }
         Some(name) => {
             let mut rows = Vec::new();
             let Some(p) = st.plugins.iter().find(|p| &p.name == name) else { return rows };
@@ -2741,6 +2837,7 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
                     app.mode = Mode::Message(format!("{}: cancelled", run.plugin));
                 } else {
                     app.bg_result = None;
+                    app.bg_install = None;
                     app.mode = Mode::Normal;
                 }
             }
@@ -3221,6 +3318,8 @@ fn handle_confirm(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool
                     app.mode = Mode::Message("Entry deleted.".to_string());
                 }
                 Mode::Confirm(ConfirmAction::RemovePlugin(name)) => {
+                    // 페이지를 먼저 닫아야 reload 뒤 커서가 목록 기준으로 놓인다
+                    app.settings.page = None;
                     match crate::plugin::cli::remove_plugin_files(&crate::plugin::plugins_dir(), &name) {
                         Ok(()) => {
                             app.reload_plugins();
@@ -3228,7 +3327,17 @@ fn handle_confirm(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool
                         }
                         Err(e) => app.settings.notice = Some((e.to_string(), true)),
                     }
-                    app.settings.page = None;
+                    app.settings_fix_cursor();
+                    app.mode = Mode::Settings;
+                }
+                Mode::Confirm(ConfirmAction::InstallStaged(staged)) => {
+                    match crate::plugin::commit_staged(staged, &app.config.msgs) {
+                        Ok((name, dest)) => {
+                            app.reload_plugins();
+                            app.settings.notice = Some((app.config.msgs.plugin_installed(&name, &dest.display().to_string()), false));
+                        }
+                        Err(e) => app.settings.notice = Some((app.config.msgs.plugin_install_failed(&e.to_string()), true)),
+                    }
                     app.mode = Mode::Settings;
                 }
                 Mode::Confirm(ConfirmAction::FetchPdf(key)) => {
@@ -3274,8 +3383,15 @@ fn handle_confirm(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool
             }
         }
         KeyCode::Char('n') | KeyCode::Esc => {
-            let back = matches!(app.mode, Mode::Confirm(ConfirmAction::RemovePlugin(_)));
-            app.mode = if back { Mode::Settings } else { Mode::Normal };
+            let taken = std::mem::replace(&mut app.mode, Mode::Normal);
+            app.mode = match taken {
+                Mode::Confirm(ConfirmAction::InstallStaged(staged)) => {
+                    crate::plugin::discard_staged(staged);
+                    Mode::Settings
+                }
+                Mode::Confirm(ConfirmAction::RemovePlugin(_)) => Mode::Settings,
+                _ => Mode::Normal,
+            };
         }
         _ => {}
     }
@@ -3510,7 +3626,13 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
                 app.settings.row = first_selectable(&rows);
             }
             Some(PaneRow::Installed(_)) => settings_step(app, &items, &rows, 1),
-            Some(PaneRow::InstallFrom) => {}
+            Some(PaneRow::InstallFrom) => {
+                app.mode = Mode::SettingsInput(SettingsInput {
+                    title: app.config.msgs.plugin_install_from_title().to_string(),
+                    buf: String::new(),
+                    target: InputTarget::InstallSource,
+                });
+            }
             Some(PaneRow::Item(i)) => {
                 let it = &items[i];
                 match &it.kind {
@@ -3606,6 +3728,12 @@ fn handle_settings_input(app: &mut App, key: crossterm::event::KeyEvent) -> Resu
                         Ok(()) => app.save_settings(),
                         Err(e) => app.settings.notice = Some((e, true)),
                     }
+                }
+            }
+            InputTarget::InstallSource => {
+                let text = text.trim().to_string();
+                if !text.is_empty() {
+                    app.start_install(text);
                 }
             }
         }
@@ -4253,6 +4381,27 @@ fn run_loop(
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     app.bg_meta_result = None;
                     app.mode = Mode::Message("Metadata fetch failed: thread disconnected.".into());
+                }
+            }
+        }
+
+        // Poll a staged plugin install (clone finished)
+        if let Some(ref rx) = app.bg_install {
+            match rx.try_recv() {
+                Ok(Ok(staged)) => {
+                    app.bg_install = None;
+                    app.mode = Mode::Confirm(ConfirmAction::InstallStaged(staged));
+                }
+                Ok(Err(e)) => {
+                    app.bg_install = None;
+                    app.settings.notice = Some((app.config.msgs.plugin_install_failed(&e.to_string()), true));
+                    app.mode = Mode::Settings;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => { app.spinner_tick += 1; }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    app.bg_install = None;
+                    app.settings.notice = Some((app.config.msgs.plugin_install_failed("thread disconnected"), true));
+                    app.mode = Mode::Settings;
                 }
             }
         }

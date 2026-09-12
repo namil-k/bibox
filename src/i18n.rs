@@ -936,6 +936,27 @@ impl Msgs {
         }
     }
 
+    pub fn plugin_install_from_title(&self) -> &'static str {
+        match self.lang {
+            Lang::En => "Install plugin from (owner/repo, git URL, or local path)",
+            Lang::Ko => "플러그인 설치 (owner/repo, git URL, 로컬 경로)",
+        }
+    }
+
+    pub fn plugin_install_failed(&self, detail: &str) -> String {
+        match self.lang {
+            Lang::En => format!("Install failed: {}", detail),
+            Lang::Ko => format!("설치 실패: {}", detail),
+        }
+    }
+
+    pub fn plugin_cloning(&self, source: &str) -> String {
+        match self.lang {
+            Lang::En => format!("Cloning {}...", source),
+            Lang::Ko => format!("{} 받는 중...", source),
+        }
+    }
+
     pub fn plugin_not_found(&self, name: &str) -> String {
         match self.lang {
             Lang::En => format!("No plugin named \"{}\" (see `bibox plugin list`)", name),

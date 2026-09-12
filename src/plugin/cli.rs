@@ -3,6 +3,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use crate::config::Config;
+use crate::i18n::Msgs;
 use crate::plugin::host::apply_env;
 use crate::plugin::manifest::{parse_manifest, PluginProblem};
 use crate::plugin::{discover, plugins_dir, Manifest, PluginEnv, PluginHost};
@@ -126,56 +127,45 @@ pub fn cmd_plugin_list(json: bool, _config: &Config) -> Result<()> {
 
 // ── install / remove ────────────────────────────────────────────────────────
 
-pub fn cmd_plugin_install(source: &str, yes: bool, config: &Config) -> Result<()> {
-    let dir = plugins_dir();
-    std::fs::create_dir_all(&dir)?;
-    match parse_source(source) {
-        Source::Builtin(name) => {
-            let dest = dir.join(&name);
-            if dest.exists() {
-                bail!("{} already exists", dest.display());
-            }
-            crate::plugin::write_stub(&dir, &name)?;
-            println!("{}", config.msgs.plugin_installed(&name, &dest.display().to_string()));
-            Ok(())
-        }
-        Source::Local(path) => {
-            let path = path.canonicalize()?;
-            let text = std::fs::read_to_string(path.join("plugin.toml"))
-                .with_context(|| format!("no plugin.toml in {}", path.display()))?;
-            let mut problems = vec![];
-            let Some(m) = parse_manifest(&path, &text, &mut problems) else {
-                bail!("{}", problems.iter().map(|p| config.msgs.plugin_problem(p)).collect::<Vec<_>>().join("\n"));
-            };
-            let dest = dir.join(&m.name);
-            if dest.exists() {
-                bail!("{} already exists", dest.display());
-            }
-            std::os::unix::fs::symlink(&path, &dest)?;
-            println!("{}", config.msgs.plugin_installed(&m.name, &dest.display().to_string()));
-            Ok(())
-        }
-        Source::GitHub { owner, repo, subdir } => {
-            install_from_git(&format!("https://github.com/{}/{}.git", owner, repo), subdir.as_deref(), source, yes, config)
-        }
-        Source::Url(url) => install_from_git(&url, None, source, yes, config),
-    }
+/// clone은 됐고 아직 `plugins/<name>/`으로 옮기지 않은 상태. CLI는 사이에 터미널 프롬프트,
+/// TUI는 확인 팝업을 끼운다.
+#[derive(Debug)]
+pub struct Staged {
+    pub name: String,
+    pub run: String,
+    /// 사용자가 친 그대로(`owner/repo`, URL)
+    pub source: String,
+    tmp: PathBuf,
+    src: PathBuf,
+    dest: PathBuf,
+    copy: bool,
 }
 
-fn install_from_git(url: &str, subdir: Option<&Path>, shown_source: &str, yes: bool, config: &Config) -> Result<()> {
-    let dir = plugins_dir();
+pub fn stage_from_git(dir: &Path, url: &str, subdir: Option<&Path>, shown_source: &str) -> Result<Staged> {
+    std::fs::create_dir_all(dir)?;
     // 같은 파일시스템 안의 임시 디렉토리라야 rename이 된다.
     let tmp = dir.join(format!(".install-{}", uuid::Uuid::new_v4()));
-    let status = std::process::Command::new("git")
+    // 터미널 프롬프트를 막는다. TUI는 raw mode라 git의 "Username:" 질문이 보이지 않은 채
+    // 키를 가로채고, 스레드는 영원히 기다린다. 자격 증명 helper(osxkeychain 등)는 그대로 쓰인다.
+    let output = std::process::Command::new("git")
         .args(["clone", "--depth", "1", "--quiet", url])
         .arg(&tmp)
-        .status()
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output()
         .context("git is required to install from a repository")?;
-    if !status.success() {
+    if !output.status.success() {
         let _ = std::fs::remove_dir_all(&tmp);
-        bail!("git clone failed for {}", url);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let reason = stderr.lines().find(|l| l.starts_with("fatal:") || l.starts_with("error:")).or_else(|| stderr.lines().last()).unwrap_or("").trim();
+        if reason.is_empty() {
+            bail!("git clone failed for {}", url);
+        }
+        bail!("git clone failed for {}: {}", url, reason);
     }
-    let result = (|| -> Result<()> {
+    let staged = (|| -> Result<Staged> {
         let src = match subdir {
             Some(s) => tmp.join(s),
             None => tmp.clone(),
@@ -191,37 +181,101 @@ fn install_from_git(url: &str, subdir: Option<&Path>, shown_source: &str, yes: b
         if dest.exists() {
             bail!("{} already exists", dest.display());
         }
+        Ok(Staged { name, run, source: shown_source.to_string(), tmp: tmp.clone(), src, dest, copy: subdir.is_some() })
+    })();
+    if staged.is_err() {
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+    staged
+}
 
-        println!("{}", config.msgs.plugin_install_header(&name, shown_source));
-        println!("{}", config.msgs.plugin_not_reviewed());
-        println!("{}", config.msgs.plugin_runs(&run));
-        println!("{}", config.msgs.plugin_runs_as_you());
-        if !yes {
-            use std::io::IsTerminal;
-            if !std::io::stdin().is_terminal() {
-                bail!("not a terminal; pass --yes to install without confirmation");
-            }
-            if !crate::interactive::prompt_yes_no(config.msgs.plugin_install_question()) {
-                bail!("cancelled");
-            }
-        }
-
-        if subdir.is_some() {
-            copy_dir(&src, &dest)?;
+/// 최종 디렉토리로 옮기고 검증한다. 검증에 실패하면 옮긴 것도 지운다.
+pub fn commit_staged(staged: Staged, msgs: &Msgs) -> Result<(String, PathBuf)> {
+    let result = (|| -> Result<()> {
+        if staged.copy {
+            copy_dir(&staged.src, &staged.dest)?;
         } else {
-            std::fs::rename(&src, &dest)?;
+            std::fs::rename(&staged.src, &staged.dest)?;
         }
-        let final_text = std::fs::read_to_string(dest.join("plugin.toml"))?;
+        let final_text = std::fs::read_to_string(staged.dest.join("plugin.toml"))?;
         let mut problems = vec![];
-        if parse_manifest(&dest, &final_text, &mut problems).is_none() {
-            let _ = std::fs::remove_dir_all(&dest);
-            bail!("{}", problems.iter().map(|p| config.msgs.plugin_problem(p)).collect::<Vec<_>>().join("\n"));
+        if parse_manifest(&staged.dest, &final_text, &mut problems).is_none() {
+            let _ = std::fs::remove_dir_all(&staged.dest);
+            bail!("{}", problems.iter().map(|p| msgs.plugin_problem(p).trim().to_string()).collect::<Vec<_>>().join("\n"));
         }
-        println!("{}", config.msgs.plugin_installed(&name, &dest.display().to_string()));
         Ok(())
     })();
-    let _ = std::fs::remove_dir_all(&tmp);
-    result
+    let _ = std::fs::remove_dir_all(&staged.tmp);
+    result.map(|_| (staged.name, staged.dest))
+}
+
+pub fn discard_staged(staged: Staged) {
+    let _ = std::fs::remove_dir_all(&staged.tmp);
+}
+
+/// 로컬 디렉토리를 심링크로 깐다. 매니페스트가 깨졌으면 그 문구가 오류다.
+pub fn install_local(dir: &Path, path: &Path, msgs: &Msgs) -> Result<(String, PathBuf)> {
+    std::fs::create_dir_all(dir)?;
+    let path = path.canonicalize()?;
+    let text = std::fs::read_to_string(path.join("plugin.toml"))
+        .with_context(|| format!("no plugin.toml in {}", path.display()))?;
+    let mut problems = vec![];
+    let Some(m) = parse_manifest(&path, &text, &mut problems) else {
+        bail!("{}", problems.iter().map(|p| msgs.plugin_problem(p).trim().to_string()).collect::<Vec<_>>().join("\n"));
+    };
+    let dest = dir.join(&m.name);
+    if dest.exists() {
+        bail!("{} already exists", dest.display());
+    }
+    std::os::unix::fs::symlink(&path, &dest)?;
+    Ok((m.name, dest))
+}
+
+pub fn cmd_plugin_install(source: &str, yes: bool, config: &Config) -> Result<()> {
+    let dir = plugins_dir();
+    match parse_source(source) {
+        Source::Builtin(name) => {
+            std::fs::create_dir_all(&dir)?;
+            let dest = dir.join(&name);
+            if dest.exists() {
+                bail!("{} already exists", dest.display());
+            }
+            crate::plugin::write_stub(&dir, &name)?;
+            println!("{}", config.msgs.plugin_installed(&name, &dest.display().to_string()));
+            Ok(())
+        }
+        Source::Local(path) => {
+            let (name, dest) = install_local(&dir, &path, &config.msgs)?;
+            println!("{}", config.msgs.plugin_installed(&name, &dest.display().to_string()));
+            Ok(())
+        }
+        Source::GitHub { owner, repo, subdir } => {
+            install_from_git(&dir, &format!("https://github.com/{}/{}.git", owner, repo), subdir.as_deref(), source, yes, config)
+        }
+        Source::Url(url) => install_from_git(&dir, &url, None, source, yes, config),
+    }
+}
+
+fn install_from_git(dir: &Path, url: &str, subdir: Option<&Path>, shown_source: &str, yes: bool, config: &Config) -> Result<()> {
+    let staged = stage_from_git(dir, url, subdir, shown_source)?;
+    println!("{}", config.msgs.plugin_install_header(&staged.name, shown_source));
+    println!("{}", config.msgs.plugin_not_reviewed());
+    println!("{}", config.msgs.plugin_runs(&staged.run));
+    println!("{}", config.msgs.plugin_runs_as_you());
+    if !yes {
+        use std::io::IsTerminal;
+        if !std::io::stdin().is_terminal() {
+            discard_staged(staged);
+            bail!("not a terminal; pass --yes to install without confirmation");
+        }
+        if !crate::interactive::prompt_yes_no(config.msgs.plugin_install_question()) {
+            discard_staged(staged);
+            bail!("cancelled");
+        }
+    }
+    let (name, dest) = commit_staged(staged, &config.msgs)?;
+    println!("{}", config.msgs.plugin_installed(&name, &dest.display().to_string()));
+    Ok(())
 }
 
 fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
@@ -478,6 +532,93 @@ mod tests {
         remove_plugin_files(&root, "plain").unwrap();
         assert!(!root.join("plain").exists());
         assert!(remove_plugin_files(&root, "nope").is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+    /// 커밋 하나 있는 로컬 저장소. `file://` URL로 clone된다.
+    fn git_fixture(tag: &str, manifest: &str) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!("bibox-stage-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let repo = root.join("repo");
+        let plugins = root.join("plugins");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::create_dir_all(&plugins).unwrap();
+        std::fs::write(repo.join("plugin.toml"), manifest).unwrap();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"])
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            assert!(ok, "git {:?}", args);
+        };
+        git(&["init", "-q"]);
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "init"]);
+        (repo, plugins)
+    }
+
+    #[test]
+    fn staging_clones_and_reads_the_name_then_discard_removes_the_temp_dir() {
+        let (repo, plugins) = git_fixture("discard", "api = 1\nname = \"remote-demo\"\nrun = \"sh\"\n");
+        let url = format!("file://{}", repo.display());
+        let staged = stage_from_git(&plugins, &url, None, "someone/remote-demo").unwrap();
+        assert_eq!(staged.name, "remote-demo");
+        assert_eq!(staged.run, "sh");
+        assert_eq!(staged.source, "someone/remote-demo");
+        let leftovers = || std::fs::read_dir(&plugins).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(".install-")).count();
+        assert_eq!(leftovers(), 1, "one temp clone while staged");
+        discard_staged(staged);
+        assert_eq!(leftovers(), 0);
+        assert!(!plugins.join("remote-demo").exists());
+        let _ = std::fs::remove_dir_all(plugins.parent().unwrap());
+    }
+
+    #[test]
+    fn commit_moves_the_clone_into_place_and_validates_it() {
+        let (repo, plugins) = git_fixture("commit", "api = 1\nname = \"remote-demo\"\nrun = \"sh\"\n");
+        let url = format!("file://{}", repo.display());
+        let staged = stage_from_git(&plugins, &url, None, "x").unwrap();
+        let (name, dest) = commit_staged(staged, &crate::i18n::Msgs::default()).unwrap();
+        assert_eq!(name, "remote-demo");
+        assert_eq!(dest, plugins.join("remote-demo"));
+        assert!(dest.join("plugin.toml").exists());
+        assert!(dest.join(".git").exists(), "a git install keeps .git so list shows `git`");
+        let leftovers = std::fs::read_dir(&plugins).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(".install-")).count();
+        assert_eq!(leftovers, 0);
+        // 같은 이름을 다시 깔면 clone 뒤 거절되고 임시 디렉토리는 남지 않는다
+        let again = stage_from_git(&plugins, &url, None, "x");
+        assert!(again.is_err());
+        assert!(again.unwrap_err().to_string().contains("already exists"));
+        let _ = std::fs::remove_dir_all(plugins.parent().unwrap());
+    }
+
+    #[test]
+    fn commit_rejects_a_clone_whose_manifest_does_not_validate() {
+        // 이름이 디렉토리 이름과 달라질 수 없으므로 run이 없는 매니페스트로 검증 실패를 만든다
+        let (repo, plugins) = git_fixture("bad", "api = 1\nname = \"remote-bad\"\n");
+        let url = format!("file://{}", repo.display());
+        let staged = stage_from_git(&plugins, &url, None, "x").unwrap();
+        let err = commit_staged(staged, &crate::i18n::Msgs::default()).unwrap_err().to_string();
+        assert!(err.contains("run or builtin"), "{}", err);
+        assert!(!plugins.join("remote-bad").exists(), "a rejected install leaves nothing behind");
+        let _ = std::fs::remove_dir_all(plugins.parent().unwrap());
+    }
+
+    #[test]
+    fn install_local_symlinks_and_returns_the_manifest_name() {
+        let root = std::env::temp_dir().join(format!("bibox-local-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let src = root.join("src");
+        let plugins = root.join("plugins");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&plugins).unwrap();
+        std::fs::write(src.join("plugin.toml"), "api = 1\nname = \"src\"\nrun = \"sh\"\n").unwrap();
+        let (name, dest) = install_local(&plugins, &src, &crate::i18n::Msgs::default()).unwrap();
+        assert_eq!(name, "src");
+        assert!(std::fs::symlink_metadata(&dest).unwrap().file_type().is_symlink());
+        assert!(install_local(&plugins, &src, &crate::i18n::Msgs::default()).is_err(), "twice is an error");
         let _ = std::fs::remove_dir_all(&root);
     }
 }
