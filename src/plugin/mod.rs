@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 pub use host::{CliSink, NoUiSink, PluginCmdId, PluginCommands, PluginEnv, PluginError, PluginHost, UiSink};
-pub use manifest::{HookKind, Manifest, PluginProblem};
+pub use manifest::{HookKind, Manifest, PluginProblem, SettingDecl, SettingKind};
 
 /// `config.toml`, `keymap.toml`과 같은 디렉토리 아래 `plugins/`.
 pub fn plugins_dir() -> PathBuf {

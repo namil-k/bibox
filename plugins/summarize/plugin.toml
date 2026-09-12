@@ -9,3 +9,16 @@ id = "summarize"
 desc = "Summarize the PDF into the note"
 key = "S"
 menu = true
+
+[[settings]]
+key = "model"
+type = "choice"
+choices = ["claude-opus-5", "claude-sonnet-5"]
+default = "claude-opus-5"
+desc = "Claude model for the summary"
+
+[[settings]]
+key = "max_tokens"
+type = "int"
+default = 4000
+desc = "Longest summary Claude may write"

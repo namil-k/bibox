@@ -26,6 +26,18 @@ id = "status"
 desc = "Show the git status of the library"
 key = ["g", "t"]
 
+[[settings]]
+key = "include_pdfs"
+type = "bool"
+default = false
+desc = "Also commit pdfs/"
+
+[[settings]]
+key = "push_on_write"
+type = "bool"
+default = false
+desc = "git push after every hook commit"
+
 [[hooks]]
 on = "after_write"
 run = "commit"

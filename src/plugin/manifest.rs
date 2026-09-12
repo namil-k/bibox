@@ -43,6 +43,19 @@ struct CliFile {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct SettingFile {
+    key: String,
+    #[serde(rename = "type")]
+    kind: String,
+    default: toml::Value,
+    #[serde(default)]
+    desc: Option<String>,
+    #[serde(default)]
+    choices: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ManifestFile {
     api: u32,
     name: String,
@@ -60,6 +73,8 @@ struct ManifestFile {
     hooks: Vec<HookFile>,
     #[serde(default)]
     cli: Option<CliFile>,
+    #[serde(default)]
+    settings: Vec<SettingFile>,
 }
 
 // ── 검증된 모양 ───────────────────────────────────────────────────────────────
@@ -100,6 +115,44 @@ pub struct Command {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub enum SettingKind {
+    Bool,
+    Int,
+    Str,
+    Choice(Vec<String>),
+}
+
+impl SettingKind {
+    pub fn name(&self) -> &'static str {
+        match self {
+            SettingKind::Bool => "bool",
+            SettingKind::Int => "int",
+            SettingKind::Str => "string",
+            SettingKind::Choice(_) => "choice",
+        }
+    }
+
+    /// 값이 이 종류에 맞는가. choice는 선택지 안에 있어야 한다.
+    pub fn accepts(&self, v: &toml::Value) -> bool {
+        match self {
+            SettingKind::Bool => v.is_bool(),
+            SettingKind::Int => v.is_integer(),
+            SettingKind::Str => v.is_str(),
+            SettingKind::Choice(cs) => v.as_str().map(|s| cs.iter().any(|c| c == s)).unwrap_or(false),
+        }
+    }
+}
+
+/// `[[settings]]` 하나. bibox가 화면에 그리고 doctor가 config.toml을 대조하는 근거.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SettingDecl {
+    pub key: String,
+    pub kind: SettingKind,
+    pub default: toml::Value,
+    pub desc: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Hook {
     pub on: HookKind,
     pub run: String,
@@ -114,6 +167,7 @@ pub struct Manifest {
     pub commands: Vec<Command>,
     pub hooks: Vec<Hook>,
     pub cli: Option<Vec<String>>,
+    pub settings: Vec<SettingDecl>,
     pub builtin: Option<String>,
     pub dir: PathBuf,
 }
@@ -177,6 +231,10 @@ fn valid_command_id(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
+fn valid_setting_key(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
 /// 디렉토리 이름을 플러그인 이름의 근거로 쓴다. 매니페스트가 깨져 `name`을 못 읽어도
 /// 문제를 어느 플러그인 것으로 돌릴지는 알아야 한다.
 fn dir_name(dir: &Path) -> String {
@@ -232,7 +290,7 @@ fn expand_stub(
     let plugin = dir_name(dir);
     let err = |detail: String| PluginProblem::Manifest { plugin: plugin.clone(), detail };
 
-    let extra = file.version.is_some() || file.description.is_some() || !file.commands.is_empty() || !file.hooks.is_empty() || file.cli.is_some();
+    let extra = file.version.is_some() || file.description.is_some() || !file.commands.is_empty() || !file.hooks.is_empty() || file.cli.is_some() || !file.settings.is_empty();
     if extra {
         problems.push(err("a built-in stub carries only api, name and builtin".to_string()));
         return None;
@@ -395,6 +453,47 @@ fn build(dir: &Path, file: ManifestFile, run_override: Option<Vec<String>>, prob
         hooks.push(Hook { on, run: hf.run.clone() });
     }
 
+    let mut settings: Vec<SettingDecl> = Vec::new();
+    for sf in &file.settings {
+        if !valid_setting_key(&sf.key) {
+            problems.push(err(format!("setting key \"{}\" must match [A-Za-z0-9_-]+", sf.key)));
+            fatal = true;
+            continue;
+        }
+        if settings.iter().any(|s| s.key == sf.key) {
+            problems.push(err(format!("duplicate setting key \"{}\"", sf.key)));
+            fatal = true;
+            continue;
+        }
+        let kind = match (sf.kind.as_str(), &sf.choices) {
+            ("bool", None) => SettingKind::Bool,
+            ("int", None) => SettingKind::Int,
+            ("string", None) => SettingKind::Str,
+            ("choice", Some(cs)) if !cs.is_empty() => SettingKind::Choice(cs.clone()),
+            ("choice", _) => {
+                problems.push(err(format!("setting \"{}\": type = \"choice\" needs a non-empty choices list", sf.key)));
+                fatal = true;
+                continue;
+            }
+            ("bool", Some(_)) | ("int", Some(_)) | ("string", Some(_)) => {
+                problems.push(err(format!("setting \"{}\": choices is only for type = \"choice\"", sf.key)));
+                fatal = true;
+                continue;
+            }
+            (other, _) => {
+                problems.push(err(format!("setting \"{}\": unknown type \"{}\" (bool, int, string, choice)", sf.key, other)));
+                fatal = true;
+                continue;
+            }
+        };
+        if !kind.accepts(&sf.default) {
+            problems.push(err(format!("setting \"{}\": default {} does not match type {}", sf.key, sf.default, kind.name())));
+            fatal = true;
+            continue;
+        }
+        settings.push(SettingDecl { key: sf.key.clone(), kind, default: sf.default.clone(), desc: sf.desc.clone() });
+    }
+
     if fatal {
         return None;
     }
@@ -406,6 +505,7 @@ fn build(dir: &Path, file: ManifestFile, run_override: Option<Vec<String>>, prob
         commands,
         hooks,
         cli,
+        settings,
         builtin: None,
         dir: dir.to_path_buf(),
     })
@@ -690,5 +790,126 @@ run = "python3 cli.py"
         let mut problems = vec![];
         let m = parse_manifest(&dir("entry-tidy"), OK, &mut problems).unwrap();
         assert_eq!(m.builtin, None);
+    }
+    const WITH_SETTINGS: &str = r#"
+api = 1
+name = "x"
+run = "sh run.sh"
+
+[[settings]]
+key = "push_on_write"
+type = "bool"
+default = false
+desc = "git push after every hook commit"
+
+[[settings]]
+key = "max_tokens"
+type = "int"
+default = 4000
+
+[[settings]]
+key = "prefix"
+type = "string"
+default = ""
+
+[[settings]]
+key = "model"
+type = "choice"
+choices = ["claude-opus-5", "claude-sonnet-5"]
+default = "claude-opus-5"
+"#;
+
+    #[test]
+    fn settings_parse_into_typed_declarations_in_order() {
+        let mut problems = vec![];
+        let m = parse_manifest(&dir("x"), WITH_SETTINGS, &mut problems).expect("manifest");
+        assert!(problems.is_empty(), "{:?}", problems);
+        let keys: Vec<&str> = m.settings.iter().map(|s| s.key.as_str()).collect();
+        assert_eq!(keys, vec!["push_on_write", "max_tokens", "prefix", "model"]);
+        assert_eq!(m.settings[0].kind, SettingKind::Bool);
+        assert_eq!(m.settings[0].default, toml::Value::Boolean(false));
+        assert_eq!(m.settings[0].desc.as_deref(), Some("git push after every hook commit"));
+        assert_eq!(m.settings[1].kind, SettingKind::Int);
+        assert_eq!(m.settings[2].kind, SettingKind::Str);
+        assert_eq!(m.settings[2].desc, None);
+        assert_eq!(m.settings[3].kind, SettingKind::Choice(vec!["claude-opus-5".into(), "claude-sonnet-5".into()]));
+    }
+
+    fn settings_error(body: &str) -> String {
+        let text = format!("api = 1\nname = \"x\"\nrun = \"sh\"\n\n[[settings]]\n{}", body);
+        let mut problems = vec![];
+        assert!(parse_manifest(&dir("x"), &text, &mut problems).is_none(), "should not load: {}", body);
+        match &problems[0] {
+            PluginProblem::Manifest { detail, .. } => detail.clone(),
+            other => panic!("{:?}", other),
+        }
+    }
+
+    #[test]
+    fn an_unknown_setting_type_is_a_manifest_error() {
+        assert!(settings_error("key = \"a\"\ntype = \"float\"\ndefault = 1.5\n").contains("unknown type \"float\""));
+    }
+
+    #[test]
+    fn a_default_must_match_its_type() {
+        assert!(settings_error("key = \"a\"\ntype = \"int\"\ndefault = \"800\"\n").contains("does not match type int"));
+        assert!(settings_error("key = \"a\"\ntype = \"bool\"\ndefault = \"true\"\n").contains("does not match type bool"));
+    }
+
+    #[test]
+    fn a_duplicate_setting_key_is_an_error() {
+        let d = settings_error("key = \"a\"\ntype = \"bool\"\ndefault = true\n\n[[settings]]\nkey = \"a\"\ntype = \"bool\"\ndefault = false\n");
+        assert!(d.contains("duplicate setting key \"a\""), "{}", d);
+    }
+
+    #[test]
+    fn a_choice_needs_choices_and_its_default_among_them() {
+        assert!(settings_error("key = \"m\"\ntype = \"choice\"\ndefault = \"x\"\n").contains("choices"));
+        assert!(settings_error("key = \"m\"\ntype = \"choice\"\nchoices = []\ndefault = \"x\"\n").contains("choices"));
+        assert!(settings_error("key = \"m\"\ntype = \"choice\"\nchoices = [\"a\", \"b\"]\ndefault = \"x\"\n").contains("does not match"));
+    }
+
+    #[test]
+    fn choices_on_a_non_choice_type_is_an_error() {
+        assert!(settings_error("key = \"m\"\ntype = \"bool\"\nchoices = [\"a\"]\ndefault = true\n").contains("choices is only for"));
+    }
+
+    #[test]
+    fn a_setting_without_a_default_does_not_parse() {
+        let d = settings_error("key = \"a\"\ntype = \"bool\"\n");
+        assert!(d.contains("default"), "{}", d);
+    }
+
+    #[test]
+    fn a_bad_setting_key_is_an_error() {
+        assert!(settings_error("key = \"has space\"\ntype = \"bool\"\ndefault = true\n").contains("setting key"));
+    }
+
+    #[test]
+    fn a_stub_with_settings_is_rejected() {
+        let mut problems = vec![];
+        let text = "api = 1\nname = \"demo\"\nbuiltin = \"demo\"\n[[settings]]\nkey = \"a\"\ntype = \"bool\"\ndefault = true\n";
+        assert!(parse_manifest_with(&dir("demo"), text, &mut problems, TEST_BUILTINS).is_none());
+        assert!(matches!(&problems[0], PluginProblem::Manifest { detail, .. } if detail.contains("only api, name and builtin")));
+    }
+
+    #[test]
+    fn git_sync_declares_include_pdfs_and_push_on_write() {
+        let stub = "api = 1\nname = \"git-sync\"\nbuiltin = \"git-sync\"\n";
+        let mut problems = vec![];
+        let m = parse_manifest(&dir("git-sync"), stub, &mut problems).expect("git-sync");
+        let keys: Vec<&str> = m.settings.iter().map(|s| s.key.as_str()).collect();
+        assert_eq!(keys, vec!["include_pdfs", "push_on_write"]);
+        assert!(m.settings.iter().all(|s| s.kind == SettingKind::Bool && s.default == toml::Value::Boolean(false)));
+    }
+
+    #[test]
+    fn setting_kind_accepts_only_its_own_values() {
+        use toml::Value::*;
+        assert!(SettingKind::Bool.accepts(&Boolean(true)) && !SettingKind::Bool.accepts(&String("true".into())));
+        assert!(SettingKind::Int.accepts(&Integer(3)) && !SettingKind::Int.accepts(&Float(3.0)));
+        assert!(SettingKind::Str.accepts(&String("s".into())) && !SettingKind::Str.accepts(&Integer(1)));
+        let c = SettingKind::Choice(vec!["a".into()]);
+        assert!(c.accepts(&String("a".into())) && !c.accepts(&String("b".into())));
     }
 }

@@ -1348,6 +1348,7 @@ mod tests {
                 commands,
                 hooks: vec![],
                 cli: None,
+                settings: vec![],
                 builtin: None,
                 dir: std::path::PathBuf::from("/tmp"),
             })
