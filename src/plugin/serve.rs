@@ -27,16 +27,21 @@ impl<'a> Ui<'a> {
         }
     }
 
+    // pick/prompt/confirm은 아직 어떤 내장 플러그인도 부르지 않는다. 처음 쓰는 곳이 생기면
+    // `#[cfg(test)]`를 지운다(`#[allow(dead_code)]`로 덮지 않는 규칙).
+    #[cfg(test)]
     pub fn pick(&mut self, title: &str, items: &[String]) -> Option<usize> {
         let req = UiRequest::Pick { title: Some(title.to_string()), items: items.to_vec() };
         self.ask(&req)?.get("index")?.as_u64().map(|n| n as usize)
     }
 
+    #[cfg(test)]
     pub fn prompt(&mut self, title: &str, default: &str) -> Option<String> {
         let req = UiRequest::Prompt { title: Some(title.to_string()), default: Some(default.to_string()) };
         self.ask(&req)?.get("text")?.as_str().map(str::to_string)
     }
 
+    #[cfg(test)]
     pub fn confirm(&mut self, title: &str) -> bool {
         let req = UiRequest::Confirm { title: Some(title.to_string()) };
         self.ask(&req).and_then(|v| v.get("yes")?.as_bool()).unwrap_or(false)

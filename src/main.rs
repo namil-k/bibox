@@ -548,7 +548,7 @@ Examples:
         action: TemplateAction,
     },
 
-    /// Manage plugins (list, install, remove, enable, disable, new)
+    /// Manage plugins (list, install, remove, new, run)
     #[command(after_long_help = "\
 Plugins live in the config directory under plugins/<name>/ and are declared by plugin.toml.
 
@@ -557,7 +557,8 @@ Examples:
   bibox plugin install ./my-plugin                  # symlink a local directory (development)
   bibox plugin install someone/bibox-kci            # clone a GitHub repository
   bibox plugin install namil-k/bibox/plugins/summarize
-  bibox plugin disable summarize
+  bibox plugin install git-sync                     # put a removed built-in plugin back
+  bibox plugin remove summarize
   bibox plugin new my-plugin                        # scaffold a working plugin")]
     Plugin {
         #[command(subcommand)]
