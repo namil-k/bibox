@@ -202,6 +202,8 @@ pub enum PluginProblem {
     BadHook { plugin: String, detail: String },
     /// doctor 전용. `plugins/` 아래 디렉토리에 `plugin.toml`이 없다.
     NoManifest { dir: String },
+    /// doctor 전용. `plugins/<name>`이 심링크인데 대상이 없다(`plugin install ./path` 뒤 그 디렉토리를 지운 경우).
+    DanglingLink { name: String, target: String },
     /// doctor 전용. `[plugins.x]`가 있는데 x 플러그인이 없다.
     ConfigWithoutPlugin { name: String },
     /// doctor 전용. `run`/`[cli].run`의 첫 토큰이 PATH에 없다.
@@ -238,6 +240,7 @@ impl PluginProblem {
             | PluginProblem::SettingTypeMismatch { plugin, .. }
             | PluginProblem::UndeclaredSetting { plugin, .. } => plugin,
             PluginProblem::NoManifest { dir } => dir,
+            PluginProblem::DanglingLink { name, .. } => name,
             PluginProblem::ConfigWithoutPlugin { name } => name,
             PluginProblem::ObsoleteGitSetting => "config",
             PluginProblem::ObsoleteEnabledFlag { name } => name,

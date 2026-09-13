@@ -436,21 +436,7 @@ pub fn setting_problems(manifests: &[Manifest], config: &Config) -> Vec<PluginPr
 
 /// 로드 시점에는 안 보는 검사들. `plugin.toml` 없는 디렉토리, PATH, 설정 고아, 이름 충돌, 설정 대조.
 pub fn doctor_checks(host: &PluginHost, config: &Config) -> Vec<PluginProblem> {
-    let mut out = Vec::new();
-    let dir = plugins_dir();
-    if let Ok(rd) = std::fs::read_dir(&dir) {
-        let mut dirs: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
-        dirs.sort();
-        for d in dirs {
-            let name = d.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-            if name.starts_with('.') {
-                continue;
-            }
-            if !d.join("plugin.toml").exists() {
-                out.push(PluginProblem::NoManifest { dir: name });
-            }
-        }
-    }
+    let mut out = dir_problems(&plugins_dir());
     for m in host.manifests() {
         if !which(&m.run[0]) {
             out.push(PluginProblem::ExecutableMissing { plugin: m.name.clone(), program: m.run[0].clone() });
@@ -469,6 +455,29 @@ pub fn doctor_checks(host: &PluginHost, config: &Config) -> Vec<PluginProblem> {
     for name in config.plugins.keys() {
         if !host.manifests().iter().any(|m| &m.name == name) {
             out.push(PluginProblem::ConfigWithoutPlugin { name: name.clone() });
+        }
+    }
+    out
+}
+
+/// `plugins/` 아래에서 매니페스트 없는 디렉토리와 대상이 사라진 심링크. 로더는 둘 다 조용히 건너뛰므로
+/// doctor만이 말해 준다(`plugin install ./path`로 깐 뒤 그 디렉토리를 지운 경우).
+fn dir_problems(dir: &Path) -> Vec<PluginProblem> {
+    let mut out = Vec::new();
+    let Ok(rd) = std::fs::read_dir(dir) else { return out };
+    let mut paths: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+    paths.sort();
+    for p in paths {
+        let name = p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        if name.starts_with('.') {
+            continue;
+        }
+        let is_link = std::fs::symlink_metadata(&p).map(|m| m.file_type().is_symlink()).unwrap_or(false);
+        if is_link && !p.exists() {
+            let target = std::fs::read_link(&p).map(|t| t.display().to_string()).unwrap_or_default();
+            out.push(PluginProblem::DanglingLink { name, target });
+        } else if p.is_dir() && !p.join("plugin.toml").exists() {
+            out.push(PluginProblem::NoManifest { dir: name });
         }
     }
     out
@@ -760,5 +769,19 @@ mod tests {
         let env = crate::plugin::PluginEnv { bin: "/bin/true".into(), config_dir: "/tmp".into(), db: "/tmp/db.json".into(), notes: "/tmp/n".into(), pdfs: "/tmp/p".into(), home: None };
         let host = PluginHost::new(vec![], Default::default(), env);
         assert!(tool_problems(&host, |_| false).is_empty(), "no pdf-view, no complaint");
+    }
+
+    #[test]
+    fn doctor_reports_a_symlink_whose_target_is_gone() {
+        let dir = std::env::temp_dir().join(format!("bibox-dangling-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("fine")).unwrap();
+        std::fs::write(dir.join("fine").join("plugin.toml"), "").unwrap();
+        std::fs::create_dir_all(dir.join("empty")).unwrap();
+        std::os::unix::fs::symlink(dir.join("nowhere"), dir.join("gone")).unwrap();
+        let problems = dir_problems(&dir);
+        assert!(matches!(&problems[..], [PluginProblem::NoManifest { dir }, PluginProblem::DanglingLink { name, target }]
+            if dir == "empty" && name == "gone" && target.ends_with("nowhere")), "{:?}", problems);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

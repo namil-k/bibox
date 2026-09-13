@@ -879,6 +879,8 @@ impl Msgs {
             (Lang::Ko, BadHook { plugin, detail }) => format!("  {}: {} (훅을 무시했습니다)", plugin, detail),
             (Lang::En, NoManifest { dir }) => format!("  {}: no plugin.toml in this directory", dir),
             (Lang::Ko, NoManifest { dir }) => format!("  {}: 이 디렉토리에 plugin.toml이 없습니다", dir),
+            (Lang::En, DanglingLink { name, target }) => format!("  {}: links to {} which no longer exists; bibox plugin remove {} drops the link", name, target, name),
+            (Lang::Ko, DanglingLink { name, target }) => format!("  {}: {}를 가리키는데 그 경로가 없습니다. bibox plugin remove {}로 링크를 지웁니다", name, target, name),
             (Lang::En, ConfigWithoutPlugin { name }) => format!("  [plugins.{}] in config.toml, but no such plugin is installed", name),
             (Lang::Ko, ConfigWithoutPlugin { name }) => format!("  config.toml에 [plugins.{}]가 있지만 그 플러그인이 없습니다", name),
             (Lang::En, ExecutableMissing { plugin, program }) => format!("  {}: \"{}\" is not on PATH; the plugin will fail to start", plugin, program),
