@@ -146,6 +146,29 @@ fn sync_without_an_upstream_fails_after_committing() {
     assert_eq!(git(&home, &["log", "-1", "--format=%s"]), "bibox: sync");
 }
 
+/// 0.3.5 사용자의 흔한 상태: pdfs/가 추적되는데 `include_pdfs = false`라 지운 PDF가 unstaged로 남는다.
+/// `git pull --rebase`는 그런 트리를 거부하므로 autostash로 넘긴다.
+#[test]
+fn sync_survives_unstaged_changes_to_tracked_files() {
+    let home = fresh_home("dirty");
+    std::fs::create_dir_all(home.join("pdfs")).unwrap();
+    std::fs::write(home.join("pdfs/old.pdf"), b"%PDF").unwrap();
+    git(&home, &["add", "."]);
+    git(&home, &["commit", "-qm", "init"]);
+    let remote = home.with_extension("remote.git");
+    let _ = std::fs::remove_dir_all(&remote);
+    git(&home, &["init", "-q", "--bare", remote.to_str().unwrap()]);
+    git(&home, &["remote", "add", "origin", remote.to_str().unwrap()]);
+    git(&home, &["push", "-q", "-u", "origin", "HEAD"]);
+    std::fs::remove_file(home.join("pdfs/old.pdf")).unwrap();
+    std::fs::write(home.join("db.json"), "{\"entries\":[{}]}\n").unwrap();
+    let mut p = Plugin::start();
+    let (progress, f) = p.call(&request("sync", "key", Some(&home), serde_json::json!({}), serde_json::Value::Null));
+    assert_eq!(progress, vec!["committing", "pulling", "pushing"], "{}", f);
+    assert_eq!(f["message"], "pushed 1 commit", "{}", f);
+    assert!(git(&home, &["status", "--short"]).contains("D pdfs/old.pdf"), "the deletion stays local and unstaged");
+}
+
 #[test]
 fn pdfs_are_committed_only_when_include_pdfs_is_set() {
     let home = fresh_home("pdfs");

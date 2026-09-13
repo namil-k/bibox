@@ -2504,12 +2504,21 @@ fn draw_confirm_lines(f: &mut Frame, lines: &[String], area: Rect) {
     f.render_widget(p, popup_area);
 }
 
+/// 결과 팝업. 긴 문장(git 오류 등)은 줄바꿈하고 그만큼 키운다. 한 줄에 잘리면 이유를 못 읽는다.
 fn draw_message_popup(f: &mut Frame, msg: &str, area: Rect) {
-    let popup_area = centered_rect(60, 5, area);
+    // ratatui의 Wrap은 폭보다 긴 단어(경로)를 글자 단위로 자르므로 단어 수와 글자 수 두 추정 중 큰 쪽에 한 줄 여유
+    let inner_w = (area.width * 60 / 100).saturating_sub(2).max(10) as usize;
+    let lines: usize = msg
+        .lines()
+        .map(|l| crate::settings::wrap_words(l, inner_w).len().max(l.chars().count().div_ceil(inner_w)).max(1))
+        .sum();
+    let height = (lines as u16 + 3).clamp(5, area.height.saturating_sub(2).max(5));
+    let popup_area = centered_rect(60, height, area);
     clear_area(f, popup_area);
     let text = Paragraph::new(msg)
         .block(Block::default().borders(Borders::ALL).title(" Info "))
-        .style(Style::default().fg(theme().success));
+        .style(Style::default().fg(theme().success))
+        .wrap(Wrap { trim: false });
     f.render_widget(text, popup_area);
 }
 

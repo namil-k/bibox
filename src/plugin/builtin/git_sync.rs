@@ -240,7 +240,8 @@ fn cmd_sync(req: &Request, cfg: &Cfg, ui: &mut Ui) -> Final {
         let branch = g.ok(&["branch", "--show-current"]).unwrap_or_else(|_| "master".to_string());
         return err(format!("no upstream branch; run `git push -u origin {}` once", branch));
     }
-    if let Err(e) = g.ok(&["pull", "--rebase", "-q"]) {
+    // autostash: include_pdfs = false인 채 pdfs/를 지운 트리처럼 unstaged 변경이 남아 있어도 rebase가 거부하지 않는다
+    if let Err(e) = g.ok(&["pull", "--rebase", "--autostash", "-q"]) {
         return err(format!("git pull failed: {}", e));
     }
     ui.progress("pushing");
