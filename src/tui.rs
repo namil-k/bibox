@@ -2803,27 +2803,21 @@ fn settings_pane_rows(app: &App, items: &[crate::settings::Item]) -> Vec<PaneRow
 }
 
 /// 칸 폭에 맞춰 단어 단위로 접는다. 하드 랩은 여기서만 한다.
-fn wrap_words(text: &str, width: usize) -> Vec<String> {
-    let width = width.max(8);
-    let mut out = Vec::new();
-    let mut line = String::new();
-    for word in text.split_whitespace() {
-        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width {
-            out.push(std::mem::take(&mut line));
-        }
-        if !line.is_empty() {
-            line.push(' ');
-        }
-        line.push_str(word);
+/// 설명 상자에 보일 문장. 설정 항목은 그 설명, 플러그인 행은 플러그인 설명(페이지를 안 열어도 뭔지 보인다).
+fn row_desc(app: &App, items: &[crate::settings::Item], row: &PaneRow) -> String {
+    match row {
+        PaneRow::Item(i) => items[*i].desc.clone(),
+        PaneRow::Plugin(name) => app.settings.plugins.iter().find(|p| &p.name == name).map(|p| p.description.clone()).unwrap_or_default(),
+        PaneRow::InstallFrom => "owner/repo, a git URL or a local path".to_string(),
+        PaneRow::Header(_) | PaneRow::Text(_) | PaneRow::Blank | PaneRow::Installed(_) => String::new(),
     }
-    if !line.is_empty() || out.is_empty() {
-        out.push(line);
-    }
-    out
 }
 
+/// 설명 상자의 최대 줄 수. 폭 90이면 350자쯤. 그 이상은 `…`.
+const DESC_MAX_LINES: usize = 4;
+
 fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
-    use crate::settings::Section;
+    use crate::settings::{desc_height, desc_lines, wrap_words, Section};
     let height = (area.height * 7 / 10).max(12).min(area.height);
     let popup_area = centered_rect(80, height, area);
     f.render_widget(Clear, popup_area);
@@ -2831,6 +2825,7 @@ fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(popup_area);
     f.render_widget(block, popup_area);
 
+    // [절 │ 행들 / 설명 상자] 위에, 알림·키 안내 한 줄 아래에
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(1)])
@@ -2861,10 +2856,17 @@ fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(divider), columns[1]);
 
     // 오른쪽: 행. Text는 접히므로 행 하나가 여러 줄이 될 수 있다.
+    // 설명 상자는 이 목록에서 가장 긴 설명에 맞춰 잡아 커서를 옮겨도 목록이 움직이지 않는다.
     let items = app.settings_items();
     let rows = settings_pane_rows(app, &items);
-    let right = columns[2];
-    let width = right.width as usize;
+    let width = columns[2].width as usize;
+    let descs: Vec<String> = rows.iter().map(|r| row_desc(app, &items, r)).collect();
+    let desc_h = desc_height(&descs.iter().map(String::as_str).collect::<Vec<_>>(), width, DESC_MAX_LINES);
+    let right_rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(desc_h as u16)])
+        .split(columns[2]);
+    let right = right_rows[0];
     let mut lines: Vec<(Option<usize>, Line)> = Vec::new();
     for (ri, row) in rows.iter().enumerate() {
         let is_cursor = ri == st.row && st.focus == SettingsFocus::Rows;
@@ -2904,16 +2906,8 @@ fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
                 let it = &items[*i];
                 let mark = if is_cursor { "> " } else { "  " };
                 let val = crate::settings::value(it, &app.config);
-                let head = format!("{}{:<18} [{}]", mark, it.label, val);
                 let style = if is_cursor { Style::default().fg(Color::Cyan) } else { Style::default() };
-                let mut spans = vec![Span::styled(head.clone(), style)];
-                let used = head.chars().count();
-                if !it.desc.is_empty() && used + 3 < width {
-                    let room = width - used - 2;
-                    let desc: String = it.desc.chars().take(room).collect();
-                    spans.push(Span::styled(format!("  {}", desc), Style::default().fg(Color::DarkGray)));
-                }
-                lines.push((Some(ri), Line::from(spans)));
+                lines.push((Some(ri), Line::from(Span::styled(format!("{}{:<18} [{}]", mark, it.label, val), style))));
             }
         }
     }
@@ -2923,6 +2917,14 @@ fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
     let start = if cursor_line >= visible { cursor_line + 1 - visible } else { 0 };
     let shown: Vec<Line> = lines.into_iter().skip(start).take(visible).map(|(_, l)| l).collect();
     f.render_widget(Paragraph::new(shown), right);
+
+    // 설명 상자: 커서 행의 설명만
+    if st.focus == SettingsFocus::Rows {
+        if let Some(d) = descs.get(st.row) {
+            let text: Vec<Line> = desc_lines(d, width, desc_h).into_iter().map(|l| Line::from(Span::styled(l, Style::default().fg(Color::DarkGray)))).collect();
+            f.render_widget(Paragraph::new(text), right_rows[1]);
+        }
+    }
 
     // 아래 줄: 알림 또는 키 안내
     let footer = match (&st.notice, &st.query) {

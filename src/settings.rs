@@ -479,6 +479,47 @@ pub fn set_path(item: &Item, config: &mut Config, path: PathBuf) {
     }
 }
 
+// ── 설명 상자 ────────────────────────────────────────────────────────────────
+
+/// 단어 단위 줄바꿈. 한 단어가 폭보다 길면 그대로 한 줄.
+pub fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(8);
+    let mut out = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > width {
+            out.push(std::mem::take(&mut line));
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    if !line.is_empty() || out.is_empty() {
+        out.push(line);
+    }
+    out
+}
+
+/// 설명 상자의 줄 수: 목록에 보이는 설명 중 가장 긴 것(줄바꿈 뒤)에 맞춘다. 1..=max.
+/// 커서를 옮겨도 목록이 위아래로 움직이지 않도록 절 단위로 한 번 정한다.
+pub fn desc_height(descs: &[&str], width: usize, max: usize) -> usize {
+    descs.iter().map(|d| wrap_words(d, width).len()).max().unwrap_or(1).clamp(1, max.max(1))
+}
+
+/// 설명 한 개를 상자에 맞게. 넘치면 마지막 줄 끝에 `…`.
+pub fn desc_lines(desc: &str, width: usize, max: usize) -> Vec<String> {
+    let mut lines = wrap_words(desc, width);
+    let max = max.max(1);
+    if lines.len() > max {
+        lines.truncate(max);
+        if let Some(last) = lines.last_mut() {
+            last.push('…');
+        }
+    }
+    lines
+}
+
 // ── 검색 ────────────────────────────────────────────────────────────────────
 
 /// 소문자, `/`와 `.`은 공백. `-`와 `_`는 그대로(`git-sync`가 잡히게).
@@ -802,5 +843,24 @@ mod tests {
         assert!(set(im, &mut c, "kitty").is_ok());
         assert_eq!(c.images, crate::config::Images::Kitty);
         assert!(set(im, &mut c, "png").is_err());
+    }
+
+    #[test]
+    fn desc_box_height_follows_the_longest_description_within_the_cap() {
+        let short = "one line";
+        let long = "aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj kkkk llll mmmm nnnn oooo";
+        assert_eq!(desc_height(&[short, ""], 40, 4), 1, "nothing to say still keeps one row");
+        assert_eq!(desc_height(&[short, long], 40, 4), 2, "{:?}", wrap_words(long, 40));
+        assert_eq!(desc_height(&[long], 10, 4), 4, "capped");
+        assert_eq!(desc_height(&[], 40, 4), 1);
+    }
+
+    #[test]
+    fn desc_lines_wrap_and_end_with_an_ellipsis_when_cut() {
+        let long = "aaaa bbbb cccc dddd eeee ffff gggg hhhh";
+        assert_eq!(desc_lines(long, 10, 4), vec!["aaaa bbbb", "cccc dddd", "eeee ffff", "gggg hhhh"]);
+        assert_eq!(desc_lines(long, 10, 2), vec!["aaaa bbbb", "cccc dddd…"]);
+        assert_eq!(desc_lines("", 10, 2), vec![""]);
+        assert_eq!(desc_lines("fits", 10, 1), vec!["fits"]);
     }
 }
