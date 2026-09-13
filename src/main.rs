@@ -20,6 +20,7 @@ mod pdf;
 mod plugin;
 mod preview_tabs;
 mod settings;
+mod theme;
 mod storage;
 #[cfg(feature = "tui")]
 mod tui;
