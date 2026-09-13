@@ -464,6 +464,7 @@ pub fn doctor_checks(host: &PluginHost, config: &Config) -> Vec<PluginProblem> {
             out.push(PluginProblem::NameCollidesWithSubcommand { plugin: m.name.clone() });
         }
     }
+    out.extend(tool_problems(host, which));
     out.extend(setting_problems(host.manifests(), config));
     for name in config.plugins.keys() {
         if !host.manifests().iter().any(|m| &m.name == name) {
@@ -471,6 +472,19 @@ pub fn doctor_checks(host: &PluginHost, config: &Config) -> Vec<PluginProblem> {
         }
     }
     out
+}
+
+/// pdf-view가 깔려 있으면 poppler 세 도구를 PATH에서 찾는다. `found`는 테스트가 바꿔 끼운다.
+fn tool_problems(host: &PluginHost, found: impl Fn(&str) -> bool) -> Vec<PluginProblem> {
+    use crate::plugin::builtin::pdf_view;
+    if !host.manifests().iter().any(|m| m.name == pdf_view::BUILTIN.name) {
+        return vec![];
+    }
+    pdf_view::TOOLS
+        .iter()
+        .filter(|t| !found(t))
+        .map(|t| PluginProblem::ToolMissing { plugin: pdf_view::BUILTIN.name.to_string(), program: t.to_string(), hint: "brew install poppler".to_string() })
+        .collect()
 }
 
 #[cfg(test)]
@@ -732,5 +746,19 @@ mod tests {
         assert_eq!(edit_distance("abc", "abc"), 0);
         assert_eq!(edit_distance("", "abc"), 3);
         assert_eq!(edit_distance("kitten", "sitting"), 3);
+    }
+
+    #[test]
+    fn doctor_names_missing_poppler_tools_only_when_pdf_view_is_installed() {
+        let m = crate::plugin::manifest::parse_manifest(&std::path::PathBuf::from("/x/pdf-view"), "api = 1\nname = \"pdf-view\"\nbuiltin = \"pdf-view\"\n", &mut vec![]).unwrap();
+        let env = crate::plugin::PluginEnv { bin: "/bin/true".into(), config_dir: "/tmp".into(), db: "/tmp/db.json".into(), notes: "/tmp/n".into(), pdfs: "/tmp/p".into(), home: None };
+        let host = PluginHost::new(vec![m], Default::default(), env);
+        let missing = tool_problems(&host, |t| t == "pdftoppm");
+        assert_eq!(missing.len(), 2, "{:?}", missing);
+        assert!(missing.iter().all(|p| matches!(p, PluginProblem::ToolMissing { plugin, hint, .. } if plugin == "pdf-view" && hint.contains("brew install poppler"))));
+        assert!(missing.iter().any(|p| matches!(p, PluginProblem::ToolMissing { program, .. } if program == "pdfinfo")));
+        let env = crate::plugin::PluginEnv { bin: "/bin/true".into(), config_dir: "/tmp".into(), db: "/tmp/db.json".into(), notes: "/tmp/n".into(), pdfs: "/tmp/p".into(), home: None };
+        let host = PluginHost::new(vec![], Default::default(), env);
+        assert!(tool_problems(&host, |_| false).is_empty(), "no pdf-view, no complaint");
     }
 }

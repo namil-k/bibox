@@ -206,6 +206,8 @@ pub enum PluginProblem {
     ConfigWithoutPlugin { name: String },
     /// doctor 전용. `run`/`[cli].run`의 첫 토큰이 PATH에 없다.
     ExecutableMissing { plugin: String, program: String },
+    /// doctor 전용. 플러그인이 쓰는 외부 도구가 PATH에 없다. 플러그인은 뜨지만 그 기능이 안내 문구를 낸다.
+    ToolMissing { plugin: String, program: String, hint: String },
     /// doctor 전용. 이름이 내장 서브커맨드와 같아 `bibox <name>`이 절대 폴스루되지 않는다.
     NameCollidesWithSubcommand { plugin: String },
     /// `config.toml`의 `git = true`. git-sync 플러그인이 대신한다.
@@ -231,6 +233,7 @@ impl PluginProblem {
             | PluginProblem::UnknownLayer { plugin, .. }
             | PluginProblem::BadHook { plugin, .. }
             | PluginProblem::ExecutableMissing { plugin, .. }
+            | PluginProblem::ToolMissing { plugin, .. }
             | PluginProblem::NameCollidesWithSubcommand { plugin }
             | PluginProblem::SettingTypeMismatch { plugin, .. }
             | PluginProblem::UndeclaredSetting { plugin, .. } => plugin,

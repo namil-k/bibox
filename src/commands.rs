@@ -3766,6 +3766,8 @@ Protocol: one JSON object per line on stdin/stdout. bibox sends `{"type":"comman
 
 Every plugin process gets `BIBOX_BIN` (call it for `modify`, `note --stdin`, `add --json` and return `refresh`), `BIBOX_CONFIG_DIR`, `BIBOX_DB_PATH`, `BIBOX_NOTES_DIR`, `BIBOX_PDF_DIR`, `BIBOX_PLUGIN_DIR`. Inside a hook the helper sets `BIBOX_IN_HOOK=1` on that call so it does not fire hooks again. The plugin's stderr is in `plugins/<name>/stderr.log`, truncated on every start.
 
+A plugin can add a preview tab with `[[tabs]] { title, run }`; bibox calls the command with `trigger = "tab"` and `tab: { page, width_px, images }`, and the command answers `{"tab": {"image": "<png>" | "lines": [...], "pages": n}}`. The built-in `pdf-view` does this for PDFs (needs poppler).
+
 Test a plugin without the TUI: `printf '<request json>\n' | python3 main.py`. See the README's Plugins section for `plugin.toml` fields (including `[[settings]]`) and `[plugins.<name>]` settings in config.toml.
 
 ## Tips
@@ -3793,6 +3795,7 @@ pub fn cmd_config(json: bool, config: &Config) -> Result<()> {
             "templates_dir": config.templates_dir.to_string_lossy(),
             "language": config.language,
             "line_numbers": format!("{:?}", config.line_numbers).to_lowercase(),
+            "images": config.images.name(),
             "panel_ratio": config.panel_ratio,
             "bib_export_dir": config.bib_export_dir.to_string_lossy(),
             "export_dir": config.export_dir.to_string_lossy(),
@@ -3808,6 +3811,7 @@ pub fn cmd_config(json: bool, config: &Config) -> Result<()> {
         println!("Templates:    {}", config.templates_dir.display());
         println!("Language:     {}", config.language);
         println!("Line numbers: {:?}", config.line_numbers);
+        println!("Images:       {}", config.images.name());
         println!("Panel ratio:  {:?}", config.panel_ratio);
         println!("Bib export:   {}", config.bib_export_dir.display());
         println!("Export:       {}", config.export_dir.display());
@@ -4189,6 +4193,7 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
             "total_entries": total_entries,
             "pdf_count": pdf_count,
             "note_count": note_count,
+            "images": crate::config::images_summary(config.images, crate::config::in_multiplexer()),
             "issues": issues,
             "issue_count": issues.len(),
         });
@@ -4203,6 +4208,7 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
     println!();
     println!("    Database   {}", db_path.display());
     println!("    Entries    {}    PDFs  {}    Notes  {}", total_entries, pdf_count, note_count);
+    println!("    Images     {}", crate::config::images_summary(config.images, crate::config::in_multiplexer()));
     println!();
 
     // Checks summary

@@ -137,6 +137,7 @@ bibox
 | `{n}j` | Move n lines (e.g., `5j`) |
 | `Ctrl+d`/`u` | Half-page down/up |
 | `Tab` | Switch preview mode (Info → Note → PDF) |
+| `n`/`p`, `+`/`-`, `0`, `H`/`L` | PDF tab: next/previous page, zoom in/out, fit width, pan (see below) |
 | `Space` | Toggle select entry |
 | `V` | Select/deselect all |
 | `/` | Search (entries or collections, based on focus) |
@@ -167,6 +168,22 @@ bibox
 Press `` ` ``, `~` or `F1` for a searchable list of every key that works in the focused panel. `/` filters it, and the filter matches descriptions too, so typing `clipboard` finds `y`.
 
 The bar at the bottom carries panel navigation and the few actions used many times a day; the help screen covers the rest. Its keys are read from the active keymap, so they follow a remap. Turn it off with `status_bar = false` or from the settings screen, and the row goes back to the panels.
+
+### PDF tab
+
+The PDF tab is drawn by the built-in `pdf-view` plugin, which needs poppler (`brew install poppler`, or `apt install poppler-utils`). In a terminal that can show pictures (kitty, Ghostty, WezTerm, iTerm2, foot; anything else falls back to half-block characters) each page is rendered to fit the panel width; elsewhere, and inside tmux or screen, the tab shows the page's text. The status line at the bottom says `page 3/14  100%` (or `text`).
+
+| Key | Action |
+|-----|--------|
+| `j`/`k` | Scroll three rows; at the bottom `j` turns to the next page, at the top `k` to the bottom of the previous one |
+| `Ctrl+d`/`u` | Half a panel |
+| `gg`/`G` | First / last page |
+| `n`/`p` | Next / previous page |
+| `+` (`=`) / `-` | Zoom in / out by 25% (25% to 400%, `max_zoom` on the plugin page) |
+| `0` | Fit the page to the panel width again |
+| `H`/`L` | Pan left / right when the page is wider than the panel |
+
+Remove the plugin (`,` then Plugins) and the tab disappears; `bibox plugin install pdf-view` brings it back.
 
 ### Customizing keybindings
 
@@ -466,6 +483,10 @@ menu = true                          # right-click menu
 on = "after_write"                   # before_add | after_write | after_note_save
 run = "summarize"
 
+[[tabs]]                             # optional: a tab in the preview panel next to Info and Note
+title = "PDF"                        # 1 to 12 characters
+run = "render"                       # a command id; bibox calls it with trigger = "tab"
+
 [[settings]]                         # optional: shown on the plugin page and written to [plugins.summarize] in config.toml
 key = "model"
 type = "choice"                      # bool | int | string | choice
@@ -479,11 +500,13 @@ run = "python3 cli.py"
 
 `before_add` runs before an entry is saved and may return `apply` to change it; if the plugin fails the entry is added unchanged. `after_write` and `after_note_save` run in the background after the save and cannot open popups. Plugin settings live in `config.toml` under `[plugins.<name>]` and arrive as `context.config`. Declared settings get a typed row on the plugin page and `bibox doctor` warns about values of the wrong type and keys that match no declaration (with a spelling suggestion). bibox does not fill in defaults: read `context.config` with a fallback as before.
 
+A `[[tabs]]` entry adds a tab to the preview panel. When the tab is visible bibox calls its command in the background with `trigger = "tab"` and `tab: {"page": 3, "width_px": 840, "images": true}`; the command answers `{"tab": {"image": "/path/page.png", "pages": 14}}` or, when `images` is false, `{"tab": {"lines": ["..."], "pages": 14}}`. bibox owns page, zoom, scrolling and the cache; the plugin only renders one page at one width. It cannot open popups. The built-in `pdf-view` is written this way.
+
 **Environment.** Every plugin process gets `BIBOX_BIN`, `BIBOX_CONFIG_DIR`, `BIBOX_DB_PATH`, `BIBOX_NOTES_DIR`, `BIBOX_PDF_DIR`, `BIBOX_HOME` (when set) and `BIBOX_PLUGIN_DIR`. To change the library, call `$BIBOX_BIN` (`modify`, `note --stdin`, `add --json`) and return `refresh`, or return `apply` for a few entries. The plugin's stderr goes to `plugins/<name>/stderr.log`, truncated on every start.
 
 **When it breaks.** A broken plugin never stops bibox. Manifest problems are shown before the TUI opens and by `bibox doctor`. A plugin that exits, hangs (press Esc) or prints something that is not JSON is reported in the status line and restarted on the next call. Default keys that collide with built-in keys are dropped with a warning; bind them yourself in `keymap.toml`.
 
-**Built-in plugins** live inside the bibox binary and appear in `bibox plugin list` as `built-in`: `git-sync` (commits db.json and notes on every write when the portable home is a git repository; `g s` syncs, `g t` shows status). Remove one like any plugin; `bibox plugin install git-sync` puts it back. **Example plugin** (`plugins/` in this repository): `summarize` (`S`, PDF to the note's Summary section with Claude; needs `pip install anthropic` and `ANTHROPIC_API_KEY`).
+**Built-in plugins** live inside the bibox binary and appear in `bibox plugin list` as `built-in`: `git-sync` (commits db.json and notes on every write when the portable home is a git repository; `g s` syncs, `g t` shows status) and `pdf-view` (the PDF tab; needs poppler). Remove one like any plugin; `bibox plugin install git-sync` puts it back. **Example plugin** (`plugins/` in this repository): `summarize` (`S`, PDF to the note's Summary section with Claude; needs `pip install anthropic` and `ANTHROPIC_API_KEY`).
 
 ## Settings
 
@@ -494,12 +517,15 @@ line_numbers = "absolute"              # absolute, relative, none
 panel_ratio = [2, 4, 4]               # left : center : right (sum = 10)
 natural_scroll = false                 # true for macOS-style natural scrolling
 status_bar = true                      # hint bar at the bottom; false reclaims that row
+images = "auto"                        # auto, off, kitty, iterm2, sixel, halfblocks; auto never asks inside tmux/screen
 citekey_format = "{author}{year}{title}" # {author}, {year}, {title} variables
 bib_export_dir = "."                   # BibTeX export location
 export_dir = "~/Downloads"             # Other exports location
 home = "~/bibox"                       # Portable home (set by bibox init)
 pdf_dir = "~/iCloud/bibox-pdfs"        # Separate PDF storage (iCloud, Google Drive, etc.)
 ```
+
+`images` decides how plugin tabs such as the PDF tab draw pictures. `auto` asks the terminal once at start (never inside tmux or screen, where the tab shows text). If a terminal does not answer and keys go missing afterwards, set `images = "off"` or name the protocol. Changing it takes effect on the next start.
 
 ## AI Agent Integration
 

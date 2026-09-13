@@ -883,6 +883,8 @@ impl Msgs {
             (Lang::Ko, ConfigWithoutPlugin { name }) => format!("  config.toml에 [plugins.{}]가 있지만 그 플러그인이 없습니다", name),
             (Lang::En, ExecutableMissing { plugin, program }) => format!("  {}: \"{}\" is not on PATH; the plugin will fail to start", plugin, program),
             (Lang::Ko, ExecutableMissing { plugin, program }) => format!("  {}: \"{}\"가 PATH에 없어 플러그인이 시작되지 않습니다", plugin, program),
+            (Lang::En, ToolMissing { plugin, program, hint }) => format!("  {}: \"{}\" is not on PATH; the PDF tab shows an error until it is installed ({})", plugin, program, hint),
+            (Lang::Ko, ToolMissing { plugin, program, hint }) => format!("  {}: \"{}\"가 PATH에 없어 PDF 탭이 오류를 보입니다 ({})", plugin, program, hint),
             (Lang::En, NameCollidesWithSubcommand { plugin }) => format!("  {}: name collides with a built-in subcommand, so `bibox {}` never reaches the plugin", plugin, plugin),
             (Lang::Ko, NameCollidesWithSubcommand { plugin }) => format!("  {}: 내장 서브커맨드와 이름이 같아 `bibox {}`가 플러그인에 닿지 않습니다", plugin, plugin),
             (Lang::En, ObsoleteGitSetting) => "  config.toml: `git = true` is obsolete; the git-sync plugin now commits on every write when the portable home is a git repository. Remove the line".to_string(),
