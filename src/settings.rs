@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use crate::config::{expand_tilde, Config, LineNumbers, CITEKEY_PRESETS};
+use crate::config::{expand_tilde, Config, Images, LineNumbers, CITEKEY_PRESETS};
 use crate::plugin::{Manifest, SettingDecl, SettingKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,12 +49,13 @@ pub enum Core {
     PanelRatio,
     ScrollDirection,
     StatusBar,
+    Images,
     BibExportDir,
     ExportDir,
 }
 
 impl Core {
-    pub const ALL: [Core; 10] = [
+    pub const ALL: [Core; 11] = [
         Core::Home,
         Core::PdfStorage,
         Core::CitekeyFormat,
@@ -63,6 +64,7 @@ impl Core {
         Core::PanelRatio,
         Core::ScrollDirection,
         Core::StatusBar,
+        Core::Images,
         Core::BibExportDir,
         Core::ExportDir,
     ];
@@ -70,7 +72,7 @@ impl Core {
     fn section(self) -> Section {
         match self {
             Core::Home | Core::PdfStorage | Core::CitekeyFormat | Core::Language => Section::General,
-            Core::LineNumbers | Core::PanelRatio | Core::ScrollDirection | Core::StatusBar => Section::Appearance,
+            Core::LineNumbers | Core::PanelRatio | Core::ScrollDirection | Core::StatusBar | Core::Images => Section::Appearance,
             Core::BibExportDir | Core::ExportDir => Section::Export,
         }
     }
@@ -85,6 +87,7 @@ impl Core {
             Core::PanelRatio => "appearance.panel_ratio",
             Core::ScrollDirection => "appearance.scroll_direction",
             Core::StatusBar => "appearance.status_bar",
+            Core::Images => "appearance.images",
             Core::BibExportDir => "export.bib_export_dir",
             Core::ExportDir => "export.export_dir",
         }
@@ -100,6 +103,7 @@ impl Core {
             Core::PanelRatio => "Panel ratio",
             Core::ScrollDirection => "Scroll direction",
             Core::StatusBar => "Status bar",
+            Core::Images => "Images",
             Core::BibExportDir => "Bib export dir",
             Core::ExportDir => "Export dir",
         }
@@ -115,6 +119,7 @@ impl Core {
             Core::PanelRatio => "Width of collections : entries : preview",
             Core::ScrollDirection => "Mouse wheel direction",
             Core::StatusBar => "Hint bar at the bottom",
+            Core::Images => "Page images in preview tabs (kitty, iTerm2, sixel). Takes effect on next start",
             Core::BibExportDir => "Where .bib exports go",
             Core::ExportDir => "Where other exports go",
         }
@@ -130,6 +135,7 @@ impl Core {
             Core::PanelRatio => Kind::Choice(PANEL_RATIO_PRESETS.iter().map(ratio_label).collect()),
             Core::ScrollDirection => Kind::Choice(vec!["natural".into(), "standard".into()]),
             Core::StatusBar => Kind::Bool { on: "shown", off: "hidden" },
+            Core::Images => Kind::Choice(Images::ALL.iter().map(|i| i.name().to_string()).collect()),
             Core::BibExportDir | Core::ExportDir => Kind::Path { presets: dir_presets(), optional: false },
         }
     }
@@ -277,6 +283,7 @@ fn core_value(core: Core, config: &Config) -> String {
         Core::PanelRatio => ratio_label(&config.panel_ratio),
         Core::ScrollDirection => (if config.natural_scroll { "natural" } else { "standard" }).to_string(),
         Core::StatusBar => (if config.status_bar { "shown" } else { "hidden" }).to_string(),
+        Core::Images => config.images.name().to_string(),
         Core::BibExportDir => config.bib_export_dir.display().to_string(),
         Core::ExportDir => config.export_dir.display().to_string(),
     }
@@ -301,6 +308,11 @@ fn apply_core(core: Core, config: &mut Config, chosen: &str) {
         }
         Core::ScrollDirection => config.natural_scroll = chosen == "natural",
         Core::StatusBar => config.status_bar = chosen == "shown",
+        Core::Images => {
+            if let Some(i) = Images::parse(chosen) {
+                config.images = i;
+            }
+        }
         Core::CitekeyFormat => config.citekey_format = chosen.to_string(),
         Core::Language => {
             config.language = chosen.to_string();
@@ -526,12 +538,13 @@ mod tests {
     }
 
     #[test]
-    fn core_items_are_ten_in_section_order_with_stable_ids() {
+    fn core_items_are_eleven_in_section_order_with_stable_ids() {
         assert_eq!(
             core_items().iter().map(|i| i.id.clone()).collect::<Vec<_>>(),
             vec![
                 "general.home", "general.pdf_storage", "general.citekey_format", "general.language",
                 "appearance.line_numbers", "appearance.panel_ratio", "appearance.scroll_direction", "appearance.status_bar",
+                "appearance.images",
                 "export.bib_export_dir", "export.export_dir",
             ]
         );
@@ -661,15 +674,15 @@ mod tests {
     #[test]
     fn plugin_items_follow_the_core_items_and_carry_the_plugin_name() {
         let items = items(&[manifest_with_settings()]);
-        assert_eq!(items.len(), 14);
-        let p = &items[10];
+        assert_eq!(items.len(), 15);
+        let p = &items[11];
         assert_eq!(p.id, "plugins.demo.push");
         assert_eq!(p.section, Section::Plugins);
         assert_eq!(p.plugin.as_deref(), Some("demo"));
         assert_eq!(p.label, "push");
         assert_eq!(p.desc, "push after commit");
         assert_eq!(p.kind, Kind::Bool { on: "on", off: "off" });
-        assert_eq!(items[13].kind, Kind::Str);
+        assert_eq!(items[14].kind, Kind::Str);
     }
 
     #[test]
@@ -772,6 +785,22 @@ mod tests {
         assert_eq!(ids[0], "# General");
         assert!(ids.contains(&"# Appearance".to_string()) && ids.contains(&"# Export".to_string()));
         assert!(ids.contains(&"@other".to_string()));
-        assert_eq!(ids.iter().filter(|s| !s.starts_with('#')).count(), 14 + 2);
+        assert_eq!(ids.iter().filter(|s| !s.starts_with('#')).count(), 15 + 2);
+    }
+
+    #[test]
+    fn images_cycles_the_six_names() {
+        let items = core_items();
+        let im = find(&items, "appearance.images");
+        let mut c = Config::default();
+        assert_eq!(value(im, &c), "auto");
+        assert!(step(im, &mut c, 1));
+        assert_eq!(c.images, crate::config::Images::Off);
+        assert!(step(im, &mut c, -1));
+        assert!(step(im, &mut c, -1));
+        assert_eq!(value(im, &c), "halfblocks", "wraps");
+        assert!(set(im, &mut c, "kitty").is_ok());
+        assert_eq!(c.images, crate::config::Images::Kitty);
+        assert!(set(im, &mut c, "png").is_err());
     }
 }

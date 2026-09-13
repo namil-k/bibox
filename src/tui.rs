@@ -3300,6 +3300,8 @@ fn execute(app: &mut App, action: Action, ctx: ExecCtx) -> Result<Flow> {
             app.open_settings(crate::settings::Section::Plugins);
         }
 
+        // 플러그인 탭 액션. Task 4가 채운다
+        Action::TabNextPage | Action::TabPrevPage | Action::TabZoomIn | Action::TabZoomOut | Action::TabZoomReset | Action::TabPanLeft | Action::TabPanRight => {}
         Action::Noop => {}
     }
     Ok(Flow::Continue)
@@ -3827,6 +3829,9 @@ fn settings_step(app: &mut App, items: &[crate::settings::Item], rows: &[PaneRow
         Some(PaneRow::Item(i)) => {
             if crate::settings::step(&items[i], &mut app.config, delta) {
                 app.save_settings();
+                if items[i].id == "appearance.images" {
+                    app.settings.notice = Some((app.config.msgs.takes_effect_next_start().to_string(), false));
+                }
             }
         }
         Some(PaneRow::Installed(name)) => {
@@ -3874,7 +3879,12 @@ fn handle_settings_input(app: &mut App, key: crossterm::event::KeyEvent) -> Resu
                 let items = app.settings_items();
                 if let Some(it) = items.iter().find(|i| i.id == id) {
                     match crate::settings::set(it, &mut app.config, &text) {
-                        Ok(()) => app.save_settings(),
+                        Ok(()) => {
+                            app.save_settings();
+                            if it.id == "appearance.images" {
+                                app.settings.notice = Some((app.config.msgs.takes_effect_next_start().to_string(), false));
+                            }
+                        }
                         Err(e) => app.settings.notice = Some((e, true)),
                     }
                 }
@@ -4025,6 +4035,7 @@ pub fn run_tui(config: &Config) -> Result<()> {
         citekey_format: config.citekey_format.clone(),
         natural_scroll: config.natural_scroll,
         status_bar: config.status_bar,
+        images: config.images,
         plugins: config.plugins.clone(),
         msgs: crate::i18n::Msgs::new(&config.language),
     };

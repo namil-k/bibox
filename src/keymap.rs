@@ -174,6 +174,14 @@ pub enum Action {
     NextTab,
     PrevTab,
     PrevTabOrFocusEntries,
+    // ── 플러그인 미리보기 탭 전용. 다른 탭에서는 무동작 ──
+    TabNextPage,
+    TabPrevPage,
+    TabZoomIn,
+    TabZoomOut,
+    TabZoomReset,
+    TabPanLeft,
+    TabPanRight,
     // ── 플러그인 명령. 인덱스는 로드 시 만든 명령 테이블을 가리킨다 ──
     #[serde(skip)]
     Plugin(crate::plugin::PluginCmdId),
@@ -196,6 +204,7 @@ impl Action {
             CollectionHalfPageDown, CollectionHalfPageUp, FocusEntries,
             PreviewScrollDown, PreviewScrollUp, PreviewTop, PreviewBottom,
             PreviewHalfPageDown, PreviewHalfPageUp, NextTab, PrevTab, PrevTabOrFocusEntries,
+            TabNextPage, TabPrevPage, TabZoomIn, TabZoomOut, TabZoomReset, TabPanLeft, TabPanRight,
         ]
     }
 
@@ -209,7 +218,8 @@ impl Action {
             | PreviewScrollDown | PreviewScrollUp | PreviewTop | PreviewBottom
             | PreviewHalfPageDown | PreviewHalfPageUp
             | FocusCollections | FocusEntries | FocusPreview
-            | NextTab | PrevTab | PrevTabOrFocusEntries | NextPreviewTab => "Navigation",
+            | NextTab | PrevTab | PrevTabOrFocusEntries | NextPreviewTab
+            | TabNextPage | TabPrevPage | TabZoomIn | TabZoomOut | TabZoomReset | TabPanLeft | TabPanRight => "Navigation",
 
             ToggleSelect | SelectAll | Cancel => "Selection",
 
@@ -284,6 +294,13 @@ impl Action {
             NextTab => "Step forward a preview tab",
             PrevTab => "Step back a preview tab",
             PrevTabOrFocusEntries => "Step back a preview tab, or leave for the Entries panel",
+            TabNextPage => "Next page of the preview tab",
+            TabPrevPage => "Previous page of the preview tab",
+            TabZoomIn => "Zoom the preview tab in by 25%",
+            TabZoomOut => "Zoom the preview tab out by 25%",
+            TabZoomReset => "Fit the preview tab page to the panel width",
+            TabPanLeft => "Pan the preview tab left when the page is wider than the panel",
+            TabPanRight => "Pan the preview tab right",
 
             Plugin(_) => "Run a plugin command",
         }
@@ -461,6 +478,14 @@ pub fn default_keymap() -> Keymap {
         b("G", &[PreviewBottom]),
         b("<C-d>", &[PreviewHalfPageDown]),
         b("<C-u>", &[PreviewHalfPageUp]),
+        b("n", &[TabNextPage]),
+        b("p", &[TabPrevPage]),
+        b("+", &[TabZoomIn]),
+        b("=", &[TabZoomIn]),
+        b("-", &[TabZoomOut]),
+        b("0", &[TabZoomReset]),
+        b("H", &[TabPanLeft]),
+        b("L", &[TabPanRight]),
     ];
     preview.extend(global_bindings());
 
@@ -1065,6 +1090,9 @@ mod tests {
                 ("k", Action::PreviewScrollUp), ("<Up>", Action::PreviewScrollUp),
                 ("G", Action::PreviewBottom),
                 ("<C-d>", Action::PreviewHalfPageDown), ("<C-u>", Action::PreviewHalfPageUp),
+                ("n", Action::TabNextPage), ("p", Action::TabPrevPage),
+                ("+", Action::TabZoomIn), ("=", Action::TabZoomIn), ("-", Action::TabZoomOut),
+                ("0", Action::TabZoomReset), ("H", Action::TabPanLeft), ("L", Action::TabPanRight),
             ]),
         ];
         for (name, rows) in per_layer {
@@ -1093,9 +1121,11 @@ mod tests {
         // 컬렉션 패널의 h는 오늘 아무 일도 하지 않으므로 바인딩하지 않는다.
         assert_eq!(resolve(&km.collections, &[], kp("h")), Resolution::Unbound);
 
-        // 엔트리 전용 키는 다른 레이어에 없다.
+        // 엔트리 전용 키는 다른 레이어에 없다. 미리보기의 H/L은 플러그인 탭의 pan이라 예외.
         for key in ["H", "M", "L", "V", "<Space>"] {
             assert_eq!(resolve(&km.collections, &[], kp(key)), Resolution::Unbound, "collections {}", key);
+        }
+        for key in ["M", "V", "<Space>"] {
             assert_eq!(resolve(&km.preview, &[], kp(key)), Resolution::Unbound, "preview {}", key);
         }
     }

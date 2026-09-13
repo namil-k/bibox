@@ -15,6 +15,38 @@ pub enum LineNumbers {
     None,
 }
 
+/// 미리보기 탭의 이미지. auto는 시작 때 터미널에 묻되 tmux/screen 안에서는 묻지 않는다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Images {
+    #[default]
+    Auto,
+    Off,
+    Kitty,
+    Iterm2,
+    Sixel,
+    Halfblocks,
+}
+
+impl Images {
+    pub const ALL: [Images; 6] = [Images::Auto, Images::Off, Images::Kitty, Images::Iterm2, Images::Sixel, Images::Halfblocks];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Images::Auto => "auto",
+            Images::Off => "off",
+            Images::Kitty => "kitty",
+            Images::Iterm2 => "iterm2",
+            Images::Sixel => "sixel",
+            Images::Halfblocks => "halfblocks",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Images> {
+        Images::ALL.iter().copied().find(|i| i.name() == s)
+    }
+}
+
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
@@ -63,6 +95,9 @@ pub struct Config {
     /// panel navigation and the few actions used many times a day.
     #[serde(default = "default_true")]
     pub status_bar: bool,
+    /// 미리보기 탭의 이미지 그리기. 다음 실행부터 적용된다.
+    #[serde(default)]
+    pub images: Images,
     /// `[plugins.<name>]` 테이블. bibox는 `enabled`만 해석하고 나머지는 플러그인에 그대로 넘긴다.
     /// TOML은 단순 값이 테이블보다 앞에 와야 하므로 마지막 필드다.
     #[serde(default)]
@@ -92,6 +127,7 @@ impl Default for Config {
             citekey_format: default_citekey_format(),
             natural_scroll: false,
             status_bar: true,
+            images: Images::Auto,
             plugins: BTreeMap::new(),
             msgs: Msgs::default(),
         }
@@ -271,5 +307,20 @@ mod tests {
         let text = "bibox_dir = \"/tmp/b\"\nsearch_case_sensitive = false\ndefault_page_size = 20\n";
         let config: Config = toml::from_str(text).unwrap();
         assert!(config.plugins.is_empty());
+    }
+
+    #[test]
+    fn images_setting_parses_every_name_and_defaults_to_auto() {
+        let base = "bibox_dir = \"/tmp/b\"\nsearch_case_sensitive = false\ndefault_page_size = 20\n";
+        let c: Config = toml::from_str(base).unwrap();
+        assert_eq!(c.images, Images::Auto);
+        for (name, v) in [("off", Images::Off), ("kitty", Images::Kitty), ("iterm2", Images::Iterm2), ("sixel", Images::Sixel), ("halfblocks", Images::Halfblocks), ("auto", Images::Auto)] {
+            let c: Config = toml::from_str(&format!("{}images = \"{}\"\n", base, name)).unwrap();
+            assert_eq!(c.images, v, "{}", name);
+            assert_eq!(v.name(), name);
+            assert_eq!(Images::parse(name), Some(v));
+        }
+        assert!(toml::from_str::<Config>(&format!("{}images = \"png\"\n", base)).is_err());
+        assert_eq!(Images::parse("png"), None);
     }
 }

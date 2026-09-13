@@ -960,6 +960,13 @@ impl Msgs {
         }
     }
 
+    pub fn takes_effect_next_start(&self) -> &'static str {
+        match self.lang {
+            Lang::En => "Saved. Takes effect on next start",
+            Lang::Ko => "저장했습니다. 다음 실행부터 적용됩니다",
+        }
+    }
+
     pub fn plugin_install_from_title(&self) -> &'static str {
         match self.lang {
             Lang::En => "Install plugin from (owner/repo, git URL, or local path)",
