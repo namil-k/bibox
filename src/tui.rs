@@ -288,6 +288,11 @@ enum PaneRow {
     InstallFrom,
 }
 
+/// 플러그인 페이지 머리 줄. 버전이 없는 플러그인(로컬, 오류)은 그 칸을 비우지 않고 건너뛴다.
+fn plugin_page_title(name: &str, version: &str, source: &str) -> String {
+    [name, version, source].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("  ")
+}
+
 fn selectable(row: &PaneRow) -> bool {
     matches!(row, PaneRow::Item(_) | PaneRow::Plugin(_) | PaneRow::Installed(_) | PaneRow::InstallFrom)
 }
@@ -2788,7 +2793,7 @@ fn settings_pane_rows(app: &App, items: &[crate::settings::Item]) -> Vec<PaneRow
         Some(name) => {
             let mut rows = Vec::new();
             let Some(p) = st.plugins.iter().find(|p| &p.name == name) else { return rows };
-            rows.push(PaneRow::Header(format!("{}  {}  {}", p.name, p.version, p.source)));
+            rows.push(PaneRow::Header(plugin_page_title(&p.name, &p.version, &p.source)));
             if !p.description.is_empty() {
                 rows.push(PaneRow::Text(p.description.clone()));
             }
@@ -4916,8 +4921,15 @@ fn run_fetch_pdf(entry: &Entry, bibox_dir: &std::path::Path) -> Result<(String, 
 
 #[cfg(test)]
 mod tests {
-    use super::collection_paths;
+    use super::{collection_paths, plugin_page_title};
     use crate::models::{Entry, EntryType};
+
+    #[test]
+    fn plugin_page_title_skips_an_empty_version() {
+        assert_eq!(plugin_page_title("pdf-view", "0.4.0", "built-in"), "pdf-view  0.4.0  built-in");
+        assert_eq!(plugin_page_title("localplug", "", "local"), "localplug  local");
+        assert_eq!(plugin_page_title("broken", "", "error"), "broken  error");
+    }
 
     fn entry_in(collections: &[&str]) -> Entry {
         Entry {
