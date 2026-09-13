@@ -113,6 +113,9 @@ pub struct Config {
     /// 미리보기 탭의 이미지 그리기. 다음 실행부터 적용된다.
     #[serde(default)]
     pub images: Images,
+    /// 화면 색. `terminal`(터미널 팔레트), 내장 `dark`/`light`, 또는 `themes/<name>.json`.
+    #[serde(default = "default_theme")]
+    pub theme: String,
     /// `[plugins.<name>]` 테이블. bibox는 `enabled`만 해석하고 나머지는 플러그인에 그대로 넘긴다.
     /// TOML은 단순 값이 테이블보다 앞에 와야 하므로 마지막 필드다.
     #[serde(default)]
@@ -143,6 +146,7 @@ impl Default for Config {
             natural_scroll: false,
             status_bar: true,
             images: Images::Auto,
+            theme: default_theme(),
             plugins: BTreeMap::new(),
             msgs: Msgs::default(),
         }
@@ -204,6 +208,15 @@ fn default_bibox_dir() -> PathBuf {
     dirs::document_dir()
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
         .join("bibox")
+}
+
+fn default_theme() -> String {
+    crate::theme::TERMINAL.to_string()
+}
+
+/// 사용자 테마 파일 디렉토리. config.toml 옆의 `themes/`.
+pub fn themes_dir() -> PathBuf {
+    config_path().parent().map(|p| p.join("themes")).unwrap_or_else(|| PathBuf::from("themes"))
 }
 
 pub fn config_path() -> PathBuf {
@@ -346,5 +359,15 @@ mod tests {
         assert_eq!(images_summary(Images::Auto, false), "auto (queried at start)");
         assert_eq!(images_summary(Images::Kitty, true), "kitty (config)");
         assert_eq!(images_summary(Images::Halfblocks, false), "halfblocks (config)");
+    }
+
+    #[test]
+    fn theme_defaults_to_terminal_and_round_trips() {
+        let base = "bibox_dir = \"/tmp/b\"\nsearch_case_sensitive = false\ndefault_page_size = 20\n";
+        let c: Config = toml::from_str(base).unwrap();
+        assert_eq!(c.theme, "terminal");
+        let c: Config = toml::from_str(&format!("{}theme = \"one-dark\"\n", base)).unwrap();
+        assert_eq!(c.theme, "one-dark");
+        assert!(themes_dir().ends_with("themes"));
     }
 }

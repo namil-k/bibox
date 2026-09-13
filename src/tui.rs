@@ -4274,6 +4274,7 @@ pub fn run_tui(config: &Config) -> Result<()> {
         natural_scroll: config.natural_scroll,
         status_bar: config.status_bar,
         images: config.images,
+        theme: config.theme.clone(),
         plugins: config.plugins.clone(),
         msgs: crate::i18n::Msgs::new(&config.language),
     };

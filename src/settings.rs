@@ -49,13 +49,14 @@ pub enum Core {
     PanelRatio,
     ScrollDirection,
     StatusBar,
+    Theme,
     Images,
     BibExportDir,
     ExportDir,
 }
 
 impl Core {
-    pub const ALL: [Core; 11] = [
+    pub const ALL: [Core; 12] = [
         Core::Home,
         Core::PdfStorage,
         Core::CitekeyFormat,
@@ -64,6 +65,7 @@ impl Core {
         Core::PanelRatio,
         Core::ScrollDirection,
         Core::StatusBar,
+        Core::Theme,
         Core::Images,
         Core::BibExportDir,
         Core::ExportDir,
@@ -72,7 +74,7 @@ impl Core {
     fn section(self) -> Section {
         match self {
             Core::Home | Core::PdfStorage | Core::CitekeyFormat | Core::Language => Section::General,
-            Core::LineNumbers | Core::PanelRatio | Core::ScrollDirection | Core::StatusBar | Core::Images => Section::Appearance,
+            Core::LineNumbers | Core::PanelRatio | Core::ScrollDirection | Core::StatusBar | Core::Theme | Core::Images => Section::Appearance,
             Core::BibExportDir | Core::ExportDir => Section::Export,
         }
     }
@@ -87,6 +89,7 @@ impl Core {
             Core::PanelRatio => "appearance.panel_ratio",
             Core::ScrollDirection => "appearance.scroll_direction",
             Core::StatusBar => "appearance.status_bar",
+            Core::Theme => "appearance.theme",
             Core::Images => "appearance.images",
             Core::BibExportDir => "export.bib_export_dir",
             Core::ExportDir => "export.export_dir",
@@ -103,6 +106,7 @@ impl Core {
             Core::PanelRatio => "Panel ratio",
             Core::ScrollDirection => "Scroll direction",
             Core::StatusBar => "Status bar",
+            Core::Theme => "Theme",
             Core::Images => "Images",
             Core::BibExportDir => "Bib export dir",
             Core::ExportDir => "Export dir",
@@ -119,6 +123,7 @@ impl Core {
             Core::PanelRatio => "Width of collections : entries : preview",
             Core::ScrollDirection => "Mouse wheel direction",
             Core::StatusBar => "Hint bar at the bottom",
+            Core::Theme => "Colors from a VS Code theme file in themes/, or the terminal's own",
             Core::Images => "Page images in preview tabs (kitty, iTerm2, sixel). Takes effect on next start",
             Core::BibExportDir => "Where .bib exports go",
             Core::ExportDir => "Where other exports go",
@@ -135,6 +140,7 @@ impl Core {
             Core::PanelRatio => Kind::Choice(PANEL_RATIO_PRESETS.iter().map(ratio_label).collect()),
             Core::ScrollDirection => Kind::Choice(vec!["natural".into(), "standard".into()]),
             Core::StatusBar => Kind::Bool { on: "shown", off: "hidden" },
+            Core::Theme => Kind::Choice(crate::theme::list(&crate::config::themes_dir())),
             Core::Images => Kind::Choice(Images::ALL.iter().map(|i| i.name().to_string()).collect()),
             Core::BibExportDir | Core::ExportDir => Kind::Path { presets: dir_presets(), optional: false },
         }
@@ -283,6 +289,7 @@ fn core_value(core: Core, config: &Config) -> String {
         Core::PanelRatio => ratio_label(&config.panel_ratio),
         Core::ScrollDirection => (if config.natural_scroll { "natural" } else { "standard" }).to_string(),
         Core::StatusBar => (if config.status_bar { "shown" } else { "hidden" }).to_string(),
+        Core::Theme => config.theme.clone(),
         Core::Images => config.images.name().to_string(),
         Core::BibExportDir => config.bib_export_dir.display().to_string(),
         Core::ExportDir => config.export_dir.display().to_string(),
@@ -312,6 +319,12 @@ fn apply_core(core: Core, config: &mut Config, chosen: &str) {
             if let Some(i) = Images::parse(chosen) {
                 config.images = i;
             }
+        }
+        Core::Theme => {
+            config.theme = chosen.to_string();
+            // 즉시 적용. 파일이 깨졌으면 terminal로(doctor가 이유를 말한다)
+            let t = crate::theme::load(chosen, &crate::config::themes_dir()).unwrap_or_else(|_| crate::theme::Theme::terminal());
+            crate::theme::set_theme(t);
         }
         Core::CitekeyFormat => config.citekey_format = chosen.to_string(),
         Core::Language => {
@@ -579,13 +592,13 @@ mod tests {
     }
 
     #[test]
-    fn core_items_are_eleven_in_section_order_with_stable_ids() {
+    fn core_items_are_twelve_in_section_order_with_stable_ids() {
         assert_eq!(
             core_items().iter().map(|i| i.id.clone()).collect::<Vec<_>>(),
             vec![
                 "general.home", "general.pdf_storage", "general.citekey_format", "general.language",
                 "appearance.line_numbers", "appearance.panel_ratio", "appearance.scroll_direction", "appearance.status_bar",
-                "appearance.images",
+                "appearance.theme", "appearance.images",
                 "export.bib_export_dir", "export.export_dir",
             ]
         );
@@ -715,15 +728,15 @@ mod tests {
     #[test]
     fn plugin_items_follow_the_core_items_and_carry_the_plugin_name() {
         let items = items(&[manifest_with_settings()]);
-        assert_eq!(items.len(), 15);
-        let p = &items[11];
+        assert_eq!(items.len(), 16);
+        let p = &items[12];
         assert_eq!(p.id, "plugins.demo.push");
         assert_eq!(p.section, Section::Plugins);
         assert_eq!(p.plugin.as_deref(), Some("demo"));
         assert_eq!(p.label, "push");
         assert_eq!(p.desc, "push after commit");
         assert_eq!(p.kind, Kind::Bool { on: "on", off: "off" });
-        assert_eq!(items[14].kind, Kind::Str);
+        assert_eq!(items[15].kind, Kind::Str);
     }
 
     #[test]
@@ -826,7 +839,7 @@ mod tests {
         assert_eq!(ids[0], "# General");
         assert!(ids.contains(&"# Appearance".to_string()) && ids.contains(&"# Export".to_string()));
         assert!(ids.contains(&"@other".to_string()));
-        assert_eq!(ids.iter().filter(|s| !s.starts_with('#')).count(), 15 + 2);
+        assert_eq!(ids.iter().filter(|s| !s.starts_with('#')).count(), 16 + 2);
     }
 
     #[test]
@@ -862,5 +875,22 @@ mod tests {
         assert_eq!(desc_lines(long, 10, 2), vec!["aaaa bbbb", "cccc dddd…"]);
         assert_eq!(desc_lines("", 10, 2), vec![""]);
         assert_eq!(desc_lines("fits", 10, 1), vec!["fits"]);
+    }
+
+    #[test]
+    fn theme_cycles_terminal_presets_and_files_and_applies_at_once() {
+        let items = core_items();
+        let th = find(&items, "appearance.theme");
+        let mut c = Config::default();
+        assert_eq!(value(th, &c), "terminal");
+        assert!(step(th, &mut c, 1));
+        assert_eq!(c.theme, "dark");
+        assert!(crate::theme::theme().bg.is_some(), "dark paints a background");
+        assert!(step(th, &mut c, 1));
+        assert_eq!(c.theme, "light");
+        assert!(set(th, &mut c, "terminal").is_ok());
+        assert_eq!(crate::theme::theme(), crate::theme::Theme::terminal());
+        assert!(set(th, &mut c, "no-such-theme").is_err());
+        crate::theme::set_theme(crate::theme::Theme::terminal());
     }
 }
