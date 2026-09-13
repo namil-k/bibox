@@ -47,6 +47,15 @@ pub fn window(vp: &Viewport, img_w: u32, img_h: u32, scroll_px: u32, pan_px: u32
     Window { x, y, w, h }
 }
 
+/// 플러그인이 준 이미지를 요청한 폭에 정확히 맞춘다. dpi 반올림으로 몇 픽셀 어긋난 것을 바로잡는다.
+pub fn fit_width(img: image::DynamicImage, width_px: u32) -> image::DynamicImage {
+    if width_px == 0 || img.width() == width_px || img.width() == 0 {
+        return img;
+    }
+    let h = (img.height() as u64 * width_px as u64 / img.width() as u64).max(1) as u32;
+    img.resize_exact(width_px, h, image::imageops::FilterType::Triangle)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CacheKey {
     pub entry_key: String,
@@ -343,5 +352,16 @@ mod tests {
         c.retain_entry("b");
         assert!(c.get(&CacheKey { entry_key: "a".into(), page: 1, width_px: 800 }).is_none());
         assert!(c.get(&CacheKey { entry_key: "b".into(), page: 1, width_px: 800 }).is_some());
+    }
+
+    #[test]
+    fn fit_width_scales_to_the_exact_width_and_keeps_the_ratio() {
+        let img = image::DynamicImage::new_rgb8(200, 400);
+        let out = fit_width(img, 100);
+        assert_eq!((out.width(), out.height()), (100, 200));
+        let same = fit_width(image::DynamicImage::new_rgb8(100, 50), 100);
+        assert_eq!((same.width(), same.height()), (100, 50), "already right: untouched");
+        let zero = fit_width(image::DynamicImage::new_rgb8(10, 10), 0);
+        assert_eq!(zero.width(), 10, "width 0 means no resize");
     }
 }

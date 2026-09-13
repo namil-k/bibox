@@ -473,6 +473,10 @@ pub struct App {
     tab: crate::preview_tabs::TabState,
     tab_cache: crate::preview_tabs::Cache,
     bg_tab: Option<Receiver<TabRender>>,
+    /// 이미지를 그릴 수 있으면 Some. `detect_images`가 시작 때 정한다(설정과 터미널).
+    images: Option<ratatui_image::picker::Picker>,
+    /// 마지막으로 인코딩한 (키, 창, 프로토콜). 창이 그대로면 다시 인코딩하지 않는다.
+    tab_proto: Option<(crate::preview_tabs::CacheKey, crate::preview_tabs::Window, ratatui_image::protocol::StatefulProtocol)>,
     hooks: crate::hooks::HookRunner,
     bg_hooks: Vec<Receiver<crate::hooks::HookOutcome>>,
 }
@@ -563,6 +567,8 @@ impl App {
             tab: crate::preview_tabs::TabState::new(),
             tab_cache: Default::default(),
             bg_tab: None,
+            images: None,
+            tab_proto: None,
             bg_hooks: Vec::new(),
         })
     }
@@ -1179,6 +1185,7 @@ impl App {
         // 탭 목록이 바뀌었다. 인덱스가 밀렸을 수 있으니 캐시를 버리고 없어진 탭은 Info로
         self.tab_cache = Default::default();
         self.tab.pending = None;
+        self.tab_proto = None;
         if let PreviewMode::Plugin(i) = self.preview_mode {
             if i >= self.host.tabs().len() {
                 self.preview_mode = PreviewMode::Info;
@@ -1338,7 +1345,7 @@ impl App {
                 let content = match source {
                     Source::Lines(l) => Content::Lines(l),
                     Source::Image(p) => match image::open(&p) {
-                        Ok(img) => Content::Image(img),
+                        Ok(img) => Content::Image(crate::preview_tabs::fit_width(img, key.width_px)),
                         Err(e) => {
                             self.tab.error = Some(format!("{}: cannot read {}: {}", plugin, p.display(), e));
                             return;
@@ -1350,14 +1357,20 @@ impl App {
         }
     }
 
-    /// 이미지를 그릴 수 있는가. Task 6이 `self.images.is_some()`으로 바꾼다.
+    /// 이미지를 그릴 수 있는가.
     fn images_on(&self) -> bool {
-        false
+        self.images.is_some()
     }
 
-    /// 칸 하나의 픽셀 크기. 텍스트 모드는 1x1(줄 단위로 센다). Task 6이 Picker에서 읽는다.
+    /// 칸 하나의 픽셀 크기. 텍스트 모드는 1x1(줄 단위로 센다).
     fn tab_cell(&self) -> (u16, u16) {
-        (1, 1)
+        match &self.images {
+            Some(p) => {
+                let fs = p.font_size();
+                (fs.width.max(1), fs.height.max(1))
+            }
+            None => (1, 1),
+        }
     }
 
     /// 미리보기 패널 안쪽. 테두리 2칸과 상태 줄 1칸을 뺀다.
@@ -1388,10 +1401,11 @@ impl App {
         }
     }
 
-    /// 지금 보이는 내용이 이미지인가. 확대·pan은 이때만.
+    /// 이미지 모드인가: 이미지를 그릴 수 있고, 이 쪽이 텍스트로 온 것이 아니다. 확대·pan은 이때만.
+    /// (아직 만드는 중이어도 true. 그래야 `+`를 연달아 누를 수 있다.)
     fn tab_is_image(&self) -> bool {
         use crate::preview_tabs::Content;
-        self.images_on() && matches!(self.tab_key().and_then(|k| self.tab_cache.get(&k)), Some(Content::Image(_)))
+        self.images_on() && !matches!(self.tab_key().and_then(|k| self.tab_cache.get(&k)), Some(Content::Lines(_)))
     }
 
     /// j/k 한 번. 텍스트 1줄, 이미지 3칸.
@@ -2166,7 +2180,7 @@ fn render_markdown_to_lines(md: &str) -> Vec<Line<'static>> {
     lines
 }
 
-/// 플러그인 탭. 이 태스크는 텍스트 모드만. 이미지 모드는 Task 6이 더한다.
+/// 플러그인 탭. 캐시에 있는 쪽을 이미지(잘라서) 또는 텍스트로 그리고, 없으면 요청을 보낸다.
 fn draw_preview_plugin(f: &mut Frame, app: &mut App, area: Rect, tab_index: usize) {
     use crate::preview_tabs::Content;
     let entry = app.selected_entry().cloned();
@@ -2190,7 +2204,10 @@ fn draw_preview_plugin(f: &mut Frame, app: &mut App, area: Rect, tab_index: usiz
     }
     // error를 복제해 두어야 아래 팔에서 app.tab을 고칠 수 있다(match 대상이 빌린 채로 남는다)
     let error = app.tab.error.clone();
-    let status = match (error, app.tab.pending.is_some(), app.tab_cache.get(&key)) {
+    let pending = app.tab.pending.is_some();
+    let (cell_w, cell_h) = app.tab_cell();
+    let dim = Style::default().fg(Color::DarkGray);
+    let status = match (error, pending, app.tab_cache.get(&key)) {
         // 오류는 본문에 줄바꿈해서. 상태 줄 한 칸에는 poppler 안내 같은 긴 문장이 안 들어간다
         (Some(e), _, _) => {
             f.render_widget(Paragraph::new(e).style(Style::default().fg(Color::Red)).wrap(Wrap { trim: false }), body);
@@ -2201,10 +2218,39 @@ fn draw_preview_plugin(f: &mut Frame, app: &mut App, area: Rect, tab_index: usiz
             app.tab.clamp(lines.len() as u32, view, 0, 0);
             let p = Paragraph::new(lines.iter().map(|l| Line::from(l.as_str())).collect::<Vec<_>>()).scroll((app.tab.scroll as u16, 0));
             f.render_widget(p, body);
-            Line::from(Span::styled(format!("page {}/{}  text", app.tab.page, app.tab.pages), Style::default().fg(Color::DarkGray)))
+            if pending {
+                Line::from(Span::styled(app.config.msgs.tab_rendering(app.tab.page), dim))
+            } else {
+                Line::from(Span::styled(format!("page {}/{}  text", app.tab.page, app.tab.pages), dim))
+            }
         }
-        (None, _, Some(Content::Image(_))) => Line::from(""), // Task 6
-        (None, true, None) => Line::from(Span::styled(app.config.msgs.tab_rendering(app.tab.page), Style::default().fg(Color::DarkGray))),
+        (None, _, Some(Content::Image(img))) => {
+            let vp = crate::preview_tabs::Viewport { cols: body.width, rows: body.height, cell_w, cell_h };
+            app.tab.clamp(img.height(), vp.view_h(), img.width(), vp.view_w());
+            let win = crate::preview_tabs::window(&vp, img.width(), img.height(), app.tab.scroll, app.tab.pan);
+            // 잘린 이미지는 창마다 다르다. 창이 그대로면 인코딩을 다시 하지 않는다
+            let stale = app.tab_proto.as_ref().map(|(k, w, _)| *k != key || *w != win).unwrap_or(true);
+            if stale {
+                if let Some(picker) = app.images.as_ref() {
+                    let cropped = img.crop_imm(win.x, win.y, win.w, win.h);
+                    app.tab_proto = Some((key.clone(), win, picker.new_resize_protocol(cropped)));
+                }
+            }
+            if let Some((_, _, proto)) = app.tab_proto.as_mut() {
+                let widget = ratatui_image::StatefulImage::new().resize(ratatui_image::Resize::Crop(None));
+                f.render_stateful_widget(widget, body, proto);
+            }
+            let proto_name = app.images.as_ref().map(|p| format!("{:?}", p.protocol_type()).to_lowercase()).unwrap_or_default();
+            if pending {
+                Line::from(Span::styled(app.config.msgs.tab_rendering(app.tab.page), dim))
+            } else {
+                Line::from(vec![
+                    Span::styled(format!("page {}/{}  {}%", app.tab.page, app.tab.pages, app.tab.zoom_pct), dim),
+                    Span::styled(format!("  [{}]", proto_name), dim.add_modifier(Modifier::DIM)),
+                ])
+            }
+        }
+        (None, true, None) => Line::from(Span::styled(app.config.msgs.tab_rendering(app.tab.page), dim)),
         (None, false, None) => Line::from(""),
     };
     f.render_widget(Paragraph::new(status), rows[1]);
@@ -4226,6 +4272,7 @@ pub fn run_tui(config: &Config) -> Result<()> {
     };
 
     let mut app = App::new(config_clone, Arc::clone(&host))?;
+    app.images = detect_images(config.images);
     app.keymap = keymap_report.keymap;
     app.apply_filters();
 
@@ -4236,6 +4283,28 @@ pub fn run_tui(config: &Config) -> Result<()> {
     execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.show_cursor()?;
     result
+}
+
+/// 설정과 환경으로 이미지 그리기를 정한다. 대체 화면에 들어간 뒤, 이벤트를 읽기 전에 불러야 한다.
+/// auto는 터미널에 묻는다. 강제 프로토콜은 묻지 않는다. 그때 칸 크기는 ratatui-image의 기본값(10x20)인데,
+/// 요청 폭과 자르기가 모두 그 값으로 계산되므로 폭 맞춤은 그대로 맞고 해상도만 실제 칸과 조금 다르다.
+fn detect_images(images: crate::config::Images) -> Option<ratatui_image::picker::Picker> {
+    use crate::config::Images;
+    use ratatui_image::picker::{Picker, ProtocolType};
+    let forced = |p: ProtocolType| {
+        let mut picker = Picker::halfblocks();
+        picker.set_protocol_type(p);
+        Some(picker)
+    };
+    match images {
+        Images::Off => None,
+        Images::Kitty => forced(ProtocolType::Kitty),
+        Images::Iterm2 => forced(ProtocolType::Iterm2),
+        Images::Sixel => forced(ProtocolType::Sixel),
+        Images::Halfblocks => forced(ProtocolType::Halfblocks),
+        Images::Auto if crate::config::in_multiplexer() => None,
+        Images::Auto => Picker::from_query_stdio().ok(),
+    }
 }
 
 fn draw_search_result_picker(f: &mut Frame, state: &SearchResultPickerState, area: Rect) {

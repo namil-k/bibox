@@ -47,6 +47,21 @@ impl Images {
     }
 }
 
+/// tmux나 screen 안인가. auto는 여기서 터미널에 묻지 않는다(질문이 stdin을 훔친다).
+pub fn in_multiplexer() -> bool {
+    std::env::var_os("TMUX").is_some() || std::env::var_os("STY").is_some()
+}
+
+/// doctor 한 줄. 실제 판정은 TUI가 시작할 때만 할 수 있어 설정과 환경만 말한다.
+pub fn images_summary(images: Images, multiplexer: bool) -> String {
+    match images {
+        Images::Off => "off (config)".to_string(),
+        Images::Auto if multiplexer => "off (tmux)".to_string(),
+        Images::Auto => "auto (queried at start)".to_string(),
+        other => format!("{} (config)", other.name()),
+    }
+}
+
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
@@ -322,5 +337,14 @@ mod tests {
         }
         assert!(toml::from_str::<Config>(&format!("{}images = \"png\"\n", base)).is_err());
         assert_eq!(Images::parse("png"), None);
+    }
+
+    #[test]
+    fn images_summary_names_the_reason() {
+        assert_eq!(images_summary(Images::Off, false), "off (config)");
+        assert_eq!(images_summary(Images::Auto, true), "off (tmux)");
+        assert_eq!(images_summary(Images::Auto, false), "auto (queried at start)");
+        assert_eq!(images_summary(Images::Kitty, true), "kitty (config)");
+        assert_eq!(images_summary(Images::Halfblocks, false), "halfblocks (config)");
     }
 }
