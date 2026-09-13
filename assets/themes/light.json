@@ -1,0 +1,19 @@
+{
+  "$comment": "bibox preset. Values from VS Code's Light Modern theme and its color registry defaults (microsoft/vscode, MIT). bibox reads only these keys; a copied VS Code theme file may carry any others.",
+  "name": "Light Modern",
+  "type": "light",
+  "colors": {
+    "editor.background": "#FFFFFF",
+    "editor.foreground": "#3B3B3B",
+    "focusBorder": "#005FB8",
+    "pickerGroup.foreground": "#8B949E",
+    "descriptionForeground": "#3B3B3B",
+    "list.activeSelectionBackground": "#E8E8E8",
+    "list.activeSelectionForeground": "#000000",
+    "list.inactiveSelectionBackground": "#E4E6F1",
+    "list.inactiveSelectionForeground": "#3B3B3B",
+    "terminal.ansiGreen": "#107C10",
+    "editorWarning.foreground": "#BF8803",
+    "editorError.foreground": "#E51400"
+  }
+}

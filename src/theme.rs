@@ -1,6 +1,7 @@
 //! 화면 색의 역할 이름과 테마. 기본 `terminal`은 ANSI 이름이라 터미널 팔레트를 따르고,
 //! 테마 파일은 VS Code 색 테마 JSON의 `colors`에서 아는 키만 읽는다. 그리기 코드는 `theme()`로 읽는다.
 
+use std::path::Path;
 use std::sync::RwLock;
 
 use ratatui::style::Color;
@@ -87,6 +88,58 @@ pub fn parse_hex(s: &str) -> Option<Color> {
     Some(Color::Rgb(r, g, b))
 }
 
+pub const TERMINAL: &str = "terminal";
+const DARK: &str = include_str!("../assets/themes/dark.json");
+const LIGHT: &str = include_str!("../assets/themes/light.json");
+/// 바이너리 안의 프리셋. 파일 없이도 Theme 행이 뜻이 있고, 스키마의 예제다.
+pub const BUILTIN: [(&str, &str); 2] = [("dark", DARK), ("light", LIGHT)];
+
+/// 테마 이름. 파일 이름이 되므로 경로 문자를 막는다.
+pub fn valid_name(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// `terminal`, 프리셋, 아니면 `themes/<name>.json`. 오류 문구는 사용자에게 그대로 보인다.
+pub fn load(name: &str, themes_dir: &Path) -> Result<Theme, String> {
+    if name == TERMINAL {
+        return Ok(Theme::terminal());
+    }
+    if let Some((_, text)) = BUILTIN.iter().find(|(n, _)| *n == name) {
+        return Theme::from_vscode_json(text);
+    }
+    if !valid_name(name) {
+        return Err(format!("theme name \"{}\" may only use letters, digits, - and _", name));
+    }
+    let path = themes_dir.join(format!("{}.json", name));
+    let shown = format!("themes/{}.json", name);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(format!("{} not found", shown)),
+        Err(e) => return Err(format!("{}: {}", shown, e)),
+    };
+    Theme::from_vscode_json(&text).map_err(|e| format!("{}: {}", shown, e))
+}
+
+/// Settings 행의 선택지. 파일 이름이 프리셋과 같으면 프리셋이 이긴다(한 번만 나온다).
+pub fn list(themes_dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = vec![TERMINAL.to_string()];
+    names.extend(BUILTIN.iter().map(|(n, _)| n.to_string()));
+    let mut files: Vec<String> = std::fs::read_dir(themes_dir)
+        .map(|rd| {
+            rd.flatten()
+                .filter_map(|e| {
+                    let p = e.path();
+                    let stem = p.file_stem()?.to_str()?.to_string();
+                    (p.extension()?.to_str()? == "json" && valid_name(&stem) && !names.contains(&stem)).then_some(stem)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    files.sort();
+    names.extend(files);
+    names
+}
+
 static THEME: RwLock<Theme> = RwLock::new(Theme::terminal());
 
 /// 지금 테마. `Theme`은 Copy라 값으로 준다. 그리기는 메인 스레드뿐이다.
@@ -170,5 +223,54 @@ mod tests {
         set_theme(t);
         assert_eq!(theme().accent, Color::Rgb(1, 2, 3));
         set_theme(Theme::terminal());
+    }
+    #[test]
+    fn both_presets_parse_and_paint_a_background() {
+        for (name, text) in BUILTIN {
+            let t = Theme::from_vscode_json(text).unwrap_or_else(|e| panic!("{}: {}", name, e));
+            assert!(t.bg.is_some(), "{}", name);
+            assert_ne!(t.accent, Theme::terminal().accent, "{}", name);
+        }
+        assert_eq!(BUILTIN.map(|(n, _)| n), ["dark", "light"]);
+    }
+
+    #[test]
+    fn names_are_letters_digits_dash_and_underscore() {
+        for ok in ["terminal", "one-dark", "Solarized_Light", "x1"] { assert!(valid_name(ok), "{}", ok); }
+        for bad in ["", "../x", "a b", "a.json", "한글", "a/b"] { assert!(!valid_name(bad), "{}", bad); }
+    }
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("bibox-themes-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn list_puts_terminal_and_presets_first_then_files_sorted() {
+        let d = scratch("list");
+        std::fs::write(d.join("b.json"), "{}").unwrap();
+        std::fs::write(d.join("a.json"), "{}").unwrap();
+        std::fs::write(d.join("notes.txt"), "").unwrap();
+        std::fs::write(d.join("bad name.json"), "").unwrap();
+        std::fs::write(d.join("dark.json"), "{}").unwrap();
+        assert_eq!(list(&d), vec!["terminal", "dark", "light", "a", "b"], "a file named like a preset does not appear twice");
+        assert_eq!(list(&d.join("missing")), vec!["terminal", "dark", "light"]);
+    }
+
+    #[test]
+    fn load_knows_terminal_presets_files_and_says_what_is_wrong() {
+        let d = scratch("load");
+        assert_eq!(load("terminal", &d).unwrap(), Theme::terminal());
+        assert!(load("dark", &d).unwrap().bg.is_some());
+        std::fs::write(d.join("mine.json"), r##"{"colors":{"focusBorder":"#010203"}}"##).unwrap();
+        assert_eq!(load("mine", &d).unwrap().accent, Color::Rgb(1, 2, 3));
+        let e = load("gone", &d).unwrap_err();
+        assert!(e.contains("themes/gone.json") && e.contains("not found"), "{}", e);
+        std::fs::write(d.join("broken.json"), "{oops").unwrap();
+        let e = load("broken", &d).unwrap_err();
+        assert!(e.starts_with("themes/broken.json: "), "{}", e);
+        assert!(load("../etc", &d).unwrap_err().contains("name"));
     }
 }

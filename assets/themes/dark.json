@@ -1,0 +1,19 @@
+{
+  "$comment": "bibox preset. Values from VS Code's Dark Modern theme and its color registry defaults (microsoft/vscode, MIT). bibox reads only these keys; a copied VS Code theme file may carry any others.",
+  "name": "Dark Modern",
+  "type": "dark",
+  "colors": {
+    "editor.background": "#1F1F1F",
+    "editor.foreground": "#CCCCCC",
+    "focusBorder": "#0078D4",
+    "pickerGroup.foreground": "#3794FF",
+    "descriptionForeground": "#9D9D9D",
+    "list.activeSelectionBackground": "#04395E",
+    "list.activeSelectionForeground": "#FFFFFF",
+    "list.inactiveSelectionBackground": "#37373D",
+    "list.inactiveSelectionForeground": "#CCCCCC",
+    "terminal.ansiGreen": "#0DBC79",
+    "editorWarning.foreground": "#CCA700",
+    "editorError.foreground": "#F14C4C"
+  }
+}
