@@ -9,7 +9,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Frame, Terminal,
 };
 use std::io;
@@ -2191,7 +2191,11 @@ fn draw_preview_plugin(f: &mut Frame, app: &mut App, area: Rect, tab_index: usiz
     // error를 복제해 두어야 아래 팔에서 app.tab을 고칠 수 있다(match 대상이 빌린 채로 남는다)
     let error = app.tab.error.clone();
     let status = match (error, app.tab.pending.is_some(), app.tab_cache.get(&key)) {
-        (Some(e), _, _) => Line::from(Span::styled(e, Style::default().fg(Color::Red))),
+        // 오류는 본문에 줄바꿈해서. 상태 줄 한 칸에는 poppler 안내 같은 긴 문장이 안 들어간다
+        (Some(e), _, _) => {
+            f.render_widget(Paragraph::new(e).style(Style::default().fg(Color::Red)).wrap(Wrap { trim: false }), body);
+            Line::from(Span::styled(format!("page {}/{}", app.tab.page, app.tab.pages), Style::default().fg(Color::DarkGray)))
+        }
         (None, _, Some(Content::Lines(lines))) => {
             let view = body.height as u32;
             app.tab.clamp(lines.len() as u32, view, 0, 0);
