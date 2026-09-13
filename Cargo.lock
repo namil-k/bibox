@@ -183,6 +183,7 @@ dependencies = [
  "crossterm",
  "dirs 5.0.1",
  "flate2",
+ "image",
  "pulldown-cmark",
  "ratatree",
  "ratatui",

@@ -18,6 +18,7 @@ mod notes;
 mod openlibrary;
 mod pdf;
 mod plugin;
+mod preview_tabs;
 mod settings;
 mod storage;
 #[cfg(feature = "tui")]
