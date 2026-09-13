@@ -7,7 +7,7 @@ use crossterm::{
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Frame, Terminal,
@@ -20,6 +20,7 @@ use crate::keymap::{default_keymap, resolve, Action, ExecCtx, Flow, KeyPress, Ke
 use crate::models::Entry;
 use crate::plugin::protocol::{Final, UiAnswer, UiRequest};
 use crate::plugin::{PluginCmdId, PluginError, PluginHost, UiSink};
+use crate::theme::theme;
 use crate::storage::{find_by_key_mut, load_db, save_db};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
@@ -980,21 +981,21 @@ fn handle_citation_style(app: &mut App, key: crossterm::event::KeyEvent) -> Resu
 
 fn draw_citation_popup(f: &mut Frame, idx: usize, area: Rect) {
     let popup_area = centered_rect(40, 9, area);
-    f.render_widget(Clear, popup_area);
+    clear_area(f, popup_area);
     let mut lines = vec![
-        Line::from(Span::styled("Citation style", Style::default().fg(Color::Yellow))),
+        Line::from(Span::styled("Citation style", Style::default().fg(theme().heading))),
         Line::from(""),
     ];
     for (i, s) in crate::citation::Style::all().iter().enumerate() {
         let arrow = if i == idx { "▶ " } else { "  " };
-        let style = if i == idx { Style::default().fg(Color::Cyan) } else { Style::default() };
+        let style = if i == idx { Style::default().fg(theme().accent) } else { Style::default() };
         lines.push(Line::from(vec![
-            Span::styled(arrow, Style::default().fg(Color::Yellow)),
+            Span::styled(arrow, Style::default().fg(theme().heading)),
             Span::styled(s.label(), style),
         ]));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled("↑↓ select  Enter copy  Esc cancel", Style::default().fg(Color::DarkGray))));
+    lines.push(Line::from(Span::styled("↑↓ select  Enter copy  Esc cancel", Style::default().fg(theme().muted))));
     let popup = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Copy citation "));
     f.render_widget(popup, popup_area);
 }
@@ -1541,31 +1542,31 @@ fn draw_plugin_ui(f: &mut Frame, state: &PluginUiState, area: Rect) {
         PluginUiKind::Pick { title, items, index } => {
             let height = (items.len() as u16 + 5).min(20);
             let popup_area = centered_rect(55, height, area);
-            f.render_widget(Clear, popup_area);
+            clear_area(f, popup_area);
             let visible = (height as usize).saturating_sub(5).max(1);
             let start = index.saturating_sub(visible.saturating_sub(1));
             let mut lines = vec![
-                Line::from(Span::styled(title.clone(), Style::default().fg(Color::Yellow))),
+                Line::from(Span::styled(title.clone(), Style::default().fg(theme().heading))),
                 Line::from(""),
             ];
             for (i, item) in items.iter().enumerate().skip(start).take(visible) {
                 let arrow = if i == *index { "▶ " } else { "  " };
-                let style = if i == *index { Style::default().fg(Color::Cyan) } else { Style::default() };
+                let style = if i == *index { Style::default().fg(theme().accent) } else { Style::default() };
                 lines.push(Line::from(vec![
-                    Span::styled(arrow, Style::default().fg(Color::Yellow)),
+                    Span::styled(arrow, Style::default().fg(theme().heading)),
                     Span::styled(item.clone(), style),
                 ]));
             }
             lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled("↑↓ select  Enter choose  Esc cancel", Style::default().fg(Color::DarkGray))));
+            lines.push(Line::from(Span::styled("↑↓ select  Enter choose  Esc cancel", Style::default().fg(theme().muted))));
             let popup = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(format!(" {} ", state.plugin)));
             f.render_widget(popup, popup_area);
         }
         PluginUiKind::Prompt { title, buf } => {
             let popup_area = centered_rect(60, 5, area);
-            f.render_widget(Clear, popup_area);
+            clear_area(f, popup_area);
             let text = Paragraph::new(vec![
-                Line::from(Span::styled(title.clone(), Style::default().fg(Color::Yellow))),
+                Line::from(Span::styled(title.clone(), Style::default().fg(theme().heading))),
                 Line::from(format!("> {}▏", buf)),
             ])
             .block(Block::default().borders(Borders::ALL).title(format!(" {} ", state.plugin)));
@@ -1591,8 +1592,22 @@ fn handle_plugin_ui(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bo
 
 // ── Drawing ──────────────────────────────────────────────────────────────────
 
+/// 팝업 자리를 비운다. 테마에 배경이 있으면 `Clear`가 Reset으로 돌린 칸을 다시 칠한다.
+fn clear_area(f: &mut Frame, area: Rect) {
+    f.render_widget(Clear, area);
+    let t = theme();
+    if let Some(bg) = t.bg {
+        f.render_widget(Block::default().style(Style::default().fg(t.fg).bg(bg)), area);
+    }
+}
+
 fn draw(f: &mut Frame, app: &mut App) {
     let size = f.area();
+    // 테마 배경. 뒤의 위젯은 bg를 지정하지 않으면 칸의 bg를 그대로 두므로 한 번이면 된다
+    let t = theme();
+    if let Some(bg) = t.bg {
+        f.render_widget(Block::default().style(Style::default().fg(t.fg).bg(bg)), size);
+    }
 
     // Main layout: content | status bar
     // 바를 끄면 그 한 줄을 패널에 돌려준다. 빈 줄로 남기지 않는다.
@@ -1628,7 +1643,7 @@ fn draw(f: &mut Frame, app: &mut App) {
     // or they show through between entries.
     if let Mode::FilePicker(_) = &app.mode {
         if let Some(picker_state) = &mut app.file_picker_state {
-            f.render_widget(Clear, size);
+            clear_area(f, size);
             f.render_stateful_widget(ratatree::FilePicker::default(), size, picker_state);
         }
         return;
@@ -1730,9 +1745,9 @@ fn draw(f: &mut Frame, app: &mut App) {
 fn draw_collections_panel(f: &mut Frame, app: &App, area: Rect) {
     let focused = app.focus == Panel::Collections;
     let border_style = if focused {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(theme().accent)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(theme().muted)
     };
 
     let mut items: Vec<ListItem> = vec![];
@@ -1756,11 +1771,11 @@ fn draw_collections_panel(f: &mut Frame, app: &App, area: Rect) {
 
     let title = if focused {
         Line::from(vec![
-            Span::styled(" ● ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::styled("Collections ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(" ● ", Style::default().fg(theme().accent).add_modifier(Modifier::BOLD)),
+            Span::styled("Collections ", Style::default().fg(theme().accent).add_modifier(Modifier::BOLD)),
         ])
     } else {
-        Line::from(Span::styled(" Collections ", Style::default().fg(Color::DarkGray)))
+        Line::from(Span::styled(" Collections ", Style::default().fg(theme().muted)))
     };
 
     let block = Block::default()
@@ -1769,9 +1784,9 @@ fn draw_collections_panel(f: &mut Frame, app: &App, area: Rect) {
         .title(title);
 
     let highlight_style = if focused {
-        Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
+        Style::default().fg(theme().selection_fg).bg(theme().selection_bg).add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::White).bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+        Style::default().fg(theme().inactive_fg).bg(theme().inactive_bg).add_modifier(Modifier::BOLD)
     };
 
     let list = List::new(items)
@@ -1786,9 +1801,9 @@ fn draw_collections_panel(f: &mut Frame, app: &App, area: Rect) {
 fn draw_entries_panel(f: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Panel::Entries;
     let border_style = if focused {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(theme().accent)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(theme().muted)
     };
 
     use crate::config::LineNumbers;
@@ -1814,31 +1829,31 @@ fn draw_entries_panel(f: &mut Frame, app: &mut App, area: Rect) {
             LineNumbers::None => String::new(),
         };
         let num_style = if i == selected_idx {
-            Style::default().fg(Color::Yellow)
+            Style::default().fg(theme().heading)
         } else {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(theme().muted)
         };
 
         let pad = " ".repeat(line_num.len());
         let is_selected = app.selected_keys.contains(&e.bibtex_key);
         let sel_mark = if is_selected { "✓ " } else { "  " };
-        let sel_style = if is_selected { Style::default().fg(Color::Green) } else { Style::default() };
+        let sel_style = if is_selected { Style::default().fg(theme().success) } else { Style::default() };
 
         let line1 = Line::from(vec![
             Span::styled(line_num, num_style),
             Span::styled(sel_mark, sel_style),
-            Span::styled(e.bibtex_key.clone(), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            Span::styled(pdf_mark.to_string(), Style::default().fg(Color::Green)),
+            Span::styled(e.bibtex_key.clone(), Style::default().fg(theme().heading).add_modifier(Modifier::BOLD)),
+            Span::styled(pdf_mark.to_string(), Style::default().fg(theme().success)),
         ]);
         let line2 = Line::from(Span::raw(format!("{}  {}", pad, title)));
         let line3 = Line::from(Span::styled(
             format!("{}  {} · {}", pad, author, year),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme().muted),
         ));
 
         let mut item = ListItem::new(Text::from(vec![line1, line2, line3]));
         if is_selected {
-            item = item.style(Style::default().fg(Color::Green));
+            item = item.style(Style::default().fg(theme().success));
         }
         item
     }).collect();
@@ -1854,11 +1869,11 @@ fn draw_entries_panel(f: &mut Frame, app: &mut App, area: Rect) {
 
     let title = if focused {
         Line::from(vec![
-            Span::styled(" ● ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::styled(title_text, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(" ● ", Style::default().fg(theme().accent).add_modifier(Modifier::BOLD)),
+            Span::styled(title_text, Style::default().fg(theme().accent).add_modifier(Modifier::BOLD)),
         ])
     } else {
-        Line::from(Span::styled(format!(" {}", title_text), Style::default().fg(Color::DarkGray)))
+        Line::from(Span::styled(format!(" {}", title_text), Style::default().fg(theme().muted)))
     };
 
     let block = Block::default()
@@ -1867,9 +1882,9 @@ fn draw_entries_panel(f: &mut Frame, app: &mut App, area: Rect) {
         .title(title);
 
     let highlight_style = if focused {
-        Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+        Style::default().bg(theme().inactive_bg).add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::White).bg(Color::DarkGray)
+        Style::default().fg(theme().inactive_fg).bg(theme().inactive_bg)
     };
 
     let list = List::new(items)
@@ -1883,9 +1898,9 @@ fn draw_entries_panel(f: &mut Frame, app: &mut App, area: Rect) {
 fn draw_preview_panel(f: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Panel::Preview;
     let border_style = if focused {
-        Style::default().fg(Color::Cyan)
+        Style::default().fg(theme().accent)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(theme().muted)
     };
 
     // Tab bar for preview modes. Info and Note are core; the rest come from plugins' [[tabs]]
@@ -1894,23 +1909,23 @@ fn draw_preview_panel(f: &mut Frame, app: &mut App, area: Rect) {
         if *m == app.preview_mode {
             Span::styled(
                 format!(" {} ", app.preview_label(*m)),
-                Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default().fg(theme().selection_fg).bg(theme().selection_bg).add_modifier(Modifier::BOLD),
             )
         } else {
-            Span::styled(format!(" {} ", app.preview_label(*m)), Style::default().fg(Color::DarkGray))
+            Span::styled(format!(" {} ", app.preview_label(*m)), Style::default().fg(theme().muted))
         }
     }).collect();
 
     let mut title_spans = vec![];
     if focused {
-        title_spans.push(Span::styled(" ● ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
+        title_spans.push(Span::styled(" ● ", Style::default().fg(theme().accent).add_modifier(Modifier::BOLD)));
     } else {
         title_spans.push(Span::raw(" "));
     }
     for (i, s) in tab_spans.into_iter().enumerate() {
         title_spans.push(s);
         if i < modes.len() - 1 {
-            title_spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
+            title_spans.push(Span::styled(" │ ", Style::default().fg(theme().muted)));
         }
     }
     title_spans.push(Span::raw(" "));
@@ -1934,7 +1949,7 @@ fn draw_preview_info(f: &mut Frame, app: &mut App, area: Rect) {
     let entry = match app.selected_entry() {
         Some(e) => e.clone(),
         None => {
-            f.render_widget(Paragraph::new("No entry selected.").style(Style::default().fg(Color::DarkGray)), area);
+            f.render_widget(Paragraph::new("No entry selected.").style(Style::default().fg(theme().muted)), area);
             return;
         }
     };
@@ -1949,7 +1964,7 @@ fn draw_preview_info(f: &mut Frame, app: &mut App, area: Rect) {
     macro_rules! field {
         ($label:expr, $value:expr) => {
             lines.push(Line::from(vec![
-                Span::styled(format!("{:<12}", $label), Style::default().fg(Color::Cyan)),
+                Span::styled(format!("{:<12}", $label), Style::default().fg(theme().accent)),
                 Span::raw($value.to_string()),
             ]));
         };
@@ -1971,22 +1986,22 @@ fn draw_preview_info(f: &mut Frame, app: &mut App, area: Rect) {
         field!("Collections:", entry.collections.join(", "));
     } else {
         lines.push(Line::from(vec![
-            Span::styled(format!("{:<12}", "Collections:"), Style::default().fg(Color::Cyan)),
-            Span::styled("(none)", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:<12}", "Collections:"), Style::default().fg(theme().accent)),
+            Span::styled("(none)", Style::default().fg(theme().muted)),
         ]));
     }
     if let Some(fp) = &entry.file_path {
         field!("File:", fp.clone());
     } else {
         lines.push(Line::from(vec![
-            Span::styled(format!("{:<12}", "File:"), Style::default().fg(Color::Cyan)),
-            Span::styled("No PDF", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:<12}", "File:"), Style::default().fg(theme().accent)),
+            Span::styled("No PDF", Style::default().fg(theme().muted)),
         ]));
     }
     if let Some(ref abs) = entry.abstract_text {
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled("Abstract:", Style::default().fg(Color::Cyan))));
-        lines.push(Line::from(Span::styled(abs.clone(), Style::default().fg(Color::DarkGray))));
+        lines.push(Line::from(Span::styled("Abstract:", Style::default().fg(theme().accent))));
+        lines.push(Line::from(Span::styled(abs.clone(), Style::default().fg(theme().muted))));
     }
 
     let content_lines = lines.len() as u16;
@@ -2014,7 +2029,7 @@ fn draw_preview_note(f: &mut Frame, app: &mut App, area: Rect) {
         }
     } else {
         f.render_widget(
-            Paragraph::new("No entry selected.").style(Style::default().fg(Color::DarkGray)),
+            Paragraph::new("No entry selected.").style(Style::default().fg(theme().muted)),
             area,
         );
         return;
@@ -2058,9 +2073,9 @@ fn render_markdown_to_lines(md: &str) -> Vec<Line<'static>> {
             Event::End(TagEnd::Heading(_)) => {
                 // Flush heading line
                 let style = match in_heading {
-                    Some(HeadingLevel::H1) => Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-                    Some(HeadingLevel::H2) => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                    _ => Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                    Some(HeadingLevel::H1) => Style::default().fg(theme().heading).add_modifier(Modifier::BOLD),
+                    Some(HeadingLevel::H2) => Style::default().fg(theme().accent).add_modifier(Modifier::BOLD),
+                    _ => Style::default().fg(theme().success).add_modifier(Modifier::BOLD),
                 };
                 // Re-style all spans in this heading
                 let heading_spans: Vec<Span<'static>> = current_spans.drain(..)
@@ -2075,7 +2090,7 @@ fn render_markdown_to_lines(md: &str) -> Vec<Line<'static>> {
             Event::Start(Tag::Emphasis) => { italic = true; }
             Event::End(TagEnd::Emphasis) => { italic = false; }
             Event::Code(text) => {
-                let style = Style::default().fg(Color::Green).bg(Color::DarkGray);
+                let style = Style::default().fg(theme().success).bg(theme().inactive_bg);
                 current_spans.push(Span::styled(format!(" {} ", text), style));
             }
             Event::Start(Tag::CodeBlock(_)) => {
@@ -2120,7 +2135,7 @@ fn render_markdown_to_lines(md: &str) -> Vec<Line<'static>> {
             Event::Text(text) => {
                 if in_code_block {
                     // Code block: render each line with background
-                    let style = Style::default().fg(Color::White).bg(Color::DarkGray);
+                    let style = Style::default().fg(theme().inactive_fg).bg(theme().inactive_bg);
                     for line in text.lines() {
                         lines.push(Line::from(Span::styled(format!("  {}", line), style)));
                     }
@@ -2131,27 +2146,27 @@ fn render_markdown_to_lines(md: &str) -> Vec<Line<'static>> {
                         if list_ordered {
                             current_spans.push(Span::styled(
                                 format!("{}  {}. ", prefix, list_index),
-                                Style::default().fg(Color::DarkGray),
+                                Style::default().fg(theme().muted),
                             ));
                             list_index += 1;
                         } else {
                             current_spans.push(Span::styled(
                                 format!("{}  • ", prefix),
-                                Style::default().fg(Color::DarkGray),
+                                Style::default().fg(theme().muted),
                             ));
                         }
                         list_item_started = false;
                     } else if in_blockquote && current_spans.is_empty() {
                         current_spans.push(Span::styled(
                             "│ ".to_string(),
-                            Style::default().fg(Color::Cyan),
+                            Style::default().fg(theme().accent),
                         ));
                     }
 
                     let mut style = Style::default();
                     if bold { style = style.add_modifier(Modifier::BOLD); }
                     if italic { style = style.add_modifier(Modifier::ITALIC); }
-                    if in_blockquote { style = style.fg(Color::DarkGray).add_modifier(Modifier::ITALIC); }
+                    if in_blockquote { style = style.fg(theme().muted).add_modifier(Modifier::ITALIC); }
                     current_spans.push(Span::styled(text.to_string(), style));
                 }
             }
@@ -2163,7 +2178,7 @@ fn render_markdown_to_lines(md: &str) -> Vec<Line<'static>> {
             Event::Rule => {
                 lines.push(Line::from(Span::styled(
                     "────────────────────────────────".to_string(),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(theme().muted),
                 )));
             }
             _ => {}
@@ -2178,7 +2193,7 @@ fn render_markdown_to_lines(md: &str) -> Vec<Line<'static>> {
     if lines.is_empty() {
         lines.push(Line::from(Span::styled(
             "Empty note.".to_string(),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme().muted),
         )));
     }
 
@@ -2190,13 +2205,13 @@ fn draw_preview_plugin(f: &mut Frame, app: &mut App, area: Rect, tab_index: usiz
     use crate::preview_tabs::Content;
     let entry = app.selected_entry().cloned();
     let Some(entry) = entry else {
-        f.render_widget(Paragraph::new(app.config.msgs.tab_no_entry()).style(Style::default().fg(Color::DarkGray)), area);
+        f.render_widget(Paragraph::new(app.config.msgs.tab_no_entry()).style(Style::default().fg(theme().muted)), area);
         return;
     };
     app.tab.on_entry(Some(&entry.bibtex_key));
     app.tab_cache.retain_entry(&entry.bibtex_key);
     if entry.file_path.is_none() {
-        f.render_widget(Paragraph::new(app.config.msgs.tab_no_pdf()).style(Style::default().fg(Color::DarkGray)), area);
+        f.render_widget(Paragraph::new(app.config.msgs.tab_no_pdf()).style(Style::default().fg(theme().muted)), area);
         return;
     }
     let rows = Layout::default().direction(Direction::Vertical).constraints([Constraint::Min(1), Constraint::Length(1)]).split(area);
@@ -2211,12 +2226,12 @@ fn draw_preview_plugin(f: &mut Frame, app: &mut App, area: Rect, tab_index: usiz
     let error = app.tab.error.clone();
     let pending = app.tab.pending.is_some();
     let (cell_w, cell_h) = app.tab_cell();
-    let dim = Style::default().fg(Color::DarkGray);
+    let dim = Style::default().fg(theme().muted);
     let status = match (error, pending, app.tab_cache.get(&key)) {
         // 오류는 본문에 줄바꿈해서. 상태 줄 한 칸에는 poppler 안내 같은 긴 문장이 안 들어간다
         (Some(e), _, _) => {
-            f.render_widget(Paragraph::new(e).style(Style::default().fg(Color::Red)).wrap(Wrap { trim: false }), body);
-            Line::from(Span::styled(format!("page {}/{}", app.tab.page, app.tab.pages), Style::default().fg(Color::DarkGray)))
+            f.render_widget(Paragraph::new(e).style(Style::default().fg(theme().error)).wrap(Wrap { trim: false }), body);
+            Line::from(Span::styled(format!("page {}/{}", app.tab.page, app.tab.pages), Style::default().fg(theme().muted)))
         }
         (None, _, Some(Content::Lines(lines))) => {
             let view = body.height as u32;
@@ -2338,7 +2353,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         }
         _ => status_bar_text(&app.keymap, app.focus),
     };
-    let status_widget = Paragraph::new(status).style(Style::default().fg(Color::DarkGray));
+    let status_widget = Paragraph::new(status).style(Style::default().fg(theme().muted));
     f.render_widget(status_widget, area);
 }
 
@@ -2428,12 +2443,12 @@ fn draw_context_menu(f: &mut Frame, app: &App, screen: Rect) {
     };
 
     let area = Rect::new(x, y, menu_w, menu_h);
-    f.render_widget(Clear, area);
+    clear_area(f, area);
 
     let list_items: Vec<ListItem> = items.iter().enumerate().map(|(i, (label, action))| {
         let key = shortcut_hint(&app.keymap.entries, *action);
         let style = if i == app.context_menu.index {
-            Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
+            Style::default().fg(theme().selection_fg).bg(theme().selection_bg).add_modifier(Modifier::BOLD)
         } else {
             Style::default()
         };
@@ -2445,8 +2460,8 @@ fn draw_context_menu(f: &mut Frame, app: &App, screen: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(Span::styled(" Actions ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
+        .border_style(Style::default().fg(theme().accent))
+        .title(Span::styled(" Actions ", Style::default().fg(theme().accent).add_modifier(Modifier::BOLD)));
 
     let list = List::new(list_items).block(block);
     f.render_widget(list, area);
@@ -2454,10 +2469,10 @@ fn draw_context_menu(f: &mut Frame, app: &App, screen: Rect) {
 
 fn draw_confirm_popup(f: &mut Frame, msg: &str, area: Rect) {
     let popup_area = centered_rect(60, 5, area);
-    f.render_widget(Clear, popup_area);
+    clear_area(f, popup_area);
     let text = Paragraph::new(msg)
         .block(Block::default().borders(Borders::ALL).title(" Confirm "))
-        .style(Style::default().fg(Color::Red));
+        .style(Style::default().fg(theme().error));
     f.render_widget(text, popup_area);
 }
 
@@ -2481,20 +2496,20 @@ fn reveal_in_file_manager(path: &std::path::Path) {
 
 fn draw_confirm_lines(f: &mut Frame, lines: &[String], area: Rect) {
     let popup_area = centered_rect(70, (lines.len() as u16 + 2).max(5), area);
-    f.render_widget(Clear, popup_area);
+    clear_area(f, popup_area);
     let text: Vec<Line> = lines.iter().map(|l| Line::from(l.as_str())).collect();
     let p = Paragraph::new(text)
         .block(Block::default().borders(Borders::ALL).title(" Confirm "))
-        .style(Style::default().fg(Color::Red));
+        .style(Style::default().fg(theme().error));
     f.render_widget(p, popup_area);
 }
 
 fn draw_message_popup(f: &mut Frame, msg: &str, area: Rect) {
     let popup_area = centered_rect(60, 5, area);
-    f.render_widget(Clear, popup_area);
+    clear_area(f, popup_area);
     let text = Paragraph::new(msg)
         .block(Block::default().borders(Borders::ALL).title(" Info "))
-        .style(Style::default().fg(Color::Green));
+        .style(Style::default().fg(theme().success));
     f.render_widget(text, popup_area);
 }
 
@@ -2577,7 +2592,7 @@ fn filter_rows<'a>(rows: &'a [HelpRow], query: &str) -> Vec<&'a HelpRow> {
 fn draw_help_popup(f: &mut Frame, app: &App, area: Rect) {
     let height = area.height.saturating_sub(4).max(10);
     let popup_area = centered_rect(90, height, area);
-    f.render_widget(Clear, popup_area);
+    clear_area(f, popup_area);
 
     let all = help_rows(app.keymap.layer(layer_for(app.focus)), app.host.commands());
     let rows = filter_rows(&all, &app.help_query);
@@ -2591,20 +2606,20 @@ fn draw_help_popup(f: &mut Frame, app: &App, area: Rect) {
             if last_section.is_some() { lines.push(Line::from("")); }
             lines.push(Line::from(Span::styled(
                 format!(" {}", r.section),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default().fg(theme().accent).add_modifier(Modifier::BOLD),
             )));
             last_section = Some(r.section);
         }
         lines.push(Line::from(vec![
-            Span::styled(format!("  {:<16}", r.keys), Style::default().fg(Color::Yellow)),
-            Span::styled(format!("{:<22}", r.action), Style::default().fg(Color::White)),
-            Span::styled(r.desc.clone(), Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("  {:<16}", r.keys), Style::default().fg(theme().heading)),
+            Span::styled(format!("{:<22}", r.action), Style::default().fg(theme().fg)),
+            Span::styled(r.desc.clone(), Style::default().fg(theme().muted)),
         ]));
     }
     if rows.is_empty() {
         lines.push(Line::from(Span::styled(
             "  (no shortcut matches this filter)",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme().muted),
         )));
     }
 
@@ -2615,8 +2630,8 @@ fn draw_help_popup(f: &mut Frame, app: &App, area: Rect) {
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(Span::styled(title, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)));
+        .border_style(Style::default().fg(theme().accent))
+        .title(Span::styled(title, Style::default().fg(theme().heading).add_modifier(Modifier::BOLD)));
     let inner = block.inner(popup_area);
     f.render_widget(block, popup_area);
 
@@ -2636,20 +2651,20 @@ fn draw_help_popup(f: &mut Frame, app: &App, area: Rect) {
 
     let footer = if app.help_filtering {
         Line::from(vec![
-            Span::styled(" Filter: ", Style::default().fg(Color::Yellow)),
-            Span::styled(app.help_query.clone(), Style::default().fg(Color::White)),
-            Span::styled("▌", Style::default().fg(Color::Yellow)),
+            Span::styled(" Filter: ", Style::default().fg(theme().heading)),
+            Span::styled(app.help_query.clone(), Style::default().fg(theme().fg)),
+            Span::styled("▌", Style::default().fg(theme().heading)),
         ])
     } else if !app.help_query.is_empty() {
         Line::from(vec![
-            Span::styled(" Filter: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(app.help_query.clone(), Style::default().fg(Color::White)),
-            Span::styled("   Esc clear   / edit   j/k scroll   q close", Style::default().fg(Color::DarkGray)),
+            Span::styled(" Filter: ", Style::default().fg(theme().muted)),
+            Span::styled(app.help_query.clone(), Style::default().fg(theme().fg)),
+            Span::styled("   Esc clear   / edit   j/k scroll   q close", Style::default().fg(theme().muted)),
         ])
     } else {
         Line::from(Span::styled(
             " / filter    j/k ↑/↓ scroll    C-d/C-u half page    g/G top/bottom    Esc or q close",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme().muted),
         ))
     };
     f.render_widget(Paragraph::new(footer), chunks[1]);
@@ -2657,25 +2672,25 @@ fn draw_help_popup(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_sort_popup(f: &mut Frame, app: &App, area: Rect) {
     let popup_area = centered_rect(55, 14, area);
-    f.render_widget(Clear, popup_area);
+    clear_area(f, popup_area);
     let criteria = SortCriterion::all();
     let mut lines = vec![
-        Line::from(Span::styled("Sort by:", Style::default().fg(Color::Yellow))),
+        Line::from(Span::styled("Sort by:", Style::default().fg(theme().heading))),
         Line::from(""),
     ];
     for (i, c) in criteria.iter().enumerate() {
         let selected = *c == app.sort_by;
         let arrow = if i == app.sort_menu_index { "▶ " } else { "  " };
         let dir = if selected { if app.sort_ascending { "↑ asc" } else { "↓ desc" } } else { "     " };
-        let style = if selected { Style::default().fg(Color::Cyan) } else { Style::default() };
+        let style = if selected { Style::default().fg(theme().accent) } else { Style::default() };
         lines.push(Line::from(vec![
-            Span::styled(arrow, Style::default().fg(Color::Yellow)),
+            Span::styled(arrow, Style::default().fg(theme().heading)),
             Span::styled(format!("{:<12}", c.label()), style),
-            Span::styled(dir, Style::default().fg(Color::DarkGray)),
+            Span::styled(dir, Style::default().fg(theme().muted)),
         ]));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled("↑↓ select  Enter apply  Space toggle ↑↓  Esc cancel", Style::default().fg(Color::DarkGray))));
+    lines.push(Line::from(Span::styled("↑↓ select  Enter apply  Space toggle ↑↓  Esc cancel", Style::default().fg(theme().muted))));
     let popup = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Sort "));
     f.render_widget(popup, popup_area);
 }
@@ -2684,38 +2699,38 @@ fn draw_checklist_popup(f: &mut Frame, picker: &ChecklistPicker, area: Rect) {
     let item_count = picker.items.len() + 3;
     let height = (item_count as u16 + 4).min(20);
     let popup_area = centered_rect(60, height, area);
-    f.render_widget(Clear, popup_area);
+    clear_area(f, popup_area);
 
     let mut lines = vec![
-        Line::from(Span::styled(&picker.title, Style::default().fg(Color::Yellow))),
+        Line::from(Span::styled(&picker.title, Style::default().fg(theme().heading))),
         Line::from(""),
     ];
     for (i, (name, checked)) in picker.items.iter().enumerate() {
         let arrow = if i == picker.index { "▶ " } else { "  " };
         let check = if *checked { "[x]" } else { "[ ]" };
-        let check_style = if *checked { Style::default().fg(Color::Green) } else { Style::default().fg(Color::DarkGray) };
+        let check_style = if *checked { Style::default().fg(theme().success) } else { Style::default().fg(theme().muted) };
         lines.push(Line::from(vec![
-            Span::styled(arrow, Style::default().fg(Color::Yellow)),
+            Span::styled(arrow, Style::default().fg(theme().heading)),
             Span::styled(format!("{} ", check), check_style),
             Span::raw(name.as_str()),
         ]));
     }
-    lines.push(Line::from(Span::styled("  ─────────────────", Style::default().fg(Color::DarkGray))));
+    lines.push(Line::from(Span::styled("  ─────────────────", Style::default().fg(theme().muted))));
     let new_arrow = if picker.is_on_new_item() { "▶ " } else { "  " };
     if let Some(ref input) = picker.new_item_input {
         lines.push(Line::from(vec![
-            Span::styled(new_arrow, Style::default().fg(Color::Yellow)),
-            Span::styled(format!("{}▏", input), Style::default().fg(Color::Cyan)),
+            Span::styled(new_arrow, Style::default().fg(theme().heading)),
+            Span::styled(format!("{}▏", input), Style::default().fg(theme().accent)),
         ]));
     } else {
         lines.push(Line::from(vec![
-            Span::styled(new_arrow, Style::default().fg(Color::Yellow)),
-            Span::styled(&picker.new_item_label, Style::default().fg(Color::Cyan)),
+            Span::styled(new_arrow, Style::default().fg(theme().heading)),
+            Span::styled(&picker.new_item_label, Style::default().fg(theme().accent)),
         ]));
     }
     lines.push(Line::from(""));
     let footer = if picker.in_input_mode() { "Enter confirm  Esc cancel" } else { "↑↓ navigate  Space toggle  Enter done  Esc cancel" };
-    lines.push(Line::from(Span::styled(footer, Style::default().fg(Color::DarkGray))));
+    lines.push(Line::from(Span::styled(footer, Style::default().fg(theme().muted))));
     let popup = Paragraph::new(lines).block(Block::default().borders(Borders::ALL));
     f.render_widget(popup, popup_area);
 }
@@ -2723,43 +2738,43 @@ fn draw_checklist_popup(f: &mut Frame, picker: &ChecklistPicker, area: Rect) {
 fn draw_export_popup(f: &mut Frame, es: &ExportState, area: Rect) {
     let height = (es.scope_options.len() + 10) as u16;
     let popup_area = centered_rect(60, height.min(18), area);
-    f.render_widget(Clear, popup_area);
+    clear_area(f, popup_area);
 
     let formats = [ExportFormat::BibTeX, ExportFormat::Yaml, ExportFormat::Ris];
     let mut lines = vec![
-        Line::from(Span::styled("Scope:", Style::default().fg(Color::Yellow))),
+        Line::from(Span::styled("Scope:", Style::default().fg(theme().heading))),
     ];
     for (i, (_, label)) in es.scope_options.iter().enumerate() {
         let arrow = if es.section == 0 && i == es.scope_idx { "▶ " } else { "  " };
-        let style = if i == es.scope_idx { Style::default().fg(Color::Cyan) } else { Style::default() };
+        let style = if i == es.scope_idx { Style::default().fg(theme().accent) } else { Style::default() };
         lines.push(Line::from(vec![
-            Span::styled(arrow, Style::default().fg(Color::Yellow)),
+            Span::styled(arrow, Style::default().fg(theme().heading)),
             Span::styled(label.as_str(), style),
         ]));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled("Format:", Style::default().fg(Color::Yellow))));
+    lines.push(Line::from(Span::styled("Format:", Style::default().fg(theme().heading))));
     for (i, fmt) in formats.iter().enumerate() {
         let arrow = if es.section == 1 && i == es.format_idx { "▶ " } else { "  " };
-        let style = if i == es.format_idx { Style::default().fg(Color::Cyan) } else { Style::default() };
+        let style = if i == es.format_idx { Style::default().fg(theme().accent) } else { Style::default() };
         lines.push(Line::from(vec![
-            Span::styled(arrow, Style::default().fg(Color::Yellow)),
+            Span::styled(arrow, Style::default().fg(theme().heading)),
             Span::styled(fmt.label(), style),
         ]));
     }
     lines.push(Line::from(""));
     let pdf_arrow = if es.section == 2 { "▶ " } else { "  " };
     let pdf_check = if es.include_pdf { "[x]" } else { "[ ]" };
-    let pdf_style = if es.include_pdf { Style::default().fg(Color::Green) } else { Style::default().fg(Color::DarkGray) };
+    let pdf_style = if es.include_pdf { Style::default().fg(theme().success) } else { Style::default().fg(theme().muted) };
     lines.push(Line::from(vec![
-        Span::styled(pdf_arrow, Style::default().fg(Color::Yellow)),
+        Span::styled(pdf_arrow, Style::default().fg(theme().heading)),
         Span::styled(pdf_check, pdf_style),
         Span::raw(" Include PDFs"),
     ]));
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "↑↓ navigate  Tab section  Space toggle  Enter export  Esc cancel",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme().muted),
     )));
 
     let popup = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Export "));
@@ -2825,7 +2840,7 @@ fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
     use crate::settings::{desc_height, desc_lines, wrap_words, Section};
     let height = (area.height * 7 / 10).max(12).min(area.height);
     let popup_area = centered_rect(80, height, area);
-    f.render_widget(Clear, popup_area);
+    clear_area(f, popup_area);
     let block = Block::default().borders(Borders::ALL).title(" Settings ");
     let inner = block.inner(popup_area);
     f.render_widget(block, popup_area);
@@ -2848,16 +2863,16 @@ fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
     for (i, s) in Section::ALL.iter().enumerate() {
         let selected = i == st.section;
         let style = match (dimmed, selected, left_focused) {
-            (true, _, _) => Style::default().fg(Color::DarkGray),
-            (false, true, true) => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            (false, true, false) => Style::default().fg(Color::Cyan),
+            (true, _, _) => Style::default().fg(theme().muted),
+            (false, true, true) => Style::default().fg(theme().accent).add_modifier(Modifier::BOLD),
+            (false, true, false) => Style::default().fg(theme().accent),
             _ => Style::default(),
         };
         let mark = if selected { ">" } else { " " };
         left.push(Line::from(Span::styled(format!("{}{}", mark, s.label()), style)));
     }
     f.render_widget(Paragraph::new(left), columns[0]);
-    let divider: Vec<Line> = (0..columns[1].height).map(|_| Line::from(Span::styled("│", Style::default().fg(Color::DarkGray)))).collect();
+    let divider: Vec<Line> = (0..columns[1].height).map(|_| Line::from(Span::styled("│", Style::default().fg(theme().muted)))).collect();
     f.render_widget(Paragraph::new(divider), columns[1]);
 
     // 오른쪽: 행. Text는 접히므로 행 하나가 여러 줄이 될 수 있다.
@@ -2876,11 +2891,11 @@ fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
     for (ri, row) in rows.iter().enumerate() {
         let is_cursor = ri == st.row && st.focus == SettingsFocus::Rows;
         match row {
-            PaneRow::Header(h) => lines.push((Some(ri), Line::from(Span::styled(h.clone(), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))))),
+            PaneRow::Header(h) => lines.push((Some(ri), Line::from(Span::styled(h.clone(), Style::default().fg(theme().heading).add_modifier(Modifier::BOLD))))),
             PaneRow::Blank => lines.push((Some(ri), Line::from(""))),
             PaneRow::Text(t) => {
                 for (k, l) in wrap_words(t, width.saturating_sub(1)).into_iter().enumerate() {
-                    lines.push((if k == 0 { Some(ri) } else { None }, Line::from(Span::styled(l, Style::default().fg(Color::Gray)))));
+                    lines.push((if k == 0 { Some(ri) } else { None }, Line::from(Span::styled(l, Style::default().fg(theme().muted)))));
                 }
             }
             PaneRow::Plugin(name) => {
@@ -2890,28 +2905,28 @@ fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
                     None => ("", ""),
                 };
                 let mark = if is_cursor { "> " } else { "  " };
-                let style = if is_cursor { Style::default().fg(Color::Cyan) } else { Style::default() };
+                let style = if is_cursor { Style::default().fg(theme().accent) } else { Style::default() };
                 lines.push((Some(ri), Line::from(vec![
                     Span::styled(format!("{}{:<14} {:<14}", mark, name, status), style),
-                    Span::styled(source.to_string(), Style::default().fg(Color::DarkGray)),
+                    Span::styled(source.to_string(), Style::default().fg(theme().muted)),
                 ])));
             }
             PaneRow::Installed(name) => {
                 let installed = st.plugins.iter().find(|p| &p.name == name).map(|p| p.installed).unwrap_or(false);
                 let mark = if is_cursor { "> " } else { "  " };
-                let style = if is_cursor { Style::default().fg(Color::Cyan) } else { Style::default() };
+                let style = if is_cursor { Style::default().fg(theme().accent) } else { Style::default() };
                 lines.push((Some(ri), Line::from(Span::styled(format!("{}{:<18} [{}]", mark, "Installed", if installed { "yes" } else { "no" }), style))));
             }
             PaneRow::InstallFrom => {
                 let mark = if is_cursor { "> " } else { "  " };
-                let style = if is_cursor { Style::default().fg(Color::Cyan) } else { Style::default().fg(Color::Yellow) };
+                let style = if is_cursor { Style::default().fg(theme().accent) } else { Style::default().fg(theme().heading) };
                 lines.push((Some(ri), Line::from(Span::styled(format!("{}Install from…", mark), style))));
             }
             PaneRow::Item(i) => {
                 let it = &items[*i];
                 let mark = if is_cursor { "> " } else { "  " };
                 let val = crate::settings::value(it, &app.config);
-                let style = if is_cursor { Style::default().fg(Color::Cyan) } else { Style::default() };
+                let style = if is_cursor { Style::default().fg(theme().accent) } else { Style::default() };
                 lines.push((Some(ri), Line::from(Span::styled(format!("{}{:<18} [{}]", mark, it.label, val), style))));
             }
         }
@@ -2926,22 +2941,22 @@ fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
     // 설명 상자: 커서 행의 설명만
     if st.focus == SettingsFocus::Rows {
         if let Some(d) = descs.get(st.row) {
-            let text: Vec<Line> = desc_lines(d, width, desc_h).into_iter().map(|l| Line::from(Span::styled(l, Style::default().fg(Color::DarkGray)))).collect();
+            let text: Vec<Line> = desc_lines(d, width, desc_h).into_iter().map(|l| Line::from(Span::styled(l, Style::default().fg(theme().muted)))).collect();
             f.render_widget(Paragraph::new(text), right_rows[1]);
         }
     }
 
     // 아래 줄: 알림 또는 키 안내
     let footer = match (&st.notice, &st.query) {
-        (Some((text, is_err)), _) => Line::from(Span::styled(text.clone(), Style::default().fg(if *is_err { Color::Red } else { Color::Green }))),
+        (Some((text, is_err)), _) => Line::from(Span::styled(text.clone(), Style::default().fg(if *is_err { theme().error } else { theme().success }))),
         (None, Some(q)) => Line::from(vec![
-            Span::styled("/ ", Style::default().fg(Color::Yellow)),
+            Span::styled("/ ", Style::default().fg(theme().heading)),
             Span::raw(format!("{}{}", q, if st.typing { "▏" } else { "" })),
-            Span::styled(if st.typing { "   Enter done  Esc clear" } else { "   j/k move  h/l change  Esc clear" }, Style::default().fg(Color::DarkGray)),
+            Span::styled(if st.typing { "   Enter done  Esc clear" } else { "   j/k move  h/l change  Esc clear" }, Style::default().fg(theme().muted)),
         ]),
         (None, None) => {
             let hint = if st.page.is_some() { "j/k move  h/l change  Esc back to list" } else { "Tab switch  j/k move  h/l change  Enter edit  / search  Esc close" };
-            Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray)))
+            Line::from(Span::styled(hint, Style::default().fg(theme().muted)))
         }
     };
     f.render_widget(Paragraph::new(footer), vertical[1]);
@@ -2949,9 +2964,9 @@ fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_settings_input(f: &mut Frame, input: &SettingsInput, area: Rect) {
     let popup_area = centered_rect(60, 5, area);
-    f.render_widget(Clear, popup_area);
+    clear_area(f, popup_area);
     let text = Paragraph::new(vec![
-        Line::from(Span::styled(input.title.clone(), Style::default().fg(Color::Yellow))),
+        Line::from(Span::styled(input.title.clone(), Style::default().fg(theme().heading))),
         Line::from(format!("> {}▏", input.buf)),
     ])
     .block(Block::default().borders(Borders::ALL).title(" Settings "));
@@ -4317,19 +4332,19 @@ fn detect_images(images: crate::config::Images) -> Option<ratatui_image::picker:
 
 fn draw_search_result_picker(f: &mut Frame, state: &SearchResultPickerState, area: Rect) {
     let popup_area = centered_rect(80, 50, area);
-    f.render_widget(Clear, popup_area);
+    clear_area(f, popup_area);
 
     let mut lines = vec![
         Line::from(Span::styled(
             format!("Search results for [{}]:", state.key),
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme().heading).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
     ];
 
     for (i, r) in state.results.iter().enumerate() {
         let arrow = if i == state.index { "▶ " } else { "  " };
-        let style = if i == state.index { Style::default().fg(Color::Cyan) } else { Style::default() };
+        let style = if i == state.index { Style::default().fg(theme().accent) } else { Style::default() };
 
         let author = if r.authors.is_empty() { "Unknown".into() } else {
             let first = r.authors[0].split(',').next().unwrap_or(&r.authors[0]).trim().to_string();
@@ -4338,7 +4353,7 @@ fn draw_search_result_picker(f: &mut Frame, state: &SearchResultPickerState, are
         let year = r.year.map(|y| y.to_string()).unwrap_or_default();
 
         lines.push(Line::from(vec![
-            Span::styled(arrow, Style::default().fg(Color::Yellow)),
+            Span::styled(arrow, Style::default().fg(theme().heading)),
             Span::styled(format!("{} ({}) ", author, year), style.add_modifier(Modifier::BOLD)),
         ]));
 
@@ -4354,7 +4369,7 @@ fn draw_search_result_picker(f: &mut Frame, state: &SearchResultPickerState, are
         // Venue
         if let Some(ref v) = r.venue {
             lines.push(Line::from(Span::styled(
-                format!("    {}", v), Style::default().fg(Color::DarkGray),
+                format!("    {}", v), Style::default().fg(theme().muted),
             )));
         }
         lines.push(Line::from(""));
@@ -4362,7 +4377,7 @@ fn draw_search_result_picker(f: &mut Frame, state: &SearchResultPickerState, are
 
     lines.push(Line::from(Span::styled(
         "↑↓ navigate  Enter select  Esc cancel",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme().muted),
     )));
 
     let popup = Paragraph::new(lines)
@@ -4408,12 +4423,12 @@ fn handle_search_result_picker(app: &mut App, key: crossterm::event::KeyEvent) -
 
 fn draw_fetch_preview(f: &mut Frame, state: &FetchPreviewState, area: Rect) {
     let popup_area = centered_rect(80, 60, area);
-    f.render_widget(Clear, popup_area);
+    clear_area(f, popup_area);
 
     let mut lines = vec![
         Line::from(Span::styled(
             format!("Fetch results for [{}]:", state.key),
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default().fg(theme().heading).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
     ];
@@ -4423,9 +4438,9 @@ fn draw_fetch_preview(f: &mut Frame, state: &FetchPreviewState, area: Rect) {
         let check = if state.selected[i] { "[x]" } else { "[ ]" };
 
         let style = if !change.changed {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(theme().muted)
         } else if i == state.index {
-            Style::default().fg(Color::Cyan)
+            Style::default().fg(theme().accent)
         } else {
             Style::default()
         };
@@ -4449,22 +4464,22 @@ fn draw_fetch_preview(f: &mut Frame, state: &FetchPreviewState, area: Rect) {
 
         if change.changed {
             lines.push(Line::from(vec![
-                Span::styled(arrow, Style::default().fg(Color::Yellow)),
+                Span::styled(arrow, Style::default().fg(theme().heading)),
                 Span::styled(format!("{} ", check), style),
                 Span::styled(format!("{:<10} ", change.field), style.add_modifier(Modifier::BOLD)),
-                Span::styled(old_display.clone(), Style::default().fg(Color::Red)),
+                Span::styled(old_display.clone(), Style::default().fg(theme().error)),
             ]));
             lines.push(Line::from(vec![
                 Span::raw("               "),
-                Span::styled(format!(" -> {}", new_display), Style::default().fg(Color::Green)),
+                Span::styled(format!(" -> {}", new_display), Style::default().fg(theme().success)),
             ]));
         } else {
             lines.push(Line::from(vec![
-                Span::styled(arrow, Style::default().fg(Color::Yellow)),
+                Span::styled(arrow, Style::default().fg(theme().heading)),
                 Span::styled(format!("{} ", check), style),
                 Span::styled(format!("{:<10} ", change.field), style),
                 Span::styled(old_display.clone(), style),
-                Span::styled("  (unchanged)", Style::default().fg(Color::DarkGray)),
+                Span::styled("  (unchanged)", Style::default().fg(theme().muted)),
             ]));
         }
     }
@@ -4472,7 +4487,7 @@ fn draw_fetch_preview(f: &mut Frame, state: &FetchPreviewState, area: Rect) {
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "↑↓ navigate  Space toggle  Enter apply  Esc cancel",
-        Style::default().fg(Color::DarkGray),
+        Style::default().fg(theme().muted),
     )));
 
     let popup = Paragraph::new(lines)
