@@ -985,6 +985,13 @@ impl Msgs {
         }
     }
 
+    pub fn theme_problem(&self, detail: &str) -> String {
+        match self.lang {
+            Lang::En => format!("theme: {}; using terminal colors", detail),
+            Lang::Ko => format!("테마: {}. 터미널 색으로 엽니다", detail),
+        }
+    }
+
     pub fn takes_effect_next_start(&self) -> &'static str {
         match self.lang {
             Lang::En => "Saved. Takes effect on next start",

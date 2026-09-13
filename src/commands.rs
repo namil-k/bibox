@@ -3796,6 +3796,7 @@ pub fn cmd_config(json: bool, config: &Config) -> Result<()> {
             "language": config.language,
             "line_numbers": format!("{:?}", config.line_numbers).to_lowercase(),
             "images": config.images.name(),
+            "theme": config.theme,
             "panel_ratio": config.panel_ratio,
             "bib_export_dir": config.bib_export_dir.to_string_lossy(),
             "export_dir": config.export_dir.to_string_lossy(),
@@ -3812,6 +3813,7 @@ pub fn cmd_config(json: bool, config: &Config) -> Result<()> {
         println!("Language:     {}", config.language);
         println!("Line numbers: {:?}", config.line_numbers);
         println!("Images:       {}", config.images.name());
+        println!("Theme:        {}", config.theme);
         println!("Panel ratio:  {:?}", config.panel_ratio);
         println!("Bib export:   {}", config.bib_export_dir.display());
         println!("Export:       {}", config.export_dir.display());
@@ -4187,6 +4189,11 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
         });
     }
 
+    // ── 테마 파일 ────────────────────────────────────────────────────────────
+    if let Err(e) = crate::theme::load(&config.theme, &crate::config::themes_dir()) {
+        issues.push(Issue { kind: "theme_problem".into(), key: Some(config.theme.clone()), detail: e, fixable: false });
+    }
+
     // ── Output (JSON) ────────────────────────────────────────────────────────
     if json {
         let result = serde_json::json!({
@@ -4224,6 +4231,7 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
         ("orphaned_note",   "No orphaned notes",             "orphaned notes"),
         ("keymap_problem",  "keymap.toml is valid",          "keymap.toml problems"),
         ("plugin_problem",  "Plugins load cleanly",          "plugin problems"),
+        ("theme_problem",   "Theme loads",                   "theme problems"),
     ];
 
     println!("  --- Checks {}", "-".repeat(44));
@@ -4249,7 +4257,7 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
     // Detail sections for each issue kind that has problems
     let kinds = ["malformed_entry", "bad_citekey", "duplicate_key", "missing_pdf", "orphaned_pdf",
                   "missing_title", "dirty_title", "latex_escape", "orphaned_note", "keymap_problem",
-                  "plugin_problem"];
+                  "plugin_problem", "theme_problem"];
     for kind in &kinds {
         let group: Vec<&Issue> = issues.iter().filter(|i| i.kind == *kind).collect();
         if group.is_empty() { continue; }
@@ -4263,6 +4271,7 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
             "dirty_title"     => ("BibTeX braces in text",   "--fix strips braces"),
             "latex_escape"    => ("LaTeX escapes in text",   "--fix decodes to Unicode"),
             "orphaned_note"   => ("Orphaned notes",          "Delete manually or re-add entry"),
+            "theme_problem"   => ("Theme",                   "Fix themes/<name>.json or pick another in Settings"),
             _                 => (*kind, ""),
         };
         let fixable = group.iter().any(|i| i.fixable);

@@ -518,6 +518,7 @@ panel_ratio = [2, 4, 4]               # left : center : right (sum = 10)
 natural_scroll = false                 # true for macOS-style natural scrolling
 status_bar = true                      # hint bar at the bottom; false reclaims that row
 images = "auto"                        # auto, off, kitty, iterm2, sixel, halfblocks; auto never asks inside tmux/screen
+theme = "terminal"                     # terminal, dark, light, or a file name from themes/
 citekey_format = "{author}{year}{title}" # {author}, {year}, {title} variables
 bib_export_dir = "."                   # BibTeX export location
 export_dir = "~/Downloads"             # Other exports location
@@ -526,6 +527,21 @@ pdf_dir = "~/iCloud/bibox-pdfs"        # Separate PDF storage (iCloud, Google Dr
 ```
 
 `images` decides how plugin tabs such as the PDF tab draw pictures. `auto` asks the terminal once at start (never inside tmux or screen, where the tab shows text). If a terminal does not answer and keys go missing afterwards, set `images = "off"` or name the protocol. Changing it takes effect on the next start.
+
+`theme` picks the colors. `terminal` (the default) uses the terminal's own palette. `dark` and `light` are built in (VS Code's Dark Modern and Light Modern). Any other name is a file `themes/<name>.json` next to `config.toml`, in VS Code's color theme format: copy a theme file from a VS Code extension (`extensions/<publisher>.<theme>/themes/*.json`) and pick it in Settings. bibox reads these keys and ignores the rest; missing keys keep the terminal color. When `editor.background` is present the whole screen is painted with it, so delete that line to keep a transparent terminal background.
+
+| bibox uses it for | VS Code key |
+|---|---|
+| text and background | `editor.foreground`, `editor.background` |
+| focused border, active tab, cursor row text | `focusBorder` |
+| titles, prompts, citekeys | `pickerGroup.foreground` |
+| descriptions, hints, dividers | `descriptionForeground` |
+| selected row | `list.activeSelectionBackground`, `list.activeSelectionForeground` |
+| row highlight in an unfocused panel, code in notes | `list.inactiveSelectionBackground`, `list.inactiveSelectionForeground` |
+| success marks | `terminal.ansiGreen` |
+| warnings, errors | `editorWarning.foreground`, `editorError.foreground` |
+
+Colors are sent as true color, so a terminal without 24-bit color support will approximate them.
 
 ## AI Agent Integration
 

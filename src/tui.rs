@@ -4237,7 +4237,19 @@ pub fn run_tui(config: &Config) -> Result<()> {
     let host = Arc::new(host);
     let keymap_report = crate::keymap::load_keymap(host.commands());
     let keymap_noisy = !keymap_report.errors.is_empty() || !keymap_report.warnings.is_empty();
-    if keymap_noisy || !plugin_problems.is_empty() {
+    // 테마는 데이터라 여기서 읽어 전역에 둔다. 깨졌으면 terminal로 뜨고 이유를 한 줄 보인다
+    let theme_problem = match crate::theme::load(&config.theme, &crate::config::themes_dir()) {
+        Ok(t) => {
+            crate::theme::set_theme(t);
+            None
+        }
+        Err(e) => Some(e),
+    };
+    if keymap_noisy || !plugin_problems.is_empty() || theme_problem.is_some() {
+        if let Some(e) = &theme_problem {
+            println!("{}", config.msgs.theme_problem(e));
+            println!();
+        }
         if !plugin_problems.is_empty() {
             println!("{}", config.msgs.plugin_problem_header());
             println!();
