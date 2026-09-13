@@ -195,8 +195,9 @@ fn default_panel_ratio() -> [u16; 3] {
     [2, 4, 4]
 }
 
+/// `.`이었다. TUI를 어느 디렉토리에서 띄웠느냐에 따라 파일이 아무 데나 생겨 Downloads로.
 fn default_bib_export_dir() -> PathBuf {
-    PathBuf::from(".")
+    default_export_dir()
 }
 
 fn default_export_dir() -> PathBuf {
