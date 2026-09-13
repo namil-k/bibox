@@ -8,7 +8,8 @@ pub mod serve;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-pub use host::{CliSink, NoUiSink, PluginCmdId, PluginCommands, PluginEnv, PluginError, PluginHost, UiSink};
+pub use host::{CliSink, NoUiSink, PluginCmdId, PluginCommands, PluginEnv, PluginError, PluginHost, PluginTab, UiSink};
+pub use protocol::{TabRequest, TabResponse};
 pub use cli::{commit_staged, discard_staged, install_local, stage_from_git, Staged};
 pub use manifest::{HookKind, Manifest, PluginProblem, SettingDecl, SettingKind};
 

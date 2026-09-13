@@ -32,6 +32,20 @@ pub struct Request {
     pub id: String,
     pub trigger: String,
     pub context: Context,
+    /// `trigger = "tab"`일 때만 실린다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab: Option<TabRequest>,
+}
+
+/// 미리보기 탭 요청. 호스트가 "n쪽을 W픽셀 폭으로"라고 묻는다.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TabRequest {
+    /// 1부터
+    pub page: u32,
+    /// 원하는 이미지 폭. 텍스트 모드면 0
+    pub width_px: u32,
+    /// 호스트가 이미지를 그릴 수 있는가. false면 플러그인은 lines로 답한다
+    pub images: bool,
 }
 
 // ── 플러그인 -> bibox ────────────────────────────────────────────────────────
@@ -93,6 +107,20 @@ pub struct Final {
     pub refresh: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// 탭 요청에 대한 답. image와 lines 중 하나.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab: Option<TabResponse>,
+}
+
+/// 탭 응답. `image`가 있으면 그 PNG, 없으면 `lines`. `pages`는 전체 쪽수.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TabResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pages: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -216,6 +244,7 @@ mod tests {
                 paths: Paths { config_dir: "/c".into(), db: "/c/db.json".into(), notes: "/n".into(), pdfs: "/p".into(), home: None },
                 hook: None,
             },
+            tab: None,
         };
         let v: serde_json::Value = serde_json::to_value(&req).unwrap();
         assert_eq!(v["type"], "command");
@@ -370,6 +399,7 @@ mod tests {
                 paths: Paths { config_dir: "/c".into(), db: "/h/db.json".into(), notes: "/h/notes".into(), pdfs: "/h/pdfs".into(), home: Some("/h".into()) },
                 hook: Some(serde_json::json!({"reason": "add", "keys": ["a"]})),
             },
+            tab: None,
         };
         let line = serde_json::to_string(&req).unwrap();
         let back: Request = serde_json::from_str(&line).unwrap();
@@ -395,5 +425,42 @@ mod tests {
         assert_eq!(serde_json::to_string(&r).unwrap(), r#"{"ui":"progress","text":"pulling"}"#);
         let r = UiRequest::Pick { title: Some("Style".into()), items: vec!["APA".into()] };
         assert_eq!(serde_json::to_string(&r).unwrap(), r#"{"ui":"pick","title":"Style","items":["APA"]}"#);
+    }
+
+    #[test]
+    fn a_tab_request_is_serialized_only_when_present() {
+        let mut req = Request {
+            r#type: "command".into(), id: "render".into(), trigger: "tab".into(),
+            context: Context { focus: None, collection: None, entry: None, entries: vec![], config: serde_json::json!({}), paths: Paths { config_dir: "/c".into(), db: "/d".into(), notes: "/n".into(), pdfs: "/p".into(), home: None }, hook: None },
+            tab: None,
+        };
+        let s = serde_json::to_string(&req).unwrap();
+        assert!(!s.contains("\"tab\":"), "{}", s);
+        req.tab = Some(TabRequest { page: 3, width_px: 840, images: true });
+        let s = serde_json::to_string(&req).unwrap();
+        assert!(s.contains("\"tab\":{\"page\":3,\"width_px\":840,\"images\":true}"), "{}", s);
+        let back: Request = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.tab, Some(TabRequest { page: 3, width_px: 840, images: true }));
+    }
+
+    #[test]
+    fn a_final_with_a_tab_response_parses_image_or_lines() {
+        let f = match parse_plugin_line(r#"{"tab":{"image":"/tmp/p3.png","pages":14}}"#).unwrap() {
+            PluginMsg::Final(f) => f,
+            other => panic!("{:?}", other),
+        };
+        let t = f.tab.unwrap();
+        assert_eq!(t.image, Some(PathBuf::from("/tmp/p3.png")));
+        assert_eq!(t.pages, Some(14));
+        assert_eq!(t.lines, None);
+        let f = match parse_plugin_line(r#"{"tab":{"lines":["a","b"]}}"#).unwrap() {
+            PluginMsg::Final(f) => f,
+            other => panic!("{:?}", other),
+        };
+        assert_eq!(f.tab.unwrap().lines, Some(vec!["a".to_string(), "b".to_string()]));
+        // 보통 최종 응답에는 tab이 없다
+        let f = match parse_plugin_line(r#"{"message":"hi"}"#).unwrap() { PluginMsg::Final(f) => f, other => panic!("{:?}", other) };
+        assert_eq!(f.tab, None);
+        assert!(!serde_json::to_string(&f).unwrap().contains("tab"));
     }
 }

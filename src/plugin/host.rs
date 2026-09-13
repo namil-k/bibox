@@ -11,7 +11,7 @@ use crate::config::Config;
 use crate::keymap::{KeyPress, LayerId};
 use crate::models::Entry;
 use crate::plugin::manifest::{HookKind, Manifest};
-use crate::plugin::protocol::{head, parse_plugin_line, Context, Final, Paths, PluginMsg, Request, UiAnswer, UiRequest};
+use crate::plugin::protocol::{head, parse_plugin_line, Context, Final, Paths, PluginMsg, Request, TabRequest, UiAnswer, UiRequest};
 
 // ── 명령 테이블 ──────────────────────────────────────────────────────────────
 
@@ -194,8 +194,17 @@ pub struct PluginHost {
     slots: BTreeMap<String, Arc<PluginSlot>>,
     commands: PluginCommands,
     hooks: HashMap<HookKind, Vec<PluginCmdId>>,
+    tabs: Vec<PluginTab>,
     config_tables: RwLock<BTreeMap<String, Value>>,
     env: PluginEnv,
+}
+
+/// 미리보기 패널의 탭 하나. 매니페스트 순서(발견 순서)대로 `PluginHost::tabs`에 놓인다.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PluginTab {
+    pub plugin: String,
+    pub title: String,
+    pub cmd: PluginCmdId,
 }
 
 impl PluginHost {
@@ -232,11 +241,23 @@ impl PluginHost {
                 }
             }
         }
-        PluginHost { manifests, slots, commands, hooks, config_tables: RwLock::new(config_tables), env }
+        let mut tabs = Vec::new();
+        for m in &manifests {
+            for t in &m.tabs {
+                if let Some(cmd) = commands.find(&format!("{}.{}", m.name, t.run)) {
+                    tabs.push(PluginTab { plugin: m.name.clone(), title: t.title.clone(), cmd });
+                }
+            }
+        }
+        PluginHost { manifests, slots, commands, hooks, tabs, config_tables: RwLock::new(config_tables), env }
     }
 
     pub fn commands(&self) -> &PluginCommands {
         &self.commands
+    }
+
+    pub fn tabs(&self) -> &[PluginTab] {
+        &self.tabs
     }
 
     /// Settings 화면이 `[plugins.<name>]`을 바꾼 뒤 부른다. 다음 요청부터 새 값이 간다.
@@ -336,6 +357,18 @@ impl PluginHost {
         context: Context,
         ui: &mut dyn UiSink,
     ) -> Result<Final, PluginError> {
+        self.invoke_with(cmd, trigger, context, None, ui)
+    }
+
+    /// `invoke`에 탭 요청을 더한 것. 탭을 그릴 때 `trigger = "tab"`과 함께 쓴다.
+    pub fn invoke_with(
+        &self,
+        cmd: PluginCmdId,
+        trigger: &str,
+        context: Context,
+        tab: Option<TabRequest>,
+        ui: &mut dyn UiSink,
+    ) -> Result<Final, PluginError> {
         let command = self.commands.get(cmd).ok_or_else(|| PluginError::Protocol(format!("unknown command {:?}", cmd)))?;
         let plugin = command.plugin.clone();
         let slot = self.slots.get(&plugin).ok_or_else(|| PluginError::Protocol(format!("no such plugin {}", plugin)))?;
@@ -347,7 +380,7 @@ impl PluginHost {
             io = slot.io.lock().unwrap_or_else(|p| p.into_inner());
         }
 
-        let request = Request { r#type: "command".to_string(), id: command.id.clone(), trigger: trigger.to_string(), context };
+        let request = Request { r#type: "command".to_string(), id: command.id.clone(), trigger: trigger.to_string(), context, tab };
         let line = serde_json::to_string(&request).map_err(|e| PluginError::Protocol(e.to_string()))?;
         if write_line(&mut io, &line).is_err() {
             return Err(self.reap(slot, &mut io));
@@ -673,5 +706,33 @@ mod tests {
         assert_eq!(PluginError::Exited(None).to_string(), "exited by signal (see stderr.log in the plugin directory)");
         assert_eq!(PluginError::Cancelled.to_string(), "cancelled");
         assert_eq!(PluginError::BadJson("x".into()).to_string(), "invalid response: x");
+    }
+
+    #[test]
+    fn tabs_are_listed_in_plugin_order_with_their_command_ids() {
+        let mk = |name: &str| {
+            // 매니페스트 이름은 디렉토리 이름과 같아야 한다
+            let dir = std::env::temp_dir().join(format!("bibox-tabs-{}", std::process::id())).join(name);
+            let text = format!("api = 1\nname = \"{}\"\nrun = \"sh\"\n[[tabs]]\ntitle = \"T-{}\"\nrun = \"render\"\n[[commands]]\nid = \"render\"\ndesc = \"R\"\n", name, name);
+            let mut problems = vec![];
+            parse_manifest(&dir, &text, &mut problems).unwrap()
+        };
+        let host = PluginHost::new(vec![mk("beta"), mk("alpha")], BTreeMap::new(), env());
+        let tabs = host.tabs();
+        assert_eq!(tabs.len(), 2);
+        assert_eq!((tabs[0].plugin.as_str(), tabs[0].title.as_str()), ("beta", "T-beta"), "manifest order, not sorted here (discover sorts)");
+        assert_eq!(host.commands().get(tabs[0].cmd).unwrap().full_name(), "beta.render");
+        assert_eq!(host.commands().get(tabs[1].cmd).unwrap().full_name(), "alpha.render");
+    }
+
+    #[test]
+    fn invoke_with_a_tab_request_puts_it_on_the_wire() {
+        let (host, _) = host_for("alpha", "echo_req.sh");
+        let id = host.commands().find("alpha.go").unwrap();
+        let tab = TabRequest { page: 2, width_px: 640, images: false };
+        let f = host.invoke_with(id, "tab", ctx(&host, "alpha"), Some(tab), &mut NoUiSink).unwrap();
+        let msg = f.message.unwrap();
+        assert!(msg.contains("\"tab\":{\"page\":2,\"width_px\":640,\"images\":false}"), "{}", msg);
+        assert!(msg.contains("\"trigger\":\"tab\""), "{}", msg);
     }
 }

@@ -75,6 +75,16 @@ struct ManifestFile {
     cli: Option<CliFile>,
     #[serde(default)]
     settings: Vec<SettingFile>,
+    #[serde(default)]
+    tabs: Vec<TabFile>,
+}
+
+/// `[[tabs]]`. 미리보기 패널의 탭 하나: 제목과 그 내용을 만드는 명령.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TabFile {
+    title: String,
+    run: String,
 }
 
 // ── 검증된 모양 ───────────────────────────────────────────────────────────────
@@ -168,8 +178,16 @@ pub struct Manifest {
     pub hooks: Vec<Hook>,
     pub cli: Option<Vec<String>>,
     pub settings: Vec<SettingDecl>,
+    pub tabs: Vec<Tab>,
     pub builtin: Option<String>,
     pub dir: PathBuf,
+}
+
+/// 미리보기 탭. `run`은 이 플러그인의 command id. 호스트가 `trigger = "tab"`으로 부른다.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tab {
+    pub title: String,
+    pub run: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -296,7 +314,7 @@ fn expand_stub(
     let plugin = dir_name(dir);
     let err = |detail: String| PluginProblem::Manifest { plugin: plugin.clone(), detail };
 
-    let extra = file.version.is_some() || file.description.is_some() || !file.commands.is_empty() || !file.hooks.is_empty() || file.cli.is_some() || !file.settings.is_empty();
+    let extra = file.version.is_some() || file.description.is_some() || !file.commands.is_empty() || !file.hooks.is_empty() || file.cli.is_some() || !file.settings.is_empty() || !file.tabs.is_empty();
     if extra {
         problems.push(err("a built-in stub carries only api, name and builtin".to_string()));
         return None;
@@ -500,6 +518,23 @@ fn build(dir: &Path, file: ManifestFile, run_override: Option<Vec<String>>, prob
         settings.push(SettingDecl { key: sf.key.clone(), kind, default: sf.default.clone(), desc: sf.desc.clone() });
     }
 
+    // 탭 제목은 탭 줄에 그대로 놓이므로 짧게. 명령은 위에서 검증된 것 중 하나여야 한다.
+    let mut tabs: Vec<Tab> = Vec::new();
+    for tf in &file.tabs {
+        let n = tf.title.chars().count();
+        if n == 0 || n > 12 {
+            problems.push(err(format!("tab title \"{}\" must be 1 to 12 characters", tf.title)));
+            fatal = true;
+            continue;
+        }
+        if !commands.iter().any(|c| c.id == tf.run) {
+            problems.push(err(format!("tab \"{}\" refers to unknown command \"{}\"", tf.title, tf.run)));
+            fatal = true;
+            continue;
+        }
+        tabs.push(Tab { title: tf.title.clone(), run: tf.run.clone() });
+    }
+
     if fatal {
         return None;
     }
@@ -512,6 +547,7 @@ fn build(dir: &Path, file: ManifestFile, run_override: Option<Vec<String>>, prob
         hooks,
         cli,
         settings,
+        tabs,
         builtin: None,
         dir: dir.to_path_buf(),
     })
@@ -917,5 +953,53 @@ default = "claude-opus-5"
         assert!(SettingKind::Str.accepts(&String("s".into())) && !SettingKind::Str.accepts(&Integer(1)));
         let c = SettingKind::Choice(vec!["a".into()]);
         assert!(c.accepts(&String("a".into())) && !c.accepts(&String("b".into())));
+    }
+
+    const WITH_TAB: &str = r#"
+api = 1
+name = "x"
+run = "sh run.sh"
+
+[[tabs]]
+title = "PDF"
+run = "render"
+
+[[commands]]
+id = "render"
+desc = "Render a page"
+"#;
+
+    #[test]
+    fn a_tab_names_its_command() {
+        let mut problems = vec![];
+        let m = parse_manifest(&dir("x"), WITH_TAB, &mut problems).expect("manifest");
+        assert!(problems.is_empty(), "{:?}", problems);
+        assert_eq!(m.tabs, vec![Tab { title: "PDF".into(), run: "render".into() }]);
+    }
+
+    #[test]
+    fn a_tab_whose_run_is_not_a_command_is_a_manifest_error() {
+        let text = "api = 1\nname = \"x\"\nrun = \"sh\"\n[[tabs]]\ntitle = \"PDF\"\nrun = \"nope\"\n";
+        let mut problems = vec![];
+        assert!(parse_manifest(&dir("x"), text, &mut problems).is_none());
+        assert!(matches!(&problems[0], PluginProblem::Manifest { detail, .. } if detail.contains("tab \"PDF\" refers to unknown command \"nope\"")));
+    }
+
+    #[test]
+    fn a_tab_title_must_be_one_to_twelve_chars() {
+        for title in ["", "ThirteenChars"] {
+            let text = format!("api = 1\nname = \"x\"\nrun = \"sh\"\n[[tabs]]\ntitle = \"{}\"\nrun = \"r\"\n[[commands]]\nid = \"r\"\ndesc = \"R\"\n", title);
+            let mut problems = vec![];
+            assert!(parse_manifest(&dir("x"), &text, &mut problems).is_none(), "{:?}", title);
+            assert!(matches!(&problems[0], PluginProblem::Manifest { detail, .. } if detail.contains("tab title")));
+        }
+    }
+
+    #[test]
+    fn a_stub_with_tabs_is_rejected() {
+        let mut problems = vec![];
+        let text = "api = 1\nname = \"demo\"\nbuiltin = \"demo\"\n[[tabs]]\ntitle = \"T\"\nrun = \"r\"\n";
+        assert!(parse_manifest_with(&dir("demo"), text, &mut problems, TEST_BUILTINS).is_none());
+        assert!(matches!(&problems[0], PluginProblem::Manifest { detail, .. } if detail.contains("only api, name and builtin")));
     }
 }

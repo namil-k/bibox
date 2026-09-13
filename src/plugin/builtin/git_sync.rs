@@ -340,6 +340,7 @@ mod tests {
                 },
                 hook,
             },
+            tab: None,
         }
     }
 
