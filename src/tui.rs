@@ -33,45 +33,15 @@ enum Panel {
     Preview,
 }
 
+/// 탭 렌더 스레드의 답: (요청한 탭 인덱스, 요청 키, 결과).
+type TabRender = (usize, crate::preview_tabs::CacheKey, Result<Final, PluginError>);
+
 #[derive(Clone, Copy, PartialEq)]
 enum PreviewMode {
     Info,
     Note,
-    Pdf,
-}
-
-impl PreviewMode {
-    fn next(self) -> Self {
-        match self {
-            PreviewMode::Info => PreviewMode::Note,
-            PreviewMode::Note => PreviewMode::Pdf,
-            PreviewMode::Pdf => PreviewMode::Info,
-        }
-    }
-
-    fn next_tab(self) -> Option<Self> {
-        match self {
-            PreviewMode::Info => Some(PreviewMode::Note),
-            PreviewMode::Note => Some(PreviewMode::Pdf),
-            PreviewMode::Pdf => None,
-        }
-    }
-
-    fn prev_tab(self) -> Option<Self> {
-        match self {
-            PreviewMode::Info => None,
-            PreviewMode::Note => Some(PreviewMode::Info),
-            PreviewMode::Pdf => Some(PreviewMode::Note),
-        }
-    }
-
-    fn label(&self) -> &'static str {
-        match self {
-            PreviewMode::Info => "Info",
-            PreviewMode::Note => "Note",
-            PreviewMode::Pdf => "PDF",
-        }
-    }
+    /// `host.tabs()`의 인덱스. 플러그인이 제거되면 `reload_plugins`가 Info로 돌린다.
+    Plugin(usize),
 }
 
 enum Mode {
@@ -499,6 +469,10 @@ pub struct App {
     // ── Plugins ──
     host: Arc<PluginHost>,
     plugin_run: Option<PluginRun>,
+    // Plugin preview tab: state, per-entry cache and the in-flight render
+    tab: crate::preview_tabs::TabState,
+    tab_cache: crate::preview_tabs::Cache,
+    bg_tab: Option<Receiver<TabRender>>,
     hooks: crate::hooks::HookRunner,
     bg_hooks: Vec<Receiver<crate::hooks::HookOutcome>>,
 }
@@ -586,6 +560,9 @@ impl App {
             hooks,
             host,
             plugin_run: None,
+            tab: crate::preview_tabs::TabState::new(),
+            tab_cache: Default::default(),
+            bg_tab: None,
             bg_hooks: Vec::new(),
         })
     }
@@ -1199,6 +1176,14 @@ impl App {
         self.host = host;
         self.settings.plugins = plugin_rows();
         self.settings_fix_cursor();
+        // 탭 목록이 바뀌었다. 인덱스가 밀렸을 수 있으니 캐시를 버리고 없어진 탭은 Info로
+        self.tab_cache = Default::default();
+        self.tab.pending = None;
+        if let PreviewMode::Plugin(i) = self.preview_mode {
+            if i >= self.host.tabs().len() {
+                self.preview_mode = PreviewMode::Info;
+            }
+        }
     }
 
     /// 행 목록이 바뀐 뒤(설치·제거, 페이지 닫기) 커서를 선택 가능한 행에 둔다.
@@ -1266,6 +1251,165 @@ impl App {
                 }
             }
         }
+    }
+
+    // ── 미리보기 탭 ──────────────────────────────────────────────────────────
+
+    fn preview_modes(&self) -> Vec<PreviewMode> {
+        let mut v = vec![PreviewMode::Info, PreviewMode::Note];
+        v.extend((0..self.host.tabs().len()).map(PreviewMode::Plugin));
+        v
+    }
+
+    fn preview_label(&self, m: PreviewMode) -> String {
+        match m {
+            PreviewMode::Info => "Info".to_string(),
+            PreviewMode::Note => "Note".to_string(),
+            PreviewMode::Plugin(i) => self.host.tabs().get(i).map(|t| t.title.clone()).unwrap_or_default(),
+        }
+    }
+
+    fn preview_next(&self, wrap: bool) -> Option<PreviewMode> {
+        let modes = self.preview_modes();
+        let i = modes.iter().position(|m| *m == self.preview_mode).unwrap_or(0);
+        if i + 1 < modes.len() { Some(modes[i + 1]) } else if wrap { Some(modes[0]) } else { None }
+    }
+
+    fn preview_prev(&self) -> Option<PreviewMode> {
+        let modes = self.preview_modes();
+        let i = modes.iter().position(|m| *m == self.preview_mode).unwrap_or(0);
+        if i > 0 { Some(modes[i - 1]) } else { None }
+    }
+
+    /// 탭을 바꿀 때 한 자리에서. Note는 노트를 읽고, 다른 플러그인 탭으로 옮기면 캐시를 비운다
+    /// (캐시 키에 플러그인이 없다. 탭 하나·항목 하나만 캐시한다).
+    fn set_preview_mode(&mut self, m: PreviewMode) {
+        if matches!(m, PreviewMode::Plugin(_)) && m != self.preview_mode {
+            self.tab_cache = Default::default();
+            self.tab.pending = None;
+        }
+        self.preview_mode = m;
+        self.preview_scroll = 0;
+        if m == PreviewMode::Note {
+            self.load_note_for_preview();
+        }
+    }
+
+    /// (항목, 쪽, 폭)을 플러그인에 묻는다. 훅처럼 스레드에서, 팝업은 열 수 없다.
+    fn request_tab(&mut self, tab_index: usize, key: crate::preview_tabs::CacheKey, images: bool) {
+        let Some(t) = self.host.tabs().get(tab_index).cloned() else { return };
+        let context = self.plugin_context(&t.plugin);
+        let host = Arc::clone(&self.host);
+        let req = crate::plugin::TabRequest { page: key.page, width_px: key.width_px, images };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let k = key.clone();
+        std::thread::spawn(move || {
+            let result = host.invoke_with(t.cmd, "tab", context, Some(req), &mut crate::plugin::NoUiSink);
+            let _ = tx.send((tab_index, k, result));
+        });
+        self.bg_tab = Some(rx);
+        self.tab.pending = Some(key);
+    }
+
+    /// 응답을 캐시에 넣는다. 이미지는 여기서 읽는다(PNG 디코드).
+    fn finish_tab(&mut self, key: crate::preview_tabs::CacheKey, plugin: &str, result: Result<Final, PluginError>) {
+        use crate::preview_tabs::{parse_response, Content, Source};
+        self.tab.pending = None;
+        // 항목이 바뀐 뒤 도착한 답은 버린다(쪽수도 옛 항목 것)
+        if self.tab.entry_key.as_deref() != Some(key.entry_key.as_str()) {
+            return;
+        }
+        let f = match result {
+            Ok(f) => f,
+            Err(e) => {
+                self.tab.error = Some(format!("{}: {}", plugin, e));
+                return;
+            }
+        };
+        if let Some(e) = f.error {
+            self.tab.error = Some(format!("{}: {}", plugin, e));
+            return;
+        }
+        match parse_response(f.tab) {
+            Err(e) => self.tab.error = Some(format!("{}: {}", plugin, e)),
+            Ok((source, pages)) => {
+                self.tab.set_pages(pages);
+                self.tab.error = None;
+                let content = match source {
+                    Source::Lines(l) => Content::Lines(l),
+                    Source::Image(p) => match image::open(&p) {
+                        Ok(img) => Content::Image(img),
+                        Err(e) => {
+                            self.tab.error = Some(format!("{}: cannot read {}: {}", plugin, p.display(), e));
+                            return;
+                        }
+                    },
+                };
+                self.tab_cache.insert(key, content);
+            }
+        }
+    }
+
+    /// 이미지를 그릴 수 있는가. Task 6이 `self.images.is_some()`으로 바꾼다.
+    fn images_on(&self) -> bool {
+        false
+    }
+
+    /// 칸 하나의 픽셀 크기. 텍스트 모드는 1x1(줄 단위로 센다). Task 6이 Picker에서 읽는다.
+    fn tab_cell(&self) -> (u16, u16) {
+        (1, 1)
+    }
+
+    /// 미리보기 패널 안쪽. 테두리 2칸과 상태 줄 1칸을 뺀다.
+    fn tab_viewport(&self) -> crate::preview_tabs::Viewport {
+        let a = self.panel_areas[2];
+        let (cell_w, cell_h) = self.tab_cell();
+        crate::preview_tabs::Viewport { cols: a.width.saturating_sub(2), rows: a.height.saturating_sub(3), cell_w, cell_h }
+    }
+
+    /// 플러그인에 요청할 폭. 텍스트 모드는 0.
+    fn tab_width_px(&self) -> u32 {
+        if self.images_on() { crate::preview_tabs::width_px(&self.tab_viewport(), self.tab.zoom_pct) } else { 0 }
+    }
+
+    fn tab_key(&self) -> Option<crate::preview_tabs::CacheKey> {
+        let PreviewMode::Plugin(_) = self.preview_mode else { return None };
+        let entry_key = self.tab.entry_key.clone()?;
+        Some(crate::preview_tabs::CacheKey { entry_key, page: self.tab.page, width_px: self.tab_width_px() })
+    }
+
+    /// 현재 쪽 내용의 (세로 크기, 세로 창, 가로 크기, 가로 창). 텍스트는 줄, 이미지는 픽셀. 내용이 아직 없으면 None.
+    fn tab_extents(&self) -> Option<(u32, u32, u32, u32)> {
+        use crate::preview_tabs::Content;
+        let vp = self.tab_viewport();
+        match self.tab_cache.get(&self.tab_key()?)? {
+            Content::Lines(l) => Some((l.len() as u32, vp.rows as u32, 0, 0)),
+            Content::Image(img) => Some((img.height(), vp.view_h(), img.width(), vp.view_w())),
+        }
+    }
+
+    /// 지금 보이는 내용이 이미지인가. 확대·pan은 이때만.
+    fn tab_is_image(&self) -> bool {
+        use crate::preview_tabs::Content;
+        self.images_on() && matches!(self.tab_key().and_then(|k| self.tab_cache.get(&k)), Some(Content::Image(_)))
+    }
+
+    /// j/k 한 번. 텍스트 1줄, 이미지 3칸.
+    fn tab_step(&self) -> u32 {
+        if self.tab_is_image() { 3 * self.tab_cell().1 as u32 } else { 1 }
+    }
+
+    /// 탭을 가진 플러그인의 `max_zoom` 설정. 없으면 400.
+    fn tab_max_zoom(&self) -> u32 {
+        let PreviewMode::Plugin(i) = self.preview_mode else { return 400 };
+        self.host
+            .tabs()
+            .get(i)
+            .and_then(|t| self.config.plugins.get(&t.plugin))
+            .and_then(|t| t.get("max_zoom"))
+            .and_then(|v| v.as_integer())
+            .map(|z| z.clamp(25, 1600) as u32)
+            .unwrap_or(400)
     }
 
     /// 명령 요청의 컨텍스트. 다중 선택이 있으면 그것, 없으면 커서 항목 하나.
@@ -1725,16 +1869,16 @@ fn draw_preview_panel(f: &mut Frame, app: &mut App, area: Rect) {
         Style::default().fg(Color::DarkGray)
     };
 
-    // Tab bar for preview modes
-    let modes = [PreviewMode::Info, PreviewMode::Note, PreviewMode::Pdf];
+    // Tab bar for preview modes. Info and Note are core; the rest come from plugins' [[tabs]]
+    let modes = app.preview_modes();
     let tab_spans: Vec<Span> = modes.iter().map(|m| {
         if *m == app.preview_mode {
             Span::styled(
-                format!(" {} ", m.label()),
+                format!(" {} ", app.preview_label(*m)),
                 Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD),
             )
         } else {
-            Span::styled(format!(" {} ", m.label()), Style::default().fg(Color::DarkGray))
+            Span::styled(format!(" {} ", app.preview_label(*m)), Style::default().fg(Color::DarkGray))
         }
     }).collect();
 
@@ -1763,7 +1907,7 @@ fn draw_preview_panel(f: &mut Frame, app: &mut App, area: Rect) {
     match app.preview_mode {
         PreviewMode::Info => draw_preview_info(f, app, inner),
         PreviewMode::Note => draw_preview_note(f, app, inner),
-        PreviewMode::Pdf => draw_preview_pdf(f, app, inner),
+        PreviewMode::Plugin(i) => draw_preview_plugin(f, app, inner, i),
     }
 }
 
@@ -2022,50 +2166,44 @@ fn render_markdown_to_lines(md: &str) -> Vec<Line<'static>> {
     lines
 }
 
-fn draw_preview_pdf(f: &mut Frame, app: &mut App, area: Rect) {
-    let fp = match app.selected_entry().and_then(|e| e.file_path.clone()) {
-        Some(fp) => fp,
-        None => {
-            let msg = if app.selected_entry().is_some() {
-                "No PDF attached.\nPress o to fetch or open."
-            } else {
-                "No entry selected."
-            };
-            f.render_widget(Paragraph::new(msg).style(Style::default().fg(Color::DarkGray)), area);
-            return;
-        }
+/// 플러그인 탭. 이 태스크는 텍스트 모드만. 이미지 모드는 Task 6이 더한다.
+fn draw_preview_plugin(f: &mut Frame, app: &mut App, area: Rect, tab_index: usize) {
+    use crate::preview_tabs::Content;
+    let entry = app.selected_entry().cloned();
+    let Some(entry) = entry else {
+        f.render_widget(Paragraph::new(app.config.msgs.tab_no_entry()).style(Style::default().fg(Color::DarkGray)), area);
+        return;
     };
-
-    let full_path = app.config.bibox_dir.join(&fp);
-
-    let text = std::process::Command::new("pdftotext")
-        .args(["-l", "1", "-layout", &full_path.to_string_lossy(), "-"])
-        .output()
-        .ok()
-        .and_then(|o| if o.status.success() { String::from_utf8(o.stdout).ok() } else { None });
-
-    match text {
-        Some(content) => {
-            let lines: Vec<Line> = content.lines()
-                .map(|l| Line::from(l.to_string()))
-                .collect();
-            let content_lines = lines.len() as u16;
-            app.preview_max_scroll = content_lines.saturating_sub(1);
-            app.preview_scroll = app.preview_scroll.min(app.preview_max_scroll);
-            let p = Paragraph::new(lines)
-                .scroll((app.preview_scroll, 0))
-                .wrap(ratatui::widgets::Wrap { trim: false });
-            f.render_widget(p, area);
-        }
-        None => {
-            app.preview_max_scroll = 0;
-            f.render_widget(
-                Paragraph::new(format!("PDF: {}\n\nInstall pdftotext for text preview:\n  brew install poppler", fp))
-                    .style(Style::default().fg(Color::DarkGray)),
-                area,
-            );
-        }
+    app.tab.on_entry(Some(&entry.bibtex_key));
+    app.tab_cache.retain_entry(&entry.bibtex_key);
+    if entry.file_path.is_none() {
+        f.render_widget(Paragraph::new(app.config.msgs.tab_no_pdf()).style(Style::default().fg(Color::DarkGray)), area);
+        return;
     }
+    let rows = Layout::default().direction(Direction::Vertical).constraints([Constraint::Min(1), Constraint::Length(1)]).split(area);
+    let body = rows[0];
+    let images = app.images_on();
+    let Some(key) = app.tab_key() else { return };
+    // 오류가 남아 있으면 다시 묻지 않는다(매 프레임 플러그인을 띄우는 루프를 막는다). 쪽·배율을 바꾸면 오류가 지워져 다시 묻는다
+    if app.tab.error.is_none() && app.tab_cache.get(&key).is_none() && app.tab.pending.as_ref() != Some(&key) && app.bg_tab.is_none() {
+        app.request_tab(tab_index, key.clone(), images);
+    }
+    // error를 복제해 두어야 아래 팔에서 app.tab을 고칠 수 있다(match 대상이 빌린 채로 남는다)
+    let error = app.tab.error.clone();
+    let status = match (error, app.tab.pending.is_some(), app.tab_cache.get(&key)) {
+        (Some(e), _, _) => Line::from(Span::styled(e, Style::default().fg(Color::Red))),
+        (None, _, Some(Content::Lines(lines))) => {
+            let view = body.height as u32;
+            app.tab.clamp(lines.len() as u32, view, 0, 0);
+            let p = Paragraph::new(lines.iter().map(|l| Line::from(l.as_str())).collect::<Vec<_>>()).scroll((app.tab.scroll as u16, 0));
+            f.render_widget(p, body);
+            Line::from(Span::styled(format!("page {}/{}  text", app.tab.page, app.tab.pages), Style::default().fg(Color::DarkGray)))
+        }
+        (None, _, Some(Content::Image(_))) => Line::from(""), // Task 6
+        (None, true, None) => Line::from(Span::styled(app.config.msgs.tab_rendering(app.tab.page), Style::default().fg(Color::DarkGray))),
+        (None, false, None) => Line::from(""),
+    };
+    f.render_widget(Paragraph::new(status), rows[1]);
 }
 
 /// 하단 바 문자열. 키는 전부 활성 키맵에서 역조회하므로 리맵하면 바도 따라 바뀐다.
@@ -2847,6 +2985,8 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
         1 => Panel::Entries,
         _ => Panel::Preview,
     };
+    // 탭 줄의 자리는 클릭 당시 그려진 대로(포커스 표시 " ● "가 있었는지) 계산해야 한다
+    let preview_was_focused = app.focus == Panel::Preview;
     app.focus = panel;
 
     // Select the clicked item first (for both left and right click)
@@ -2888,20 +3028,13 @@ fn handle_mouse(app: &mut App, mouse: MouseEvent) {
     // Left-click on preview tab bar
     if !is_right && panel_idx == 2 && row == area.y {
         let rel_x = col.saturating_sub(area.x + 1);
-        let tab_labels = ["Info", "Note", "PDF"];
-        let mut x = if app.focus == Panel::Preview { 3 } else { 1 };
-        for (i, label) in tab_labels.iter().enumerate() {
-            let tab_width = label.len() as u16 + 2;
+        let modes = app.preview_modes();
+        let labels: Vec<String> = modes.iter().map(|m| app.preview_label(*m)).collect();
+        let mut x = if preview_was_focused { 3 } else { 1 };
+        for (i, label) in labels.iter().enumerate() {
+            let tab_width = label.chars().count() as u16 + 2;
             if rel_x >= x && rel_x < x + tab_width {
-                app.preview_mode = match i {
-                    0 => PreviewMode::Info,
-                    1 => PreviewMode::Note,
-                    _ => PreviewMode::Pdf,
-                };
-                app.preview_scroll = 0;
-                if app.preview_mode == PreviewMode::Note {
-                    app.load_note_for_preview();
-                }
+                app.set_preview_mode(modes[i]);
                 return;
             }
             x += tab_width + 3;
@@ -3004,20 +3137,20 @@ fn execute(app: &mut App, action: Action, ctx: ExecCtx) -> Result<Flow> {
         Action::FocusEntries => { app.focus = Panel::Entries; }
         Action::FocusPreview => { app.focus = Panel::Preview; }
         Action::PrevTabOrFocusEntries => {
-            if let Some(prev) = app.preview_mode.prev_tab() {
-                app.preview_mode = prev;
+            if let Some(prev) = app.preview_prev() {
+                app.set_preview_mode(prev);
             } else {
                 app.focus = Panel::Entries;
             }
         }
         Action::NextTab => {
-            if let Some(next) = app.preview_mode.next_tab() {
-                app.preview_mode = next;
+            if let Some(next) = app.preview_next(false) {
+                app.set_preview_mode(next);
             }
         }
         Action::PrevTab => {
-            if let Some(prev) = app.preview_mode.prev_tab() {
-                app.preview_mode = prev;
+            if let Some(prev) = app.preview_prev() {
+                app.set_preview_mode(prev);
             }
         }
 
@@ -3027,13 +3160,21 @@ fn execute(app: &mut App, action: Action, ctx: ExecCtx) -> Result<Flow> {
         Action::EntryDown => { for _ in 0..ctx.count { app.move_entry_down(); } }
         Action::EntryUp => { for _ in 0..ctx.count { app.move_entry_up(); } }
         Action::PreviewScrollDown => {
-            for _ in 0..ctx.count {
-                app.preview_scroll = app.preview_scroll.saturating_add(1).min(app.preview_max_scroll);
+            if let Some((extent, view, _, _)) = app.tab_extents() {
+                for _ in 0..ctx.count { app.tab.scroll_down(app.tab_step(), extent, view); }
+            } else if !matches!(app.preview_mode, PreviewMode::Plugin(_)) {
+                for _ in 0..ctx.count {
+                    app.preview_scroll = app.preview_scroll.saturating_add(1).min(app.preview_max_scroll);
+                }
             }
         }
         Action::PreviewScrollUp => {
-            for _ in 0..ctx.count {
-                app.preview_scroll = app.preview_scroll.saturating_sub(1);
+            if let Some((_, view, _, _)) = app.tab_extents() {
+                for _ in 0..ctx.count { app.tab.scroll_up(app.tab_step(), view); }
+            } else if !matches!(app.preview_mode, PreviewMode::Plugin(_)) {
+                for _ in 0..ctx.count {
+                    app.preview_scroll = app.preview_scroll.saturating_sub(1);
+                }
             }
         }
 
@@ -3047,7 +3188,9 @@ fn execute(app: &mut App, action: Action, ctx: ExecCtx) -> Result<Flow> {
             app.list_state.select(Some(0));
             app.update_preview();
         }
-        Action::PreviewTop => { app.preview_scroll = 0; }
+        Action::PreviewTop => {
+            if matches!(app.preview_mode, PreviewMode::Plugin(_)) { app.tab.first_page(); } else { app.preview_scroll = 0; }
+        }
         Action::CollectionBottom => {
             let last = app.col_count().saturating_sub(1);
             app.col_list_state.select(Some(last));
@@ -3060,7 +3203,9 @@ fn execute(app: &mut App, action: Action, ctx: ExecCtx) -> Result<Flow> {
                 app.update_preview();
             }
         }
-        Action::PreviewBottom => { app.preview_scroll = app.preview_max_scroll; }
+        Action::PreviewBottom => {
+            if matches!(app.preview_mode, PreviewMode::Plugin(_)) { app.tab.last_page(); } else { app.preview_scroll = app.preview_max_scroll; }
+        }
 
         // ── 화면 상대 이동 (엔트리 패널) ──
         Action::EntryScreenTop => {
@@ -3088,9 +3233,19 @@ fn execute(app: &mut App, action: Action, ctx: ExecCtx) -> Result<Flow> {
         Action::EntryHalfPageDown => { for _ in 0..10 { app.move_entry_down(); } }
         Action::EntryHalfPageUp => { for _ in 0..10 { app.move_entry_up(); } }
         Action::PreviewHalfPageDown => {
-            app.preview_scroll = app.preview_scroll.saturating_add(10).min(app.preview_max_scroll);
+            if let Some((extent, view, _, _)) = app.tab_extents() {
+                app.tab.scroll_down(view / 2, extent, view);
+            } else if !matches!(app.preview_mode, PreviewMode::Plugin(_)) {
+                app.preview_scroll = app.preview_scroll.saturating_add(10).min(app.preview_max_scroll);
+            }
         }
-        Action::PreviewHalfPageUp => { app.preview_scroll = app.preview_scroll.saturating_sub(10); }
+        Action::PreviewHalfPageUp => {
+            if let Some((_, view, _, _)) = app.tab_extents() {
+                app.tab.scroll_up(view / 2, view);
+            } else if !matches!(app.preview_mode, PreviewMode::Plugin(_)) {
+                app.preview_scroll = app.preview_scroll.saturating_sub(10);
+            }
+        }
         Action::CollectionHalfPageDown => { for _ in 0..5 { app.move_col_down(); } }
         Action::CollectionHalfPageUp => { for _ in 0..5 { app.move_col_up(); } }
 
@@ -3117,9 +3272,9 @@ fn execute(app: &mut App, action: Action, ctx: ExecCtx) -> Result<Flow> {
         }
 
         Action::NextPreviewTab => {
-            app.preview_mode = app.preview_mode.next();
-            app.preview_scroll = 0;
-            if app.preview_mode == PreviewMode::Note { app.load_note_for_preview(); }
+            if let Some(m) = app.preview_next(true) {
+                app.set_preview_mode(m);
+            }
         }
 
         // 검색은 포커스에 따라 대상이 다르다. 이동이 아니라 한 액션의 문서화된 동작이다.
@@ -3300,8 +3455,34 @@ fn execute(app: &mut App, action: Action, ctx: ExecCtx) -> Result<Flow> {
             app.open_settings(crate::settings::Section::Plugins);
         }
 
-        // 플러그인 탭 액션. Task 4가 채운다
-        Action::TabNextPage | Action::TabPrevPage | Action::TabZoomIn | Action::TabZoomOut | Action::TabZoomReset | Action::TabPanLeft | Action::TabPanRight => {}
+        // ── 플러그인 미리보기 탭 ──
+        Action::TabNextPage => { if matches!(app.preview_mode, PreviewMode::Plugin(_)) { app.tab.next_page(); } }
+        Action::TabPrevPage => { if matches!(app.preview_mode, PreviewMode::Plugin(_)) { app.tab.prev_page(); } }
+        Action::TabZoomIn => {
+            if app.tab_is_image() {
+                let m = app.tab_max_zoom();
+                app.tab.zoom(crate::preview_tabs::ZOOM_STEP as i32, m);
+            }
+        }
+        Action::TabZoomOut => {
+            if app.tab_is_image() {
+                let m = app.tab_max_zoom();
+                app.tab.zoom(-(crate::preview_tabs::ZOOM_STEP as i32), m);
+            }
+        }
+        Action::TabZoomReset => { if app.tab_is_image() { app.tab.zoom_reset(); } }
+        Action::TabPanLeft => {
+            if let (true, Some((_, _, w, vw))) = (app.tab_is_image(), app.tab_extents()) {
+                let step = 8 * app.tab_cell().0 as i32;
+                app.tab.pan(-step, w, vw);
+            }
+        }
+        Action::TabPanRight => {
+            if let (true, Some((_, _, w, vw))) = (app.tab_is_image(), app.tab_extents()) {
+                let step = 8 * app.tab_cell().0 as i32;
+                app.tab.pan(step, w, vw);
+            }
+        }
         Action::Noop => {}
     }
     Ok(Flow::Continue)
@@ -4562,6 +4743,27 @@ fn run_loop(
                     app.bg_install = None;
                     app.settings.notice = Some((app.config.msgs.plugin_install_failed("thread disconnected"), true));
                     app.mode = Mode::Settings;
+                }
+            }
+        }
+
+        // Poll a preview tab render
+        if let Some(ref rx) = app.bg_tab {
+            match rx.try_recv() {
+                Ok((tab_index, key, result)) => {
+                    app.bg_tab = None;
+                    // 다른 탭으로 옮긴 뒤 온 답은 버린다(캐시 키에 플러그인이 없다)
+                    if app.preview_mode != PreviewMode::Plugin(tab_index) {
+                        app.tab.pending = None;
+                    } else {
+                        let plugin = app.host.tabs().get(tab_index).map(|t| t.plugin.clone()).unwrap_or_default();
+                        app.finish_tab(key, &plugin, result);
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    app.bg_tab = None;
+                    app.tab.pending = None;
                 }
             }
         }

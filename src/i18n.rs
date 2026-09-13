@@ -960,6 +960,27 @@ impl Msgs {
         }
     }
 
+    pub fn tab_rendering(&self, page: u32) -> String {
+        match self.lang {
+            Lang::En => format!("rendering page {}...", page),
+            Lang::Ko => format!("{}쪽 만드는 중...", page),
+        }
+    }
+
+    pub fn tab_no_pdf(&self) -> &'static str {
+        match self.lang {
+            Lang::En => "No PDF attached.\nPress o to fetch or open.",
+            Lang::Ko => "PDF가 없습니다.\no로 받거나 엽니다.",
+        }
+    }
+
+    pub fn tab_no_entry(&self) -> &'static str {
+        match self.lang {
+            Lang::En => "No entry selected.",
+            Lang::Ko => "선택된 항목이 없습니다.",
+        }
+    }
+
     pub fn takes_effect_next_start(&self) -> &'static str {
         match self.lang {
             Lang::En => "Saved. Takes effect on next start",
