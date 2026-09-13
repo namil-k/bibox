@@ -1461,9 +1461,11 @@ fn draw(f: &mut Frame, app: &mut App) {
         draw_status_bar(f, app, outer[1]);
     }
 
-    // File picker takes over full screen
+    // File picker takes over full screen. ratatree paints only its own text, so wipe the panels first
+    // or they show through between entries.
     if let Mode::FilePicker(_) = &app.mode {
         if let Some(picker_state) = &mut app.file_picker_state {
+            f.render_widget(Clear, size);
             f.render_stateful_widget(ratatree::FilePicker::default(), size, picker_state);
         }
         return;
@@ -1614,7 +1616,7 @@ fn draw_collections_panel(f: &mut Frame, app: &App, area: Rect) {
         .highlight_style(highlight_style)
         .highlight_symbol(if focused { "▸ " } else { "  " });
 
-    let mut state = app.col_list_state.clone();
+    let mut state = app.col_list_state;
     f.render_stateful_widget(list, area, &mut state);
 }
 
