@@ -169,7 +169,7 @@ impl std::fmt::Display for PluginError {
             PluginError::Spawn(e) => write!(f, "failed to start: {}", e),
             PluginError::Exited(Some(c)) => write!(f, "exited with code {} (see stderr.log in the plugin directory)", c),
             PluginError::Exited(None) => write!(f, "exited (see stderr.log in the plugin directory)"),
-            PluginError::Timeout => write!(f, "no answer in time"),
+            PluginError::Timeout => write!(f, "no answer (the plugin stayed silent too long)"),
             PluginError::Cancelled => write!(f, "cancelled"),
             PluginError::Rpc(e) => write!(f, "{}", e.message),
             PluginError::Protocol(s) => write!(f, "protocol error: {}", s),
@@ -349,21 +349,36 @@ impl PluginHost {
         self.call_raw(slot, method, params, timeout)
     }
 
+    /// 플러그인이 이만큼 아무 말도 없으면 `call_with_ui`가 끊는다. 팝업 요청과 진행 알림도 "말"이다.
+    pub const IDLE_LIMIT: Duration = Duration::from_secs(30);
+
     /// CLI에서: 답을 기다리는 동안 이벤트를 비우며 `window/*` 요청에 sink로 답한다. 다른 요청은 method not found.
-    pub fn call_with_ui(&self, plugin: &str, method: &str, params: Value, sink: &mut dyn UiSink) -> Result<Value, PluginError> {
+    /// `idle` 동안 이 플러그인에게서 아무것도 안 오면 Timeout. 시계는 플러그인이 보낸 것(요청이든 알림이든)이 올 때마다 다시 간다.
+    /// 팝업 안에서 사용자가 오래 고민하는 시간은 안 센다(요청이 온 순간 리셋되고 답은 그 뒤에 나가므로).
+    pub fn call_with_ui_idle(&self, plugin: &str, method: &str, params: Value, sink: &mut dyn UiSink, idle: Duration) -> Result<Value, PluginError> {
         self.ensure_running(plugin)?;
         let slot = self.slot(plugin)?;
         let id = slot.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = channel();
         slot.pending.lock().unwrap_or_else(|p| p.into_inner()).insert(id, tx);
         self.write(slot, &Message::Request { id, method: method.to_string(), params })?;
+        let mut last = std::time::Instant::now();
         loop {
             match rx.recv_timeout(Duration::from_millis(30)) {
                 Ok(r) => return r.map_err(|e| if e.code == EXITED { PluginError::Exited(None) } else { PluginError::Rpc(e) }),
                 Err(RecvTimeoutError::Disconnected) => return Err(PluginError::Exited(None)),
                 Err(RecvTimeoutError::Timeout) => {
                     while let Some(ev) = self.try_recv_event() {
+                        let from_this = matches!(&ev, HostEvent::Incoming { plugin: p, .. } if p == plugin);
                         self.answer_from_sink(ev, sink);
+                        // 답한 뒤에 리셋: 팝업 안에서 사용자가 쓴 시간은 플러그인의 침묵이 아니다
+                        if from_this {
+                            last = std::time::Instant::now();
+                        }
+                    }
+                    if last.elapsed() > idle {
+                        slot.pending.lock().unwrap_or_else(|p| p.into_inner()).remove(&id);
+                        return Err(PluginError::Timeout);
                     }
                 }
             }
@@ -622,11 +637,34 @@ mod tests {
         }
     }
 
+    /// 30초 동안 아무 말도 없으면(답도, 팝업 요청도, 진행 알림도) 끊는다. 팝업에서 사용자가 오래 고민해도 안 끊긴다.
+    #[test]
+    fn a_silent_plugin_times_out_but_a_popup_resets_the_clock() {
+        let host = host_for("ask", "rpc_ask.py", &[]);
+        let t0 = Instant::now();
+        let r = host.call_with_ui_idle("ask", "fields/get", json!({"keys": []}), &mut Picks(vec![]), Duration::from_millis(300));
+        assert!(matches!(r, Err(PluginError::Timeout)), "{:?}", r);
+        assert!(t0.elapsed() < Duration::from_secs(2));
+        assert!(host.is_running("ask"), "a silent plugin is not killed");
+        struct SlowPicks;
+        impl UiSink for SlowPicks {
+            fn ask(&mut self, _plugin: &str, req: UiRequest) -> UiAnswer {
+                std::thread::sleep(Duration::from_millis(600));
+                match req {
+                    UiRequest::Pick { .. } => UiAnswer::Index { index: Some(0) },
+                    other => UiAnswer::cancel_for(&other),
+                }
+            }
+        }
+        let r = host.call_with_ui_idle("ask", "commands/run", json!({"command": "go", "trigger": "key"}), &mut SlowPicks, Duration::from_millis(300)).unwrap();
+        assert_eq!(r["message"], "picked 0", "the user took longer than the idle limit inside the popup");
+    }
+
     /// 명령 중에 플러그인이 보낸 window/pick은 호출자의 UiSink로 답한다(CLI 경로).
     #[test]
     fn a_window_request_during_a_call_is_answered_by_the_sink() {
         let host = host_for("ask", "rpc_ask.py", &[]);
-        let r = host.call_with_ui("ask", "commands/run", json!({"command": "go", "trigger": "key"}), &mut Picks(vec![1])).unwrap();
+        let r = host.call_with_ui_idle("ask", "commands/run", json!({"command": "go", "trigger": "key"}), &mut Picks(vec![1]), PluginHost::IDLE_LIMIT).unwrap();
         assert_eq!(r["message"], "picked 1");
     }
 
@@ -699,7 +737,7 @@ mod tests {
     fn the_python_helper_speaks_v2() {
         let host = host_for("smoke", "helper_smoke.py", &["library/written"]);
         host.update_config_tables(BTreeMap::from([("smoke".to_string(), json!({"model": "m1"}))]));
-        let r = host.call_with_ui("smoke", "commands/run", json!({"command": "go", "trigger": "key"}), &mut Picks(vec![0])).unwrap();
+        let r = host.call_with_ui_idle("smoke", "commands/run", json!({"command": "go", "trigger": "key"}), &mut Picks(vec![0]), PluginHost::IDLE_LIMIT).unwrap();
         assert_eq!(r["message"], "ran go with model m1");
         let ev = wait_event(&host, |e| matches!(e, HostEvent::Incoming { msg: Incoming::Notification { method, .. }, .. } if method == "status/set")).expect("status/set");
         let HostEvent::Incoming { msg: Incoming::Notification { params, .. }, .. } = ev else { unreachable!() };

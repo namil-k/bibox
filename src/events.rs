@@ -53,11 +53,16 @@ impl Events {
         Events { host: Arc::new(host) }
     }
 
-    pub fn adding(&self, mut entry: Entry, ui: &mut dyn UiSink) -> (Entry, Vec<Outcome>) {
+    pub fn adding(&self, entry: Entry, ui: &mut dyn UiSink) -> (Entry, Vec<Outcome>) {
+        self.adding_with_idle(entry, ui, PluginHost::IDLE_LIMIT)
+    }
+
+    /// `idle` 동안 침묵하는 플러그인은 건너뛴다(그 결과가 Err). 앞 플러그인이 고친 항목이 다음 입력.
+    pub fn adding_with_idle(&self, mut entry: Entry, ui: &mut dyn UiSink, idle: std::time::Duration) -> (Entry, Vec<Outcome>) {
         let mut out = Vec::new();
         for plugin in self.host.subscribers("library/adding") {
             let params = serde_json::to_value(AddingParams { entry: entry.clone() }).unwrap_or_default();
-            let result = self.host.call_with_ui(&plugin, "library/adding", params, ui).map_err(|e| e.to_string()).and_then(|v| {
+            let result = self.host.call_with_ui_idle(&plugin, "library/adding", params, ui, idle).map_err(|e| e.to_string()).and_then(|v| {
                 let r: AddingResult = serde_json::from_value(v).map_err(|e| format!("bad library/adding result: {}", e))?;
                 if let Some(e) = r.entry { entry = e; }
                 Ok(())
@@ -147,6 +152,17 @@ mod tests {
         let (e, outcomes) = ev.adding(entry("kim2025"), &mut NoUiSink);
         assert_eq!(e.bibtex_key, "kim2025");
         assert!(outcomes[0].result.is_err());
+    }
+
+    /// 답 안 하는 플러그인은 IDLE_LIMIT 뒤 건너뛰고 원래 항목으로 계속한다(rpc_ask.py는 fields/get처럼 모르는 요청에 답이 없다).
+    #[test]
+    fn adding_skips_a_plugin_that_stays_silent() {
+        let ev = events_for("rpc_ask.py", "library/adding");
+        let t0 = std::time::Instant::now();
+        let (e, outcomes) = ev.adding_with_idle(entry("kim2025"), &mut NoUiSink, std::time::Duration::from_millis(300));
+        assert_eq!(e.bibtex_key, "kim2025");
+        assert!(outcomes[0].result.as_ref().unwrap_err().contains("silent"), "{:?}", outcomes);
+        assert!(t0.elapsed() < std::time::Duration::from_secs(3));
     }
 
     #[test]
