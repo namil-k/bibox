@@ -14,8 +14,10 @@ pub struct Installed {
     pub cli: bool,
     /// (id, 기본 키, 설명)
     pub commands: Vec<(String, Option<String>, String)>,
-    pub hooks: Vec<String>,
-    pub tabs: Vec<String>,
+    pub events: Vec<String>,
+    /// (id, place, desc)
+    pub fields: Vec<(String, String, String)>,
+    pub views: Vec<String>,
     /// (key, 타입, 기본값, 설명)
     pub settings: Vec<(String, String, String, String)>,
     pub guide: Option<String>,
@@ -36,8 +38,9 @@ pub fn from_manifest(m: &Manifest, source: &str) -> Installed {
                 (c.id.clone(), key, c.desc.clone())
             })
             .collect(),
-        hooks: m.hooks.iter().map(|h| format!("{} -> {}", h.on.name(), h.run)).collect(),
-        tabs: m.tabs.iter().map(|t| t.title.clone()).collect(),
+        events: m.events.clone(),
+        fields: m.fields.iter().map(|f| (f.id.clone(), f.place.clone(), f.desc.clone())).collect(),
+        views: m.views.iter().map(|v| v.title.clone()).collect(),
         settings: m
             .settings
             .iter()
@@ -86,11 +89,15 @@ pub fn section(list: &[Installed]) -> String {
                 .collect();
             s.push_str(&format!("Commands: {}\n", cmds.join("; ")));
         }
-        if !p.hooks.is_empty() {
-            s.push_str(&format!("Hooks: {}\n", p.hooks.join(", ")));
+        if !p.fields.is_empty() {
+            let rows: Vec<String> = p.fields.iter().map(|(id, place, desc)| if desc.is_empty() { format!("{} ({})", id, place) } else { format!("{} ({}): {}", id, place, desc) }).collect();
+            s.push_str(&format!("Fields: {}\n", rows.join("; ")));
         }
-        if !p.tabs.is_empty() {
-            s.push_str(&format!("Preview tabs: {}\n", p.tabs.join(", ")));
+        if !p.views.is_empty() {
+            s.push_str(&format!("Preview tabs: {}\n", p.views.join(", ")));
+        }
+        if !p.events.is_empty() {
+            s.push_str(&format!("Events: {}\n", p.events.join(", ")));
         }
         if !p.settings.is_empty() {
             let rows: Vec<String> = p
@@ -125,8 +132,9 @@ pub fn json(list: &[Installed]) -> serde_json::Value {
                     "description": p.description,
                     "cli": if p.cli { serde_json::Value::String(format!("bibox {} <args>", p.name)) } else { serde_json::Value::Null },
                     "commands": p.commands.iter().map(|(id, key, desc)| serde_json::json!({ "id": id, "key": key, "desc": desc })).collect::<Vec<_>>(),
-                    "hooks": p.hooks,
-                    "tabs": p.tabs,
+                    "fields": p.fields.iter().map(|(id, place, desc)| serde_json::json!({"id": id, "place": place, "desc": desc})).collect::<Vec<_>>(),
+                    "views": p.views,
+                    "events": p.events,
                     "settings": p.settings.iter().map(|(k, kind, d, desc)| serde_json::json!({ "key": k, "type": kind, "default": d, "desc": desc })).collect::<Vec<_>>(),
                     "guide": p.guide,
                 })
@@ -147,8 +155,9 @@ mod tests {
             description: "Summarize the attached PDF into the note with Claude".into(),
             cli: true,
             commands: vec![("summarize".into(), Some("S".into()), "Summarize the PDF into the note".into())],
-            hooks: vec!["after_write -> summarize".into()],
-            tabs: vec![],
+            events: vec!["library/written".into()],
+            fields: vec![("count".into(), "row.1".into(), "Times cited".into())],
+            views: vec![],
             settings: vec![("model".into(), "choice of claude-opus-5, claude-sonnet-5".into(), "claude-opus-5".into(), "Claude model".into())],
             guide: Some("Run `bibox summarize <citekey>` to write the Summary section.\n".into()),
         }
@@ -161,7 +170,8 @@ mod tests {
         assert!(s.starts_with("## Installed plugins\n\n### summarize 0.1.0 (dir)\nSummarize the attached PDF into the note with Claude\n"), "{}", s);
         assert!(s.contains("CLI: `bibox summarize <args>`"));
         assert!(s.contains("Commands: summarize (S): Summarize the PDF into the note"));
-        assert!(s.contains("Hooks: after_write -> summarize"));
+        assert!(s.contains("Fields: count (row.1): Times cited"));
+        assert!(s.contains("Events: library/written"));
         assert!(s.contains("Settings under [plugins.summarize] in config.toml: model (choice of claude-opus-5, claude-sonnet-5, default claude-opus-5): Claude model"));
         assert!(s.ends_with("Run `bibox summarize <citekey>` to write the Summary section.\n\n"), "{:?}", &s[s.len() - 80..]);
     }
@@ -195,15 +205,15 @@ mod tests {
 
     /// 매니페스트에서 뽑을 때 키는 keymap 표기(`<C-h>`), 훅은 `on -> run`, choice는 선택지를 나열한다.
     #[test]
-    fn from_manifest_renders_keys_hooks_and_choices() {
-        let text = "api = 1\nname = \"m\"\nrun = \"sh x\"\n[cli]\nrun = \"sh cli\"\n[[commands]]\nid = \"go\"\ndesc = \"Go\"\nkey = \"<C-h>\"\n[[hooks]]\non = \"after_write\"\nrun = \"go\"\n[[tabs]]\ntitle = \"T\"\nrun = \"go\"\n[[settings]]\nkey = \"model\"\ntype = \"choice\"\nchoices = [\"a\", \"b\"]\ndefault = \"a\"\ndesc = \"Which\"\n[[settings]]\nkey = \"n\"\ntype = \"int\"\ndefault = 4\n";
+    fn from_manifest_renders_keys_events_views_and_choices() {
+        let text = "api = 2\nname = \"m\"\nrun = \"sh x\"\n[cli]\nrun = \"sh cli\"\n[[commands]]\nid = \"go\"\ndesc = \"Go\"\nkey = \"<C-h>\"\n[events]\nsubscribe = [\"library/written\"]\n[[views]]\ntitle = \"T\"\nrun = \"go\"\n[[settings]]\nkey = \"model\"\ntype = \"choice\"\nchoices = [\"a\", \"b\"]\ndefault = \"a\"\ndesc = \"Which\"\n[[settings]]\nkey = \"n\"\ntype = \"int\"\ndefault = 4\n";
         let mut problems = vec![];
         let m = super::super::manifest::parse_manifest(std::path::Path::new("/tmp/plugins/m"), text, &mut problems).unwrap();
         let i = from_manifest(&m, "dir");
         assert!(i.cli);
         assert_eq!(i.commands, vec![("go".to_string(), Some("<C-h>".to_string()), "Go".to_string())]);
-        assert_eq!(i.hooks, vec!["after_write -> go"]);
-        assert_eq!(i.tabs, vec!["T"]);
+        assert_eq!(i.events, vec!["library/written"]);
+        assert_eq!(i.views, vec!["T"]);
         assert_eq!(i.settings[0], ("model".to_string(), "choice of a, b".to_string(), "a".to_string(), "Which".to_string()));
         assert_eq!(i.settings[1], ("n".to_string(), "int".to_string(), "4".to_string(), String::new()));
     }

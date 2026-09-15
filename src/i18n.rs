@@ -875,8 +875,6 @@ impl Msgs {
             (Lang::Ko, BadKey { plugin, command, token }) => format!("  {}.{}: 알 수 없는 키 표기 \"{}\". 기본 키를 버렸습니다", plugin, command, token),
             (Lang::En, UnknownLayer { plugin, command, layer }) => format!("  {}.{}: unknown layer \"{}\" ignored", plugin, command, layer),
             (Lang::Ko, UnknownLayer { plugin, command, layer }) => format!("  {}.{}: 알 수 없는 레이어 \"{}\"를 무시했습니다", plugin, command, layer),
-            (Lang::En, BadHook { plugin, detail }) => format!("  {}: {} (hook ignored)", plugin, detail),
-            (Lang::Ko, BadHook { plugin, detail }) => format!("  {}: {} (훅을 무시했습니다)", plugin, detail),
             (Lang::En, NoManifest { dir }) => format!("  {}: no plugin.toml in this directory", dir),
             (Lang::Ko, NoManifest { dir }) => format!("  {}: 이 디렉토리에 plugin.toml이 없습니다", dir),
             (Lang::En, DanglingLink { name, target }) => format!("  {}: links to {} which no longer exists; bibox plugin remove {} drops the link", name, target, name),

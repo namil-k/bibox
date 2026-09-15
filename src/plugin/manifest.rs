@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use crate::keymap::{parse_key, KeyPress, LayerId};
 
 /// bibox가 이해하는 프로토콜 버전. 매니페스트의 `api`가 이 값이 아니면 로드하지 않는다.
-pub const SUPPORTED_API: u32 = 1;
+pub const SUPPORTED_API: u32 = 2;
 
 // ── 파일 모양 (serde) ─────────────────────────────────────────────────────────
 
@@ -25,14 +25,7 @@ struct CommandFile {
     #[serde(default)]
     layers: Option<Vec<String>>,
     #[serde(default)]
-    menu: bool,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct HookFile {
-    on: String,
-    run: String,
+    menus: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -70,53 +63,83 @@ struct ManifestFile {
     #[serde(default)]
     commands: Vec<CommandFile>,
     #[serde(default)]
-    hooks: Vec<HookFile>,
+    activation: Option<String>,
+    #[serde(default)]
+    fields: Vec<FieldFile>,
+    #[serde(default)]
+    views: Vec<ViewFile>,
+    #[serde(default)]
+    events: Option<EventsFile>,
     #[serde(default)]
     cli: Option<CliFile>,
     #[serde(default)]
     settings: Vec<SettingFile>,
-    #[serde(default)]
-    tabs: Vec<TabFile>,
     /// 에이전트용 사용 설명 파일(Markdown), 플러그인 디렉토리 기준 상대 경로. `bibox agent-guide`가 싣는다.
     #[serde(default)]
     guide: Option<String>,
 }
 
-/// `[[tabs]]`. 미리보기 패널의 탭 하나: 제목과 그 내용을 만드는 명령.
+/// `[[views]]`. 미리보기 패널의 탭 하나: 제목과 그 내용을 만드는 명령.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct TabFile {
+struct ViewFile {
     title: String,
     run: String,
 }
 
+/// `[[fields]]`. 항목 행이나 상태 바에 놓이는 값 자리. 문자열 그대로 두고 해석은 fields.rs가 한다.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FieldFile {
+    id: String,
+    place: String,
+    #[serde(default = "default_align")]
+    align: String,
+    #[serde(default = "default_width")]
+    width: u16,
+    #[serde(default)]
+    color: Option<String>,
+    #[serde(default)]
+    desc: String,
+}
+fn default_align() -> String { "right".to_string() }
+fn default_width() -> u16 { 8 }
+
+/// `[events]`. 구독할 이벤트 이름.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EventsFile {
+    #[serde(default)]
+    subscribe: Vec<String>,
+}
+
 // ── 검증된 모양 ───────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum HookKind {
-    BeforeAdd,
-    AfterWrite,
-    AfterNoteSave,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Activation { Lazy, Startup }
+
+/// 필드 선언. 문자열 그대로 둔다. 해석(`Place`, `Align`)은 fields.rs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FieldSpec {
+    pub id: String,
+    pub place: String,
+    pub align: String,
+    pub width: u16,
+    pub color: Option<String>,
+    pub desc: String,
 }
 
-impl HookKind {
-    pub fn parse(s: &str) -> Option<HookKind> {
-        match s {
-            "before_add" => Some(HookKind::BeforeAdd),
-            "after_write" => Some(HookKind::AfterWrite),
-            "after_note_save" => Some(HookKind::AfterNoteSave),
-            _ => None,
-        }
-    }
-
-    pub fn name(&self) -> &'static str {
-        match self {
-            HookKind::BeforeAdd => "before_add",
-            HookKind::AfterWrite => "after_write",
-            HookKind::AfterNoteSave => "after_note_save",
-        }
-    }
+/// 미리보기 탭. `run`은 이 플러그인의 command id. 호스트가 `views/render`로 부른다.
+#[derive(Debug, Clone, PartialEq)]
+pub struct View {
+    pub title: String,
+    pub run: String,
 }
+
+pub const EVENTS: [&str; 5] = ["lifecycle/started", "entry/selected", "library/adding", "library/written", "note/saved"];
+pub const PLACES: [&str; 4] = ["row.1", "row.2", "row.3", "status"];
+pub const ALIGNS: [&str; 5] = ["right", "left", "after:key", "after:pdf", "after:year"];
+pub const MENUS: [&str; 1] = ["context"];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Command {
@@ -124,7 +147,7 @@ pub struct Command {
     pub desc: String,
     pub key: Option<Vec<KeyPress>>,
     pub layers: Vec<LayerId>,
-    pub menu: bool,
+    pub menus: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -166,33 +189,22 @@ pub struct SettingDecl {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Hook {
-    pub on: HookKind,
-    pub run: String,
-}
-
-#[derive(Debug, Clone, PartialEq)]
 pub struct Manifest {
     pub name: String,
     pub version: Option<String>,
     pub description: Option<String>,
     pub run: Vec<String>,
     pub commands: Vec<Command>,
-    pub hooks: Vec<Hook>,
+    pub activation: Activation,
+    pub fields: Vec<FieldSpec>,
+    pub views: Vec<View>,
+    pub events: Vec<String>,
     pub cli: Option<Vec<String>>,
     pub settings: Vec<SettingDecl>,
-    pub tabs: Vec<Tab>,
     pub builtin: Option<String>,
     pub dir: PathBuf,
     /// 에이전트용 사용 설명 본문. 외부 플러그인은 `guide` 파일을 파싱 때 읽고, 내장은 코드에 갖는다.
     pub guide: Option<String>,
-}
-
-/// 미리보기 탭. `run`은 이 플러그인의 command id. 호스트가 `trigger = "tab"`으로 부른다.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Tab {
-    pub title: String,
-    pub run: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -204,7 +216,6 @@ pub enum PluginProblem {
     /// `layers`의 모르는 값. 그 값만 버린다.
     UnknownLayer { plugin: String, command: String, layer: String },
     /// 모르는 이벤트 또는 없는 command id. 그 훅만 버린다.
-    BadHook { plugin: String, detail: String },
     /// doctor 전용. `plugins/` 아래 디렉토리에 `plugin.toml`이 없다.
     NoManifest { dir: String },
     /// doctor 전용. `plugins/<name>`이 심링크인데 대상이 없다(`plugin install ./path` 뒤 그 디렉토리를 지운 경우).
@@ -240,7 +251,6 @@ impl PluginProblem {
             PluginProblem::Manifest { plugin, .. }
             | PluginProblem::BadKey { plugin, .. }
             | PluginProblem::UnknownLayer { plugin, .. }
-            | PluginProblem::BadHook { plugin, .. }
             | PluginProblem::ExecutableMissing { plugin, .. }
             | PluginProblem::ToolMissing { plugin, .. }
             | PluginProblem::NameCollidesWithSubcommand { plugin }
@@ -298,7 +308,18 @@ pub fn parse_manifest_with(
     let file: ManifestFile = match toml::from_str(text) {
         Ok(f) => f,
         Err(e) => {
-            problems.push(err(e.to_string()));
+            // 옛 키는 새 이름을 알려주는 오류다. 우리 셋뿐이므로 이식하지 호환하지 않는다
+            let msg = e.to_string();
+            let detail = if msg.contains("unknown field `hooks`") {
+                "[[hooks]] is api 1; declare [events] subscribe = [...] instead".to_string()
+            } else if msg.contains("unknown field `tabs`") {
+                "[[tabs]] is api 1; declare [[views]] instead".to_string()
+            } else if msg.contains("unknown field `menu`") {
+                "menu = true is api 1; declare menus = [\"context\"] instead".to_string()
+            } else {
+                msg
+            };
+            problems.push(err(detail));
             return None;
         }
     };
@@ -328,13 +349,13 @@ fn expand_stub(
     let plugin = dir_name(dir);
     let err = |detail: String| PluginProblem::Manifest { plugin: plugin.clone(), detail };
 
-    let extra = file.version.is_some() || file.description.is_some() || !file.commands.is_empty() || !file.hooks.is_empty() || file.cli.is_some() || !file.settings.is_empty() || !file.tabs.is_empty();
+    let extra = file.version.is_some() || file.description.is_some() || !file.commands.is_empty() || file.events.is_some() || file.cli.is_some() || !file.settings.is_empty() || !file.views.is_empty() || !file.fields.is_empty() || file.activation.is_some();
     if extra {
         problems.push(err("a built-in stub carries only api, name and builtin".to_string()));
         return None;
     }
     if file.api != SUPPORTED_API {
-        problems.push(err(format!("bibox supports api {}, plugin declares {}", SUPPORTED_API, file.api)));
+        problems.push(err(format!("bibox needs api {}, plugin declares {}", SUPPORTED_API, file.api)));
         return None;
     }
     if builtin != file.name {
@@ -379,7 +400,7 @@ fn build(dir: &Path, file: ManifestFile, run_override: Option<Vec<String>>, prob
 
     let mut fatal = false;
     if file.api != SUPPORTED_API {
-        problems.push(err(format!("bibox supports api {}, plugin declares {}", SUPPORTED_API, file.api)));
+        problems.push(err(format!("bibox needs api {}, plugin declares {}", SUPPORTED_API, file.api)));
         fatal = true;
     }
     if file.name != plugin {
@@ -470,26 +491,71 @@ fn build(dir: &Path, file: ManifestFile, run_override: Option<Vec<String>>, prob
                 }
             }
         };
-        commands.push(Command { id: cf.id.clone(), desc: cf.desc.clone(), key, layers, menu: cf.menu });
+        commands.push(Command { id: cf.id.clone(), desc: cf.desc.clone(), key, layers, menus: cf.menus.clone() });
     }
 
-    let mut hooks = Vec::new();
-    for hf in &file.hooks {
-        let Some(on) = HookKind::parse(&hf.on) else {
-            problems.push(PluginProblem::BadHook {
-                plugin: plugin.clone(),
-                detail: format!("unknown hook \"{}\"", hf.on),
-            });
-            continue;
-        };
-        if !commands.iter().any(|c| c.id == hf.run) {
-            problems.push(PluginProblem::BadHook {
-                plugin: plugin.clone(),
-                detail: format!("hook {} refers to unknown command \"{}\"", hf.on, hf.run),
-            });
+    let activation = match file.activation.as_deref() {
+        None | Some("lazy") => Activation::Lazy,
+        Some("startup") => Activation::Startup,
+        Some(other) => {
+            problems.push(err(format!("activation \"{}\" must be lazy or startup", other)));
+            fatal = true;
+            Activation::Lazy
+        }
+    };
+    for c in &file.commands {
+        for m in &c.menus {
+            if !MENUS.contains(&m.as_str()) {
+                problems.push(err(format!("command \"{}\": menu \"{}\" must be one of {}", c.id, m, MENUS.join(", "))));
+                fatal = true;
+            }
+        }
+    }
+    let mut fields: Vec<FieldSpec> = Vec::new();
+    for f in &file.fields {
+        if fields.iter().any(|x| x.id == f.id) {
+            problems.push(err(format!("duplicate field id \"{}\"", f.id)));
+            fatal = true;
             continue;
         }
-        hooks.push(Hook { on, run: hf.run.clone() });
+        if !PLACES.contains(&f.place.as_str()) {
+            problems.push(err(format!("field \"{}\": place \"{}\" must be one of {}", f.id, f.place, PLACES.join(", "))));
+            fatal = true;
+            continue;
+        }
+        if !ALIGNS.contains(&f.align.as_str()) {
+            problems.push(err(format!("field \"{}\": align \"{}\" must be one of {}", f.id, f.align, ALIGNS.join(", "))));
+            fatal = true;
+            continue;
+        }
+        fields.push(FieldSpec { id: f.id.clone(), place: f.place.clone(), align: f.align.clone(), width: f.width.max(1), color: f.color.clone(), desc: f.desc.clone() });
+    }
+    // 뷰 제목은 탭 줄에 그대로 놓이므로 짧게. 명령은 위에서 검증된 것 중 하나여야 한다.
+    let mut views: Vec<View> = Vec::new();
+    for v in &file.views {
+        let n = v.title.chars().count();
+        if n == 0 || n > 12 {
+            problems.push(err(format!("view \"{}\": title must be 1 to 12 characters", v.title)));
+            fatal = true;
+            continue;
+        }
+        if !commands.iter().any(|c| c.id == v.run) {
+            problems.push(err(format!("view \"{}\" runs unknown command \"{}\"", v.title, v.run)));
+            fatal = true;
+            continue;
+        }
+        views.push(View { title: v.title.clone(), run: v.run.clone() });
+    }
+    let mut events: Vec<String> = Vec::new();
+    for e in file.events.as_ref().map(|e| e.subscribe.clone()).unwrap_or_default() {
+        if !EVENTS.contains(&e.as_str()) {
+            problems.push(err(format!("event \"{}\" must be one of {}", e, EVENTS.join(", "))));
+            fatal = true;
+            continue;
+        }
+        if !events.contains(&e) {
+            events.push(e);
+        }
     }
 
     let mut settings: Vec<SettingDecl> = Vec::new();
@@ -533,23 +599,6 @@ fn build(dir: &Path, file: ManifestFile, run_override: Option<Vec<String>>, prob
         settings.push(SettingDecl { key: sf.key.clone(), kind, default: sf.default.clone(), desc: sf.desc.clone() });
     }
 
-    // 탭 제목은 탭 줄에 그대로 놓이므로 짧게. 명령은 위에서 검증된 것 중 하나여야 한다.
-    let mut tabs: Vec<Tab> = Vec::new();
-    for tf in &file.tabs {
-        let n = tf.title.chars().count();
-        if n == 0 || n > 12 {
-            problems.push(err(format!("tab title \"{}\" must be 1 to 12 characters", tf.title)));
-            fatal = true;
-            continue;
-        }
-        if !commands.iter().any(|c| c.id == tf.run) {
-            problems.push(err(format!("tab \"{}\" refers to unknown command \"{}\"", tf.title, tf.run)));
-            fatal = true;
-            continue;
-        }
-        tabs.push(Tab { title: tf.title.clone(), run: tf.run.clone() });
-    }
-
     if fatal {
         return None;
     }
@@ -580,10 +629,12 @@ fn build(dir: &Path, file: ManifestFile, run_override: Option<Vec<String>>, prob
         description: file.description,
         run,
         commands,
-        hooks,
+        activation,
+        fields,
+        views,
+        events,
         cli,
         settings,
-        tabs,
         builtin: None,
         dir: dir.to_path_buf(),
         guide,
@@ -597,26 +648,39 @@ mod tests {
     use std::path::PathBuf;
 
     const OK: &str = r#"
-api = 1
+api = 2
 name = "entry-tidy"
 version = "0.1.0"
-description = "Normalize entries"
+description = "Tidy entries"
 run = "python3 main.py"
+activation = "startup"
 
 [[commands]]
 id = "tidy"
-desc = "Normalize the current entry"
+desc = "Tidy the selected entries"
 key = "="
 layers = ["entries", "preview"]
-menu = true
+menus = ["context"]
 
-[[hooks]]
-on = "before_add"
+[[fields]]
+id = "count"
+place = "row.1"
+align = "right"
+width = 8
+color = "yellow"
+desc = "Times cited"
+
+[[views]]
+title = "Refs"
 run = "tidy"
+
+[events]
+subscribe = ["library/written", "entry/selected"]
 
 [cli]
 run = "python3 cli.py"
 "#;
+
 
     fn dir(name: &str) -> PathBuf {
         PathBuf::from("/tmp/plugins").join(name)
@@ -627,33 +691,77 @@ run = "python3 cli.py"
         let mut problems = vec![];
         let m = parse_manifest(&dir("entry-tidy"), OK, &mut problems).expect("manifest");
         assert!(problems.is_empty(), "{:?}", problems);
-        assert_eq!(m.name, "entry-tidy");
-        assert_eq!(m.version.as_deref(), Some("0.1.0"));
-        assert_eq!(m.run, vec!["python3", "main.py"]);
-        assert_eq!(m.commands.len(), 1);
+        assert_eq!(m.activation, Activation::Startup);
         let c = &m.commands[0];
         assert_eq!(c.id, "tidy");
         assert_eq!(c.key, Some(vec![KeyPress::new(KeyCode::Char('='), KeyModifiers::NONE)]));
         assert_eq!(c.layers, vec![LayerId::Entries, LayerId::Preview]);
-        assert!(c.menu);
-        assert_eq!(m.hooks, vec![Hook { on: HookKind::BeforeAdd, run: "tidy".into() }]);
+        assert_eq!(c.menus, vec!["context"]);
+        assert_eq!(m.fields.len(), 1);
+        assert_eq!((m.fields[0].id.as_str(), m.fields[0].place.as_str(), m.fields[0].align.as_str(), m.fields[0].width), ("count", "row.1", "right", 8));
+        assert_eq!(m.fields[0].color.as_deref(), Some("yellow"));
+        assert_eq!(m.views, vec![View { title: "Refs".into(), run: "tidy".into() }]);
+        assert_eq!(m.events, vec!["library/written", "entry/selected"]);
         assert_eq!(m.cli, Some(vec!["python3".to_string(), "cli.py".to_string()]));
-        assert_eq!(m.dir, dir("entry-tidy"));
     }
 
+
     #[test]
-    fn layers_default_to_all_three_and_menu_defaults_to_false() {
-        let text = "api = 1\nname = \"x\"\nrun = \"sh run.sh\"\n[[commands]]\nid = \"a\"\ndesc = \"A\"\n";
+    fn layers_default_to_all_three() {
+        let text = "api = 2\nname = \"x\"\nrun = \"sh run.sh\"\n[[commands]]\nid = \"a\"\ndesc = \"A\"\n";
         let mut problems = vec![];
         let m = parse_manifest(&dir("x"), text, &mut problems).unwrap();
         assert_eq!(m.commands[0].layers, vec![LayerId::Collections, LayerId::Entries, LayerId::Preview]);
-        assert!(!m.commands[0].menu);
         assert_eq!(m.commands[0].key, None);
     }
 
     #[test]
+    fn activation_and_menus_default_to_lazy_and_none() {
+        let mut problems = vec![];
+        let m = parse_manifest(&dir("m"), "api = 2\nname = \"m\"\nrun = \"sh x\"\n[[commands]]\nid = \"go\"\ndesc = \"Go\"\n", &mut problems).unwrap();
+        assert_eq!(m.activation, Activation::Lazy);
+        assert!(m.commands[0].menus.is_empty());
+        assert!(m.fields.is_empty() && m.views.is_empty() && m.events.is_empty());
+    }
+
+    /// 옛 이름은 새 이름을 알려주는 오류다. 우리 셋뿐이므로 이식하지 호환하지 않는다.
+    #[test]
+    fn api_1_and_the_old_keys_are_errors_that_name_the_new_ones() {
+        let mut problems = vec![];
+        assert!(parse_manifest(&dir("m"), "api = 2\nname = \"m\"\nrun = \"sh x\"\n", &mut problems).is_none());
+        assert!(matches!(&problems[0], PluginProblem::Manifest { detail, .. } if detail.contains("api 2")), "{:?}", problems);
+        for (old, hint) in [("[[hooks]]\non = \"after_write\"\nrun = \"go\"\n", "[events]"), ("[[tabs]]\ntitle = \"T\"\nrun = \"go\"\n", "[[views]]"), ("[[commands]]\nid = \"go\"\ndesc = \"G\"\nmenu = true\n", "menus")] {
+            let mut problems = vec![];
+            let text = format!("api = 2\nname = \"m\"\nrun = \"sh x\"\n{}", old);
+            parse_manifest(&dir("m"), &text, &mut problems);
+            assert!(problems.iter().any(|p| matches!(p, PluginProblem::Manifest { detail, .. } if detail.contains(hint))), "{}: {:?}", hint, problems);
+        }
+    }
+
+    #[test]
+    fn fields_views_and_events_are_validated() {
+        let bad = |extra: &str| {
+            let mut problems = vec![];
+            parse_manifest(&dir("m"), &format!("api = 2\nname = \"m\"\nrun = \"sh x\"\n[[commands]]\nid = \"go\"\ndesc = \"G\"\n{}", extra), &mut problems);
+            problems
+        };
+        let p = bad("[[fields]]\nid = \"a\"\nplace = \"row.9\"\n");
+        assert!(p.iter().any(|x| matches!(x, PluginProblem::Manifest { detail, .. } if detail.contains("place"))), "{:?}", p);
+        let p = bad("[[fields]]\nid = \"a\"\nplace = \"row.1\"\nalign = \"middle\"\n");
+        assert!(p.iter().any(|x| matches!(x, PluginProblem::Manifest { detail, .. } if detail.contains("align"))), "{:?}", p);
+        let p = bad("[[fields]]\nid = \"a\"\nplace = \"row.1\"\n[[fields]]\nid = \"a\"\nplace = \"row.2\"\n");
+        assert!(p.iter().any(|x| matches!(x, PluginProblem::Manifest { detail, .. } if detail.contains("duplicate field"))), "{:?}", p);
+        let p = bad("[[views]]\ntitle = \"T\"\nrun = \"nope\"\n");
+        assert!(p.iter().any(|x| matches!(x, PluginProblem::Manifest { detail, .. } if detail.contains("nope"))), "{:?}", p);
+        let p = bad("[events]\nsubscribe = [\"library/exploded\"]\n");
+        assert!(p.iter().any(|x| matches!(x, PluginProblem::Manifest { detail, .. } if detail.contains("library/exploded"))), "{:?}", p);
+        let p = bad("[[commands]]\nid = \"b\"\ndesc = \"B\"\nmenus = [\"toolbar\"]\n");
+        assert!(p.iter().any(|x| matches!(x, PluginProblem::Manifest { detail, .. } if detail.contains("toolbar"))), "{:?}", p);
+    }
+
+    #[test]
     fn a_key_sequence_is_accepted_as_a_list() {
-        let text = "api = 1\nname = \"x\"\nrun = \"sh run.sh\"\n[[commands]]\nid = \"a\"\ndesc = \"A\"\nkey = [\"g\", \"t\"]\n";
+        let text = "api = 2\nname = \"x\"\nrun = \"sh run.sh\"\n[[commands]]\nid = \"a\"\ndesc = \"A\"\nkey = [\"g\", \"t\"]\n";
         let mut problems = vec![];
         let m = parse_manifest(&dir("x"), text, &mut problems).unwrap();
         assert_eq!(m.commands[0].key.as_ref().unwrap().len(), 2);
@@ -661,7 +769,7 @@ run = "python3 cli.py"
 
     #[test]
     fn a_missing_required_field_is_a_manifest_error_and_yields_nothing() {
-        let text = "api = 1\nname = \"x\"\n"; // run 누락
+        let text = "api = 2\nname = \"x\"\n"; // run 누락
         let mut problems = vec![];
         assert!(parse_manifest(&dir("x"), text, &mut problems).is_none());
         assert_eq!(problems.len(), 1);
@@ -671,7 +779,7 @@ run = "python3 cli.py"
 
     #[test]
     fn an_unknown_field_is_a_manifest_error() {
-        let text = "api = 1\nname = \"x\"\nrun = \"sh\"\ncolour = \"red\"\n";
+        let text = "api = 2\nname = \"x\"\nrun = \"sh\"\ncolour = \"red\"\n";
         let mut problems = vec![];
         assert!(parse_manifest(&dir("x"), text, &mut problems).is_none());
         assert!(matches!(&problems[0], PluginProblem::Manifest { detail, .. } if detail.contains("colour")));
@@ -679,38 +787,38 @@ run = "python3 cli.py"
 
     #[test]
     fn an_unsupported_api_version_is_rejected() {
-        let text = "api = 2\nname = \"x\"\nrun = \"sh\"\n";
+        let text = "api = 3\nname = \"x\"\nrun = \"sh\"\n";
         let mut problems = vec![];
         assert!(parse_manifest(&dir("x"), text, &mut problems).is_none());
-        assert!(matches!(&problems[0], PluginProblem::Manifest { detail, .. } if detail.contains("api 1") && detail.contains("2")));
+        assert!(matches!(&problems[0], PluginProblem::Manifest { detail, .. } if detail.contains("api 2") && detail.contains("3")));
     }
 
     #[test]
     fn name_must_match_the_directory_and_the_charset() {
         let mut problems = vec![];
-        assert!(parse_manifest(&dir("other"), "api = 1\nname = \"x\"\nrun = \"sh\"\n", &mut problems).is_none());
+        assert!(parse_manifest(&dir("other"), "api = 2\nname = \"x\"\nrun = \"sh\"\n", &mut problems).is_none());
         assert!(matches!(&problems[0], PluginProblem::Manifest { detail, .. } if detail.contains("directory")));
 
         let mut problems = vec![];
-        assert!(parse_manifest(&dir("Bad_Name"), "api = 1\nname = \"Bad_Name\"\nrun = \"sh\"\n", &mut problems).is_none());
+        assert!(parse_manifest(&dir("Bad_Name"), "api = 2\nname = \"Bad_Name\"\nrun = \"sh\"\n", &mut problems).is_none());
         assert!(matches!(&problems[0], PluginProblem::Manifest { detail, .. } if detail.contains("a-z")));
     }
 
     #[test]
     fn an_empty_run_is_an_error() {
         let mut problems = vec![];
-        assert!(parse_manifest(&dir("x"), "api = 1\nname = \"x\"\nrun = \"   \"\n", &mut problems).is_none());
+        assert!(parse_manifest(&dir("x"), "api = 2\nname = \"x\"\nrun = \"   \"\n", &mut problems).is_none());
         assert!(matches!(&problems[0], PluginProblem::Manifest { detail, .. } if detail.contains("run")));
     }
 
     #[test]
     fn duplicate_or_malformed_command_ids_are_errors() {
-        let dup = "api = 1\nname = \"x\"\nrun = \"sh\"\n[[commands]]\nid = \"a\"\ndesc = \"A\"\n[[commands]]\nid = \"a\"\ndesc = \"B\"\n";
+        let dup = "api = 2\nname = \"x\"\nrun = \"sh\"\n[[commands]]\nid = \"a\"\ndesc = \"A\"\n[[commands]]\nid = \"a\"\ndesc = \"B\"\n";
         let mut problems = vec![];
         assert!(parse_manifest(&dir("x"), dup, &mut problems).is_none());
         assert!(matches!(&problems[0], PluginProblem::Manifest { detail, .. } if detail.contains("duplicate")));
 
-        let bad = "api = 1\nname = \"x\"\nrun = \"sh\"\n[[commands]]\nid = \"Tidy-Up\"\ndesc = \"A\"\n";
+        let bad = "api = 2\nname = \"x\"\nrun = \"sh\"\n[[commands]]\nid = \"Tidy-Up\"\ndesc = \"A\"\n";
         let mut problems = vec![];
         assert!(parse_manifest(&dir("x"), bad, &mut problems).is_none());
         assert!(matches!(&problems[0], PluginProblem::Manifest { detail, .. } if detail.contains("a-z0-9_")));
@@ -718,7 +826,7 @@ run = "python3 cli.py"
 
     #[test]
     fn a_bad_key_is_a_warning_and_only_drops_the_key() {
-        let text = "api = 1\nname = \"x\"\nrun = \"sh\"\n[[commands]]\nid = \"a\"\ndesc = \"A\"\nkey = \"<Bogus>\"\n";
+        let text = "api = 2\nname = \"x\"\nrun = \"sh\"\n[[commands]]\nid = \"a\"\ndesc = \"A\"\nkey = \"<Bogus>\"\n";
         let mut problems = vec![];
         let m = parse_manifest(&dir("x"), text, &mut problems).unwrap();
         assert_eq!(m.commands[0].key, None);
@@ -728,29 +836,11 @@ run = "python3 cli.py"
 
     #[test]
     fn an_unknown_layer_is_a_warning_and_the_rest_survive() {
-        let text = "api = 1\nname = \"x\"\nrun = \"sh\"\n[[commands]]\nid = \"a\"\ndesc = \"A\"\nlayers = [\"entries\", \"sidebar\"]\n";
+        let text = "api = 2\nname = \"x\"\nrun = \"sh\"\n[[commands]]\nid = \"a\"\ndesc = \"A\"\nlayers = [\"entries\", \"sidebar\"]\n";
         let mut problems = vec![];
         let m = parse_manifest(&dir("x"), text, &mut problems).unwrap();
         assert_eq!(m.commands[0].layers, vec![LayerId::Entries]);
         assert!(matches!(&problems[0], PluginProblem::UnknownLayer { layer, .. } if layer == "sidebar"));
-    }
-
-    #[test]
-    fn a_hook_with_an_unknown_event_or_command_is_a_warning() {
-        let text = "api = 1\nname = \"x\"\nrun = \"sh\"\n[[commands]]\nid = \"a\"\ndesc = \"A\"\n[[hooks]]\non = \"on_boot\"\nrun = \"a\"\n[[hooks]]\non = \"after_write\"\nrun = \"zzz\"\n";
-        let mut problems = vec![];
-        let m = parse_manifest(&dir("x"), text, &mut problems).unwrap();
-        assert!(m.hooks.is_empty());
-        assert_eq!(problems.len(), 2);
-        assert!(problems.iter().all(|p| matches!(p, PluginProblem::BadHook { .. })));
-    }
-
-    #[test]
-    fn hook_kind_round_trips_its_three_names() {
-        for name in ["before_add", "after_write", "after_note_save"] {
-            assert_eq!(HookKind::parse(name).unwrap().name(), name);
-        }
-        assert_eq!(HookKind::parse("after_add"), None);
     }
 
     #[test]
@@ -761,8 +851,8 @@ run = "python3 cli.py"
         std::fs::create_dir_all(root.join("alpha")).unwrap();
         std::fs::create_dir_all(root.join("empty")).unwrap();
         std::fs::write(root.join("stray.txt"), "x").unwrap();
-        std::fs::write(root.join("zeta/plugin.toml"), "api = 1\nname = \"zeta\"\nrun = \"sh\"\n").unwrap();
-        std::fs::write(root.join("alpha/plugin.toml"), "api = 1\nname = \"alpha\"\nrun = \"sh\"\n").unwrap();
+        std::fs::write(root.join("zeta/plugin.toml"), "api = 2\nname = \"zeta\"\nrun = \"sh\"\n").unwrap();
+        std::fs::write(root.join("alpha/plugin.toml"), "api = 2\nname = \"alpha\"\nrun = \"sh\"\n").unwrap();
 
         let (manifests, problems) = crate::plugin::discover(&root);
         assert_eq!(manifests.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), vec!["alpha", "zeta"]);
@@ -776,8 +866,8 @@ run = "python3 cli.py"
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("good")).unwrap();
         std::fs::create_dir_all(root.join("bad")).unwrap();
-        std::fs::write(root.join("good/plugin.toml"), "api = 1\nname = \"good\"\nrun = \"sh\"\n").unwrap();
-        std::fs::write(root.join("bad/plugin.toml"), "api = 1\nname = \"bad\"\n").unwrap();
+        std::fs::write(root.join("good/plugin.toml"), "api = 2\nname = \"good\"\nrun = \"sh\"\n").unwrap();
+        std::fs::write(root.join("bad/plugin.toml"), "api = 2\nname = \"bad\"\n").unwrap();
 
         let (manifests, problems) = crate::plugin::discover(&root);
         assert_eq!(manifests.len(), 1);
@@ -799,13 +889,13 @@ run = "python3 cli.py"
 
     const TEST_BUILTINS: &[crate::plugin::builtin::Builtin] = &[crate::plugin::builtin::Builtin {
         name: "demo",
-        manifest: "api = 1\nname = \"demo\"\ndescription = \"Demo plugin\"\n[[commands]]\nid = \"hello\"\ndesc = \"Say hello\"\nkey = \"<C-g>\"\n[[hooks]]\non = \"after_write\"\nrun = \"hello\"\n",
+        manifest: "api = 2\nname = \"demo\"\ndescription = \"Demo plugin\"\n[[commands]]\nid = \"hello\"\ndesc = \"Say hello\"\nkey = \"<C-g>\"\n[events]\nsubscribe = [\"library/written\"]\n",
         run: noop,
         seeded: true,
         guide: "demo guide",
     }];
 
-    const STUB: &str = "api = 1\nname = \"demo\"\nbuiltin = \"demo\"\n";
+    const STUB: &str = "api = 2\nname = \"demo\"\nbuiltin = \"demo\"\n";
 
     #[test]
     fn a_stub_expands_to_the_embedded_manifest_run_by_this_executable() {
@@ -817,7 +907,7 @@ run = "python3 cli.py"
         assert_eq!(m.version.as_deref(), Some(env!("CARGO_PKG_VERSION")));
         assert_eq!(m.commands.len(), 1);
         assert_eq!(m.commands[0].id, "hello");
-        assert_eq!(m.hooks.len(), 1);
+        assert_eq!(m.events, vec!["library/written"]);
         let exe = std::env::current_exe().unwrap().to_string_lossy().to_string();
         assert_eq!(m.run, vec![exe, "plugin".to_string(), "run".to_string(), "demo".to_string()]);
         assert_eq!(m.dir, dir("demo"));
@@ -826,24 +916,24 @@ run = "python3 cli.py"
     #[test]
     fn an_unknown_builtin_name_is_a_manifest_error() {
         let mut problems = vec![];
-        assert!(parse_manifest_with(&dir("gone"), "api = 1\nname = \"gone\"\nbuiltin = \"gone\"\n", &mut problems, TEST_BUILTINS).is_none());
+        assert!(parse_manifest_with(&dir("gone"), "api = 2\nname = \"gone\"\nbuiltin = \"gone\"\n", &mut problems, TEST_BUILTINS).is_none());
         assert!(matches!(&problems[0], PluginProblem::Manifest { detail, .. } if detail.contains("unknown built-in")));
     }
 
     #[test]
     fn run_and_builtin_are_mutually_exclusive_and_one_is_required() {
         let mut problems = vec![];
-        assert!(parse_manifest_with(&dir("demo"), "api = 1\nname = \"demo\"\nrun = \"sh\"\nbuiltin = \"demo\"\n", &mut problems, TEST_BUILTINS).is_none());
+        assert!(parse_manifest_with(&dir("demo"), "api = 2\nname = \"demo\"\nrun = \"sh\"\nbuiltin = \"demo\"\n", &mut problems, TEST_BUILTINS).is_none());
         assert!(matches!(&problems[0], PluginProblem::Manifest { detail, .. } if detail.contains("mutually exclusive")));
         let mut problems = vec![];
-        assert!(parse_manifest_with(&dir("demo"), "api = 1\nname = \"demo\"\n", &mut problems, TEST_BUILTINS).is_none());
+        assert!(parse_manifest_with(&dir("demo"), "api = 2\nname = \"demo\"\n", &mut problems, TEST_BUILTINS).is_none());
         assert!(matches!(&problems[0], PluginProblem::Manifest { detail, .. } if detail.contains("run or builtin")));
     }
 
     #[test]
     fn a_stub_with_extra_fields_is_rejected() {
         let mut problems = vec![];
-        let text = "api = 1\nname = \"demo\"\nbuiltin = \"demo\"\ndescription = \"x\"\n";
+        let text = "api = 2\nname = \"demo\"\nbuiltin = \"demo\"\ndescription = \"x\"\n";
         assert!(parse_manifest_with(&dir("demo"), text, &mut problems, TEST_BUILTINS).is_none());
         assert!(matches!(&problems[0], PluginProblem::Manifest { detail, .. } if detail.contains("only api, name and builtin")));
     }
@@ -851,7 +941,7 @@ run = "python3 cli.py"
     #[test]
     fn a_stub_whose_builtin_differs_from_its_name_is_rejected() {
         let mut problems = vec![];
-        let text = "api = 1\nname = \"other\"\nbuiltin = \"demo\"\n";
+        let text = "api = 2\nname = \"other\"\nbuiltin = \"demo\"\n";
         assert!(parse_manifest_with(&dir("other"), text, &mut problems, TEST_BUILTINS).is_none());
         assert!(matches!(&problems[0], PluginProblem::Manifest { detail, .. } if detail.contains("must equal name")));
     }
@@ -859,7 +949,7 @@ run = "python3 cli.py"
     #[test]
     fn every_real_builtin_manifest_expands_cleanly() {
         for b in crate::plugin::builtin::BUILTINS {
-            let stub = format!("api = 1\nname = \"{0}\"\nbuiltin = \"{0}\"\n", b.name);
+            let stub = format!("api = 2\nname = \"{0}\"\nbuiltin = \"{0}\"\n", b.name);
             let mut problems = vec![];
             let m = parse_manifest_with(&dir(b.name), &stub, &mut problems, crate::plugin::builtin::BUILTINS);
             assert!(m.is_some() && problems.is_empty(), "{}: {:?}", b.name, problems);
@@ -876,7 +966,7 @@ run = "python3 cli.py"
         let _ = std::fs::remove_dir_all(d.parent().unwrap());
         std::fs::create_dir_all(&d).unwrap();
         std::fs::write(d.join("AGENT.md"), "# guided\n\nRun `bibox guided <key>` to do the thing.\n").unwrap();
-        let text = "api = 1\nname = \"guided\"\nrun = \"sh x\"\nguide = \"AGENT.md\"\n[cli]\nrun = \"sh cli\"\n";
+        let text = "api = 2\nname = \"guided\"\nrun = \"sh x\"\nguide = \"AGENT.md\"\n[cli]\nrun = \"sh cli\"\n";
         let mut problems = vec![];
         let m = parse_manifest(&d, text, &mut problems).expect("manifest");
         assert!(problems.is_empty(), "{:?}", problems);
@@ -889,12 +979,12 @@ run = "python3 cli.py"
         assert!(matches!(&problems[..], [PluginProblem::GuideMissing { plugin, path }] if plugin == "guided" && path.ends_with("AGENT.md")), "{:?}", problems);
 
         let mut problems = vec![];
-        let m = parse_manifest(&d, "api = 1\nname = \"guided\"\nrun = \"sh x\"\nguide = \"../secret.md\"\n", &mut problems).expect("loads");
+        let m = parse_manifest(&d, "api = 2\nname = \"guided\"\nrun = \"sh x\"\nguide = \"../secret.md\"\n", &mut problems).expect("loads");
         assert!(m.guide.is_none());
         assert!(matches!(&problems[..], [PluginProblem::Manifest { detail, .. }] if detail.contains("guide")), "{:?}", problems);
 
         let mut problems = vec![];
-        let m = parse_manifest(&d, "api = 1\nname = \"guided\"\nrun = \"sh x\"\n", &mut problems).unwrap();
+        let m = parse_manifest(&d, "api = 2\nname = \"guided\"\nrun = \"sh x\"\n", &mut problems).unwrap();
         assert!(m.guide.is_none() && problems.is_empty(), "no guide is fine");
         let _ = std::fs::remove_dir_all(d.parent().unwrap());
     }
@@ -906,7 +996,7 @@ run = "python3 cli.py"
         assert_eq!(m.builtin, None);
     }
     const WITH_SETTINGS: &str = r#"
-api = 1
+api = 2
 name = "x"
 run = "sh run.sh"
 
@@ -950,7 +1040,7 @@ default = "claude-opus-5"
     }
 
     fn settings_error(body: &str) -> String {
-        let text = format!("api = 1\nname = \"x\"\nrun = \"sh\"\n\n[[settings]]\n{}", body);
+        let text = format!("api = 2\nname = \"x\"\nrun = \"sh\"\n\n[[settings]]\n{}", body);
         let mut problems = vec![];
         assert!(parse_manifest(&dir("x"), &text, &mut problems).is_none(), "should not load: {}", body);
         match &problems[0] {
@@ -1002,14 +1092,14 @@ default = "claude-opus-5"
     #[test]
     fn a_stub_with_settings_is_rejected() {
         let mut problems = vec![];
-        let text = "api = 1\nname = \"demo\"\nbuiltin = \"demo\"\n[[settings]]\nkey = \"a\"\ntype = \"bool\"\ndefault = true\n";
+        let text = "api = 2\nname = \"demo\"\nbuiltin = \"demo\"\n[[settings]]\nkey = \"a\"\ntype = \"bool\"\ndefault = true\n";
         assert!(parse_manifest_with(&dir("demo"), text, &mut problems, TEST_BUILTINS).is_none());
         assert!(matches!(&problems[0], PluginProblem::Manifest { detail, .. } if detail.contains("only api, name and builtin")));
     }
 
     #[test]
     fn git_sync_declares_include_pdfs_and_push_on_write() {
-        let stub = "api = 1\nname = \"git-sync\"\nbuiltin = \"git-sync\"\n";
+        let stub = "api = 2\nname = \"git-sync\"\nbuiltin = \"git-sync\"\n";
         let mut problems = vec![];
         let m = parse_manifest(&dir("git-sync"), stub, &mut problems).expect("git-sync");
         let keys: Vec<&str> = m.settings.iter().map(|s| s.key.as_str()).collect();
@@ -1028,7 +1118,7 @@ default = "claude-opus-5"
     }
 
     const WITH_TAB: &str = r#"
-api = 1
+api = 2
 name = "x"
 run = "sh run.sh"
 
@@ -1051,7 +1141,7 @@ desc = "Render a page"
 
     #[test]
     fn a_tab_whose_run_is_not_a_command_is_a_manifest_error() {
-        let text = "api = 1\nname = \"x\"\nrun = \"sh\"\n[[tabs]]\ntitle = \"PDF\"\nrun = \"nope\"\n";
+        let text = "api = 2\nname = \"x\"\nrun = \"sh\"\n[[tabs]]\ntitle = \"PDF\"\nrun = \"nope\"\n";
         let mut problems = vec![];
         assert!(parse_manifest(&dir("x"), text, &mut problems).is_none());
         assert!(matches!(&problems[0], PluginProblem::Manifest { detail, .. } if detail.contains("tab \"PDF\" refers to unknown command \"nope\"")));
@@ -1060,7 +1150,7 @@ desc = "Render a page"
     #[test]
     fn a_tab_title_must_be_one_to_twelve_chars() {
         for title in ["", "ThirteenChars"] {
-            let text = format!("api = 1\nname = \"x\"\nrun = \"sh\"\n[[tabs]]\ntitle = \"{}\"\nrun = \"r\"\n[[commands]]\nid = \"r\"\ndesc = \"R\"\n", title);
+            let text = format!("api = 2\nname = \"x\"\nrun = \"sh\"\n[[tabs]]\ntitle = \"{}\"\nrun = \"r\"\n[[commands]]\nid = \"r\"\ndesc = \"R\"\n", title);
             let mut problems = vec![];
             assert!(parse_manifest(&dir("x"), &text, &mut problems).is_none(), "{:?}", title);
             assert!(matches!(&problems[0], PluginProblem::Manifest { detail, .. } if detail.contains("tab title")));
@@ -1070,7 +1160,7 @@ desc = "Render a page"
     #[test]
     fn a_stub_with_tabs_is_rejected() {
         let mut problems = vec![];
-        let text = "api = 1\nname = \"demo\"\nbuiltin = \"demo\"\n[[tabs]]\ntitle = \"T\"\nrun = \"r\"\n";
+        let text = "api = 2\nname = \"demo\"\nbuiltin = \"demo\"\n[[tabs]]\ntitle = \"T\"\nrun = \"r\"\n";
         assert!(parse_manifest_with(&dir("demo"), text, &mut problems, TEST_BUILTINS).is_none());
         assert!(matches!(&problems[0], PluginProblem::Manifest { detail, .. } if detail.contains("only api, name and builtin")));
     }
