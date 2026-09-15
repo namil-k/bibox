@@ -29,7 +29,7 @@ For humans: browse and edit in the TUI. For agents: manage entries and notes thr
 - **Multiple sources** - Add entries via PDF, DOI, ISBN, arXiv ID, URL, or title search
 - **Three-panel TUI** - Collections, entries, and preview (info / notes / PDF) side by side
 - **Mouse support** - Click to select entries/collections, scroll wheel, right-click context menu, click preview tabs
-- **Vim-style navigation** - `hjkl`, `gg`/`G`, `Ctrl+d/u`, `1`/`2`/`3` to jump to a panel, multi-select with `Space`
+- **Vim-style navigation** - `hjkl`, `gg`/`G`, `{n}j`, `Ctrl+d/u`, multi-select with `Space`
 - **Fetch & refresh** - Press `f` to pull metadata from Crossref, preview changes, pick which fields to update
 - **Undo/redo** - `Ctrl+z`/`Ctrl+y` with in-memory snapshots
 - **AI-agent-friendly** - Every command supports `--json`. Notes have `--stdin`, `--section`, `--template` for programmatic access
@@ -134,9 +134,9 @@ bibox
 | Key | Action |
 |-----|--------|
 | `h`/`l` | Focus left/right panel |
-| `1`/`2`/`3` | Jump to Collections / Entries / Preview from anywhere |
 | `j`/`k` | Navigate within panel |
 | `gg`/`G` | Jump to top/bottom |
+| `{n}j` | Move n lines (e.g., `5j`) |
 | `Ctrl+d`/`u` | Half-page down/up |
 | `Tab` | Switch preview mode (Info → Note → plugin tabs such as PDF) |
 | `n`/`p`, `+`/`-`, `0`, `H`/`L` | PDF tab: next/previous page, zoom in/out, fit width, pan (see below) |
@@ -215,6 +215,8 @@ prepend_keymap = [
 **Fields.** `on` takes one key or a list for a sequence. `run` takes one action or a list to run in order. `desc` is optional and replaces the description shown in help. `noop` disables a key.
 
 **Key notation.** `<C-x>`, `<A-x>`, `<S-x>`, `<Esc>`, `<Space>`, `<Tab>`, `<Enter>`, `<Backspace>`, `<Left>`, `<Right>`, `<Up>`, `<Down>`, `<F1>` through `<F12>`. Anything else is the character itself. Shift is not written for letters: `G`, not `<S-g>`.
+
+**Two limits.** Digits cannot be bound, because they are the count prefix that makes `5j` work; the exception is a leading `0`, which is not a count and stays bindable. And a count now reaches every action in a sequence, so `5<Space>` selects one entry and moves down five.
 
 **Actions.**
 
