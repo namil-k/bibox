@@ -176,7 +176,7 @@ pub async fn cmd_add(
                 if let Some(doi) = result.doi {
                     doi_arg = Some(doi);
                 } else {
-                    // No DOI — use arXiv metadata directly
+                    // No DOI: use arXiv metadata directly
                     if title_arg.is_none() { title_arg = Some(result.title.clone()); }
                     if author_arg.is_none() && !result.authors.is_empty() {
                         author_arg = Some(result.authors.join("; "));
@@ -254,7 +254,7 @@ pub async fn cmd_add(
                 }
             }
             Ok(crate::url_resolver::ResolvedUrl::Metadata(meta)) => {
-                // Direct metadata — create entry without Crossref
+                // Direct metadata: create entry without Crossref
                 let title = title_arg.unwrap_or_else(|| meta.title.unwrap_or_else(|| "Untitled".to_string()));
                 let authors = if let Some(a) = author_arg {
                     a.split(';').map(|s| s.trim().to_string()).collect()
@@ -313,7 +313,7 @@ pub async fn cmd_add(
                 return Ok(());
             }
             Err(e) => {
-                // URL resolution failed — keep the reason so the final error can
+                // URL resolution failed: keep the reason so the final error can
                 // explain it, and preserve the URL for a manual/misc entry.
                 url_resolve_error = Some(e.to_string());
                 url_preserved = Some(url.clone());
@@ -3760,29 +3760,29 @@ push_on_write = false
 
 ## Plugins
 
-A plugin is a directory under `<config_dir>/bibox/plugins/<name>/` with a `plugin.toml` and a program in any language. It adds commands (keys, right-click menu items), save hooks (`before_add`, `after_write`, `after_note_save`), preview tabs and settings. A plugin with a `[cli]` section is run from the shell as `bibox <name> <args>`, with your stdin and stdout.
+A plugin is a directory under `<config_dir>/bibox/plugins/<name>/` with a `plugin.toml` and a program in any language. bibox starts it once and talks JSON-RPC 2.0 over its stdin/stdout, one message per line (no Content-Length header). A plugin can add commands (keys, right-click menu items), fields in entry rows and the status bar, preview tabs (views), settings, and subscribe to events (`library/adding`, `library/written`, `note/saved`, `entry/selected`, `lifecycle/started`). A plugin with a `[cli]` section is run from the shell as `bibox <name> <args>`, with your stdin and stdout.
 
-**Installed plugins and how to use them are listed at the end of this guide** (generated from what is installed right now; in `--json` it is the `installed` array). Each entry carries the plugin's commands, hooks, settings and the usage notes its author wrote (`guide = "AGENT.md"` in plugin.toml). Read that section before calling a plugin.
+**Installed plugins and how to use them are listed at the end of this guide** (generated from what is installed right now; `bibox agent-guide --json` puts the same list in the `installed` array with each plugin's commands, fields, views, events, settings and the usage notes its author wrote in `guide = "AGENT.md"`). Read that section before calling a plugin's CLI.
 
 ```bash
 bibox plugin list                                      # what is installed and whether it loaded
-bibox plugin new my-plugin                             # skeleton: plugin.toml, main.py, bibox_plugin.py (Python helper)
-bibox plugin install namil-k/bibox/plugins/summarize   # from GitHub (owner/repo/subdir), asks before installing
+bibox plugin new my-plugin                             # skeleton: plugin.toml, main.py, bibox_plugin.py (Python helper), AGENT.md
+bibox plugin install namil-k/bibox/plugins/citations   # from GitHub (owner/repo/subdir), asks before installing
 bibox plugin install ./my-plugin                       # symlink a local directory
-bibox plugin install git-sync                          # put a removed built-in plugin back (no network)
+bibox plugin install pdf-view                          # turn on a built-in plugin (git-sync is on by default)
 bibox plugin remove my-plugin
 # TUI: press , then Plugins for the same list, an Installed toggle and each plugin's declared settings
 ```
 
-Protocol: one JSON object per line on stdin/stdout. bibox sends `{"type":"command","id":"<cmd>","trigger":"key|menu|hook:<name>","context":{"entry":...,"entries":[...],"config":{...},"paths":{...}}}`. The plugin may send `{"ui":"pick|prompt|confirm|progress",...}` lines (bibox answers each with one line), then one final line without `"ui"`: `{"message":"..."}`, `{"apply":[<full entries>]}`, `{"refresh":true}` or `{"error":"..."}`. Flush stdout after every line.
+Protocol: bibox sends `initialize` (paths, config, capabilities) once, then `commands/run` `{command, trigger, entry, entries, focus, collection}` for a command, `fields/get` `{keys, entries}` for row fields, `views/render` `{view, entry, page, width_px, images}` for a preview tab, `library/adding` `{entry}` before an entry is saved (answer `{entry}` to change it), and notifications `library/written` `{reason, entries}`, `note/saved` `{entry, path}`, `entry/selected` `{entry}`, `lifecycle/started`, `config/changed` `{config}`, `shutdown`. The plugin may send at any time: requests `window/pick` `{title, items}` -> `{index}`, `window/prompt` `{title, default}` -> `{text}`, `window/confirm` `{title}` -> `{yes}`, `library/apply` `{entries}` -> `{applied}`, `commands/execute` `{command}` (a keymap action name); notifications `window/progress` `{text}`, `window/message` `{text, level}`, `status/set` `{field, text, color}`, `fields/set` `{fields: {key: {id: {text, color}}}}`, `library/refresh`. Errors use the JSON-RPC codes; `-32000` is the plugin's own error and its `message` is shown to the user. Flush stdout after every line. The Python helper (`bibox_plugin.py`, written by `bibox plugin new`) wraps all of this: `serve()`, `window.*`, `status.set`, `fields.set`, `library.*`, `@on(event)`, `cache`.
 
-Every plugin process gets `BIBOX_BIN` (call it for `modify`, `note --stdin`, `add --json` and return `refresh`), `BIBOX_CONFIG_DIR`, `BIBOX_DB_PATH`, `BIBOX_NOTES_DIR`, `BIBOX_PDF_DIR`, `BIBOX_PLUGIN_DIR`. Inside a hook the helper sets `BIBOX_IN_HOOK=1` on that call so it does not fire hooks again. The plugin's stderr is in `plugins/<name>/stderr.log`, truncated on every start.
+Every plugin process gets `BIBOX_BIN` (call it for `modify`, `note --stdin`, `add --json` and send `library/refresh`), `BIBOX_CONFIG_DIR`, `BIBOX_DB_PATH`, `BIBOX_NOTES_DIR`, `BIBOX_PDF_DIR`, `BIBOX_PLUGIN_DIR`; a `[cli]` run also gets `BIBOX_CLI=1`. A bibox call made from inside an event handler does not send events to external plugins again (`BIBOX_IN_HOOK=1`). The plugin's stderr is in `plugins/<name>/stderr.log`, truncated on every start.
 
-A plugin can add a preview tab with `[[tabs]] { title, run }`; bibox calls the command with `trigger = "tab"` and `tab: { page, width_px, images }`, and the command answers `{"tab": {"image": "<png or jpeg>" | "lines": [...], "pages": n}}`. The built-in `pdf-view` does this for PDFs (needs poppler; not installed until `bibox plugin install pdf-view`).
+Users can move or hide any plugin field from `config.toml`: `[plugins.<name>.fields.<id>]` with `place = "row.1|row.2|row.3|status"`, `align = "right|left|after:key|after:pdf|after:year"`, `width = n`, `enabled = false`. `plugin_status_bar = false` at the top level hides every status segment.
 
 When writing a plugin, add `guide = "AGENT.md"` to plugin.toml and put the usage notes for agents in that file: what the plugin changes, how to call its CLI if it has one, which environment variables it needs. `bibox plugin new` creates a stub.
 
-Test a plugin without the TUI: `printf '<request json>\n' | python3 main.py`. See the README's Plugins section for `plugin.toml` fields (including `[[settings]]`) and `[plugins.<name>]` settings in config.toml.
+Test a plugin without the TUI: `printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n' | python3 main.py`. See the README's Plugins section for `plugin.toml` fields (including `[[fields]]`, `[[views]]`, `[events]`, `[[settings]]`).
 
 ## Tips
 
@@ -4490,6 +4490,15 @@ pub fn cmd_agent_guide(json: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_agent_guide_describes_protocol_2_not_hooks() {
+        assert!(AGENT_GUIDE.contains("JSON-RPC"));
+        assert!(AGENT_GUIDE.contains("library/written"));
+        assert!(!AGENT_GUIDE.contains("after_write"), "v1 hook names are gone");
+        assert!(AGENT_GUIDE.contains("bibox agent-guide --json"));
+        assert!(!AGENT_GUIDE.contains('\u{2014}') && !AGENT_GUIDE.contains('\u{2013}'), "no dashes");
+    }
 
     fn export_fixture(key: &str) -> Entry {
         Entry {

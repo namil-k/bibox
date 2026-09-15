@@ -39,7 +39,7 @@ For humans: browse and edit in the TUI. For agents: manage entries and notes thr
 - **Export** - BibTeX, YAML, RIS, CSV, notes (`.md`). Include PDFs. Copy to clipboard. Zip it up.
 - **Templates** - Built-in and custom note templates with `{{variable}}` substitution
 - **Doctor** - `bibox doctor` diagnoses and auto-repairs DB issues (bad citekeys, LaTeX escapes, orphaned files) and checks keymap, theme, plugin manifests and settings
-- **Plugins** - Any executable becomes a bibox command, a context-menu item, a save hook, a preview tab or a `bibox <name>` subcommand, with its own settings in the Settings screen. Declared by `plugin.toml`, talks JSON over stdin/stdout, can open bibox's own popups. Install from any GitHub repository or git URL. Built-in plugins ship inside the binary: git-sync (on by default) and pdf-view (opt-in).
+- **Plugins** - Any program becomes a bibox command, a context-menu item, a cell in every entry row or the status bar, an event subscriber, a preview tab or a `bibox <name>` subcommand, with its own settings in the Settings screen. Declared by `plugin.toml`, talks JSON-RPC over stdin/stdout, can open bibox's own popups. Install from any GitHub repository or git URL. Built-in plugins ship inside the binary: git-sync (on by default) and pdf-view (opt-in); the `citations` example plugin puts Crossref counts in every row.
 - **Settings screen** - `,` opens sections, values, descriptions and a search box; changes are saved as you make them
 - **Themes** - `dark`, `light`, or any VS Code color theme file dropped into `themes/`
 
@@ -442,74 +442,102 @@ pdf_dir = "~/Library/Mobile Documents/com~apple~CloudDocs/bibox-pdfs"  # iCloud
 
 ## Plugins
 
-A plugin is a directory with a `plugin.toml` and a program in any language. bibox starts the program the first time it is needed, keeps it running while the TUI is open, and talks to it one JSON line at a time. A plugin can add commands with keys, right-click menu items, save hooks, a tab in the preview panel (the PDF tab is one), settings on its own page in the Settings screen, and a `bibox <name>` subcommand. Anyone can publish one: push the directory to a repository and others install it by its GitHub path or git URL.
+A plugin is a directory with a `plugin.toml` and a program in any language. bibox starts the program once (on first use, or with the TUI if it asks), keeps it running while the TUI is open, and talks to it over JSON-RPC 2.0, one message per line on stdin/stdout, the same shape as an editor talking to a language server. A plugin declares what it contributes:
+
+- **commands**: a key and a right-click menu item that run a function in the plugin (`commands/run`)
+- **fields**: a text cell in every entry row (`place = "row.1"`, `align = "right"` or `after:key`) or a segment in the status bar (`place = "status"`), filled on demand (`fields/get`) or pushed any time (`fields/set`, `status/set`)
+- **views**: a tab in the preview panel, rendered one page at a time (`views/render`; the PDF tab is one)
+- **events**: `library/adding` (may rewrite the entry before it is saved), `library/written`, `note/saved`, `entry/selected`, `lifecycle/started`
+- **settings**: a typed page in the Settings screen, delivered on start and on change
+- **cli**: `bibox <name> <args>` runs the plugin from the shell with your stdio, for scripts and agents
+
+Anyone can publish one: push the directory to a repository and others install it by its GitHub path or git URL.
 
 ```
 ~/Library/Application Support/bibox/plugins/   (Linux: ~/.config/bibox/plugins/)
-  summarize/
+  citations/
     plugin.toml
     main.py
+    bibox_plugin.py
+    AGENT.md
 ```
 
-**Install.** `bibox plugin install namil-k/bibox/plugins/summarize` clones from GitHub, `bibox plugin install ./my-plugin` symlinks a local directory, `bibox plugin list` shows what is installed and where it came from (`built-in`, `local`, `git`, `dir`), `bibox plugin remove <name>` deletes it. Turning a plugin off is removing it; a built-in comes back with `bibox plugin install <name>` and needs no network. Installing from a repository shows where the code comes from and what it runs, then asks. Nobody has reviewed code that is not in a registry.
+**Install.** `bibox plugin install namil-k/bibox/plugins/citations` clones from GitHub, `bibox plugin install ./my-plugin` symlinks a local directory, `bibox plugin list` shows what is installed and where it came from (`built-in`, `local`, `git`, `dir`), `bibox plugin remove <name>` deletes it. Turning a plugin off is removing it; a built-in comes back with `bibox plugin install <name>` and needs no network. Installing from a repository shows where the code comes from and what it runs, then asks. Nobody has reviewed code that is not in a registry.
 
 **In the TUI.** `,` then Plugins lists what is installed and which built-in plugins are not. `Enter` opens a plugin page: description, an `Installed` toggle (`h`/`l`; removing an external plugin asks first) and the settings the plugin declares. `Install from…` at the end of the list takes `owner/repo`, a git URL or a local path and shows the same confirmation as the CLI.
 
-**Write one.** `bibox plugin new my-plugin` creates a working skeleton with a Python helper. The whole contract for other languages is four lines:
+**Write one.** `bibox plugin new my-plugin` creates a working skeleton with a Python helper (`serve`, `window`, `status`, `fields`, `library`, `@on(event)`, `cache`). The contract for other languages is JSON-RPC 2.0 without headers:
 
 ```
-bibox  → plugin   {"type":"command","id":"copy","trigger":"key","context":{"entry":{...},"entries":[...],"config":{},"paths":{...}}}
-plugin → bibox    {"ui":"pick","title":"Citation style","items":["APA","IEEE"]}
-bibox  → plugin   {"index":0}
-plugin → bibox    {"message":"Copied APA citation"}
+bibox  → plugin   {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocol":2,"paths":{...},"config":{},"capabilities":{...}}}
+plugin → bibox    {"jsonrpc":"2.0","id":1,"result":{"name":"citations","protocol":2}}
+bibox  → plugin   {"jsonrpc":"2.0","id":2,"method":"commands/run","params":{"command":"copy","trigger":"key","entry":{...},"entries":[...]}}
+plugin → bibox    {"jsonrpc":"2.0","id":1,"method":"window/pick","params":{"title":"Citation style","items":["APA","IEEE"]}}
+bibox  → plugin   {"jsonrpc":"2.0","id":1,"result":{"index":0}}
+plugin → bibox    {"jsonrpc":"2.0","id":2,"result":{"message":"Copied APA citation"}}
 ```
 
-A line with `"ui"` asks bibox to show something (`pick`, `prompt`, `confirm`, `progress`) and gets one line back. A line without `"ui"` ends the command: `message` shows text, `apply` replaces entries (undoable, all or nothing), `refresh` re-reads the database after you changed it through `$BIBOX_BIN`, `error` reports a failure. Flush stdout after every line.
+Both sides send requests (with an `id`, answered by a `result` or an `error`) and notifications (no `id`). bibox asks for `commands/run`, `fields/get`, `views/render` and `library/adding`, and tells the plugin about `library/written`, `note/saved`, `entry/selected`, `lifecycle/started`, `config/changed` and `shutdown`. The plugin can open a picker, prompt or confirmation (`window/pick`, `window/prompt`, `window/confirm`), show progress and messages (`window/progress`, `window/message`), fill its declared slots (`fields/set`, `status/set`), replace entries (`library/apply`, undoable, all or nothing), ask bibox to reread the database after changing it through `$BIBOX_BIN` (`library/refresh`) or run a built-in action (`commands/execute`). An error with code `-32000` shows its `message` in the status line. Flush stdout after every line.
 
 **Declare.** `plugin.toml`:
 
 ```toml
-api = 1
-name = "summarize"                   # must equal the directory name
+api = 2
+name = "citations"                   # must equal the directory name
 run = "python3 main.py"              # split on spaces, no shell; cwd is the plugin directory
 guide = "AGENT.md"                   # optional: usage notes for AI agents; `bibox agent-guide` prints them
+activation = "startup"               # optional: start with the TUI (default "lazy": on first use)
 
 [[commands]]
-id = "summarize"
-desc = "Summarize the PDF into the note"
-key = "S"                            # default key; users override it in keymap.toml as run = "summarize.summarize"
-menu = true                          # right-click menu
+id = "refresh"
+desc = "Refetch the citation count of the selected entries"
+key = "<C-r>"                        # default key; users override it in keymap.toml as run = "citations.refresh"
+menus = ["context"]                  # right-click menu
 
-[[hooks]]
-on = "after_write"                   # before_add | after_write | after_note_save
-run = "summarize"
+[[fields]]                           # optional: a value slot bibox draws for you
+id = "count"
+place = "row.1"                      # row.1 | row.2 | row.3 | status
+align = "right"                      # right | left | after:key | after:pdf | after:year
+width = 8                            # longest text; longer values are clipped with …
+desc = "Times cited"
 
-[[tabs]]                             # optional: a tab in the preview panel next to Info and Note
+[[views]]                            # optional: a tab in the preview panel next to Info and Note
 title = "PDF"                        # 1 to 12 characters
-run = "render"                       # a command id; bibox calls it with trigger = "tab"
+run = "render"                       # a command id; bibox calls views/render with it
 
-[[settings]]                         # optional: shown on the plugin page and written to [plugins.summarize] in config.toml
-key = "model"
-type = "choice"                      # bool | int | string | choice
-choices = ["claude-opus-5", "claude-sonnet-5"]
-default = "claude-opus-5"
-desc = "Claude model for the summary"
+[events]
+subscribe = ["library/written", "entry/selected"]
 
-[cli]                                # optional: `bibox summarize ...` runs this with your stdio
-run = "python3 cli.py"
+[[settings]]                         # optional: shown on the plugin page and written to [plugins.citations] in config.toml
+key = "mailto"
+type = "string"                      # bool | int | string | choice
+default = ""
+desc = "Email for Crossref's polite pool"
+
+[cli]                                # optional: `bibox citations ...` runs this with your stdio and BIBOX_CLI=1
+run = "python3 main.py"
 ```
 
-`before_add` runs before an entry is saved and may return `apply` to change it; if the plugin fails the entry is added unchanged. `after_write` and `after_note_save` run in the background after the save and cannot open popups. Plugin settings live in `config.toml` under `[plugins.<name>]` and arrive as `context.config`. Declared settings get a typed row on the plugin page and `bibox doctor` warns about values of the wrong type and keys that match no declaration (with a spelling suggestion). bibox does not fill in defaults: read `context.config` with a fallback as before.
+Row fields are pulled for the entries on screen and for the entry the cursor rests on, one `fields/get` per batch of keys; values the plugin pushes later with `fields/set` overwrite them, and a plugin that exits loses its cells while the list keeps drawing. Users move or hide any field from `config.toml`:
 
-A `[[tabs]]` entry adds a tab to the preview panel. When the tab is visible bibox calls its command in the background with `trigger = "tab"` and `tab: {"page": 3, "width_px": 840, "images": true}`; the command answers `{"tab": {"image": "/path/page.png", "pages": 14}}` (PNG or JPEG) or, when `images` is false, `{"tab": {"lines": ["..."], "pages": 14}}`. bibox owns page, zoom, scrolling and the cache; the plugin only renders one page at one width. It cannot open popups. The built-in `pdf-view` is written this way.
+```toml
+[plugins.citations.fields.count]
+place = "row.3"
+align = "after:year"
+# enabled = false
+```
 
-**For agents.** `bibox agent-guide` ends with an Installed plugins section generated from the manifests (commands, keys, hooks, tabs, settings) followed by each plugin's `guide` file, so an agent learns how to use `bibox <name>` without reading the code. Write that file for agents: what the plugin changes, how to call its CLI, what it needs. `bibox plugin new` creates a stub.
+`plugin_status_bar = false` at the top of `config.toml` hides every status segment. Plugin settings live under `[plugins.<name>]` and arrive in `initialize` as `config` and again in `config/changed`. Declared settings get a typed row on the plugin page and `bibox doctor` warns about values of the wrong type and keys that match no declaration (with a spelling suggestion). bibox does not fill in defaults: read `config` with a fallback.
 
-**Environment.** Every plugin process gets `BIBOX_BIN`, `BIBOX_CONFIG_DIR`, `BIBOX_DB_PATH`, `BIBOX_NOTES_DIR`, `BIBOX_PDF_DIR`, `BIBOX_HOME` (when set) and `BIBOX_PLUGIN_DIR`. To change the library, call `$BIBOX_BIN` (`modify`, `note --stdin`, `add --json`) and return `refresh`, or return `apply` for a few entries. The plugin's stderr goes to `plugins/<name>/stderr.log`, truncated on every start.
+A `[[views]]` entry adds a tab to the preview panel. When the tab is visible bibox calls `views/render` in the background with `{"view": "render", "entry": {...}, "page": 3, "width_px": 840, "images": true}`; the plugin answers `{"image": "/path/page.jpg", "pages": 14}` (PNG or JPEG) or, when `images` is false, `{"lines": ["..."], "pages": 14}`. bibox owns page, zoom, scrolling and the cache; the plugin only renders one page at one width. The built-in `pdf-view` is written this way.
 
-**When it breaks.** A broken plugin never stops bibox. Manifest problems are shown before the TUI opens and by `bibox doctor`. A plugin that exits, hangs (press Esc) or prints something that is not JSON is reported in the status line and restarted on the next call. Default keys that collide with built-in keys are dropped with a warning; bind them yourself in `keymap.toml`.
+**For agents.** `bibox agent-guide` ends with an Installed plugins section generated from the manifests (commands, keys, fields, views, events, settings) followed by each plugin's `guide` file, so an agent learns how to use `bibox <name>` without reading the code; `bibox agent-guide --json` has the same list as `installed`. Write that file for agents: what the plugin changes, how to call its CLI, what it needs. `bibox plugin new` creates a stub.
 
-**Built-in plugins** live inside the bibox binary and appear in `bibox plugin list` as `built-in`: `git-sync` (commits db.json and notes on every write when the portable home is a git repository; `g s` syncs, `g t` shows status) and `pdf-view` (the PDF tab; needs poppler, so it is not installed until you ask). Remove one like any plugin; `bibox plugin install git-sync` puts it back. **Example plugin** (`plugins/` in this repository): `summarize` (`S`, PDF to the note's Summary section with Claude; needs `pip install anthropic` and `ANTHROPIC_API_KEY`).
+**Environment.** Every plugin process gets `BIBOX_BIN`, `BIBOX_CONFIG_DIR`, `BIBOX_DB_PATH`, `BIBOX_NOTES_DIR`, `BIBOX_PDF_DIR`, `BIBOX_HOME` (when set) and `BIBOX_PLUGIN_DIR`; a `[cli]` run also gets `BIBOX_CLI=1`. To change the library, call `$BIBOX_BIN` (`modify`, `note --stdin`, `add --json`) and send `library/refresh`, or send `library/apply` for a few entries. The plugin's stderr goes to `plugins/<name>/stderr.log`, truncated on every start.
+
+**When it breaks.** A broken plugin never stops bibox. Manifest problems are shown before the TUI opens and by `bibox doctor`; an `api = 1` manifest is refused with the new name for each old key. A plugin that exits, hangs (press Esc) or prints something that is not JSON is reported in the status line and restarted on the next call; its fields go blank until then. Default keys that collide with built-in keys are dropped with a warning; bind them yourself in `keymap.toml`.
+
+**Built-in plugins** live inside the bibox binary and appear in `bibox plugin list` as `built-in`: `git-sync` (commits db.json and notes on every write when the portable home is a git repository; `g s` syncs, `g t` shows status, the status bar shows `↑n unpushed`) and `pdf-view` (the PDF tab; needs poppler, so it is not installed until you ask). Remove one like any plugin; `bibox plugin install git-sync` puts it back. **Example plugins** (`plugins/` in this repository): `citations` (Crossref citation counts in every row, `<C-r>` to refetch, `bibox citations <key...>` for scripts) and `summarize` (`S`, PDF to the note's Summary section with Claude; needs `pip install anthropic` and `ANTHROPIC_API_KEY`).
 
 ## Settings
 
@@ -580,7 +608,7 @@ bibox sync --yes --json
 | `--yes` / `-y` | Skip confirmation prompts |
 | `--template <name>` | Initialize note from template |
 
-**Writing a plugin as an agent.** Run `bibox plugin new <name>`, edit `main.py` (the helper's `serve`, `pick`, `prompt`, `confirm`, `progress`, `bibox` and `copy_to_clipboard` are documented at the top of `bibox_plugin.py`), then test it without the TUI: `printf '<request json>\n' | python3 main.py`. Failures land in `plugins/<name>/stderr.log`. When your plugin calls `bibox` from inside a hook, the helper sets `BIBOX_IN_HOOK=1` so that call does not fire hooks again.
+**Writing a plugin as an agent.** Run `bibox plugin new <name>`, edit `main.py` (the helper's `serve`, `window`, `status`, `fields`, `library`, `on`, `cache`, `bibox` and `copy_to_clipboard` are documented at the top of `bibox_plugin.py`), then test it without the TUI: `printf '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n' | python3 main.py`. Failures land in `plugins/<name>/stderr.log`. When your plugin calls `bibox` from inside an event handler, that call does not send events to external plugins again (`BIBOX_IN_HOOK=1`).
 
 ## License
 

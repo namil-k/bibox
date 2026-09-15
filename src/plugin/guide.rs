@@ -157,7 +157,7 @@ mod tests {
             commands: vec![("summarize".into(), Some("S".into()), "Summarize the PDF into the note".into())],
             events: vec!["library/written".into()],
             fields: vec![("count".into(), "row.1".into(), "Times cited".into())],
-            views: vec![],
+            views: vec!["PDF".into()],
             settings: vec![("model".into(), "choice of claude-opus-5, claude-sonnet-5".into(), "claude-opus-5".into(), "Claude model".into())],
             guide: Some("Run `bibox summarize <citekey>` to write the Summary section.\n".into()),
         }
@@ -171,6 +171,7 @@ mod tests {
         assert!(s.contains("CLI: `bibox summarize <args>`"));
         assert!(s.contains("Commands: summarize (S): Summarize the PDF into the note"));
         assert!(s.contains("Fields: count (row.1): Times cited"));
+        assert!(s.contains("Preview tabs: PDF"));
         assert!(s.contains("Events: library/written"));
         assert!(s.contains("Settings under [plugins.summarize] in config.toml: model (choice of claude-opus-5, claude-sonnet-5, default claude-opus-5): Claude model"));
         assert!(s.ends_with("Run `bibox summarize <citekey>` to write the Summary section.\n\n"), "{:?}", &s[s.len() - 80..]);
