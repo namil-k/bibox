@@ -1521,11 +1521,12 @@ impl App {
         }
     }
 
-    /// Tab으로만 돈다. 마지막 탭 다음은 첫 탭.
-    fn preview_next(&self) -> Option<PreviewMode> {
+    /// 보이는 탭을 `by`칸 옮긴다(감김). 포커스는 안 건드린다.
+    fn preview_step(&self, by: isize) -> Option<PreviewMode> {
         let modes = self.preview_modes();
-        let i = modes.iter().position(|m| *m == self.preview_mode).unwrap_or(0);
-        Some(modes[(i + 1) % modes.len()])
+        let n = modes.len() as isize;
+        let i = modes.iter().position(|m| *m == self.preview_mode).unwrap_or(0) as isize;
+        Some(modes[((i + by).rem_euclid(n)) as usize])
     }
 
     /// 탭을 바꿀 때 한 자리에서. Note는 노트를 읽고, 다른 플러그인 탭으로 옮기면 캐시를 비운다
@@ -2592,10 +2593,11 @@ fn status_bar_text(keymap: &Keymap, focus: Panel) -> String {
         }
         Panel::Preview => {
             push_arrow(&mut parts, k(Action::FocusEntries), "←entries");
-            push(&mut parts, k(Action::NextPreviewTab), "switch mode");
             push_pair(&mut parts, k(Action::PreviewScrollDown), k(Action::PreviewScrollUp), "scroll");
         }
     }
+    // 보이는 탭 바꾸기는 어느 패널에서든 같은 키
+    push_pair(&mut parts, k(Action::PrevPreviewTab), k(Action::NextPreviewTab), "tab");
 
     let navigation = parts.join("  ");
     parts.clear();
@@ -3614,9 +3616,21 @@ fn execute(app: &mut App, action: Action, ctx: ExecCtx) -> Result<Flow> {
         }
 
         Action::NextPreviewTab => {
-            if let Some(m) = app.preview_next() {
+            if let Some(m) = app.preview_step(1) {
                 app.set_preview_mode(m);
             }
+        }
+        Action::PrevPreviewTab => {
+            if let Some(m) = app.preview_step(-1) {
+                app.set_preview_mode(m);
+            }
+        }
+        Action::NextPanel => {
+            app.focus = match app.focus {
+                Panel::Collections => Panel::Entries,
+                Panel::Entries => Panel::Preview,
+                Panel::Preview => Panel::Collections,
+            };
         }
 
         // 검색은 포커스에 따라 대상이 다르다. 이동이 아니라 한 액션의 문서화된 동작이다.

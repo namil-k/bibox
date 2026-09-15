@@ -125,6 +125,8 @@ pub enum Action {
     Undo,
     Redo,
     NextPreviewTab,
+    PrevPreviewTab,
+    NextPanel,
     Search,
     CopyCitekey,
     CopyCitation,
@@ -191,7 +193,7 @@ impl Action {
     pub fn all() -> &'static [Action] {
         use Action::*;
         &[
-            Quit, Cancel, Undo, Redo, NextPreviewTab, Search, CopyCitekey, CopyCitation, OpenPdf,
+            Quit, Cancel, Undo, Redo, NextPreviewTab, PrevPreviewTab, NextPanel, Search, CopyCitekey, CopyCitation, OpenPdf,
             OpenWeb, FetchMetadata, ExportMenu, Delete, Help, EditNote, SortMenu,
             Collections, Tags, AttachPdf, Settings, Plugins, Noop,
             EntryDown, EntryUp, EntryTop, EntryBottom, EntryScreenTop, EntryScreenMiddle,
@@ -215,7 +217,7 @@ impl Action {
             | PreviewScrollDown | PreviewScrollUp | PreviewTop | PreviewBottom
             | PreviewHalfPageDown | PreviewHalfPageUp
             | FocusCollections | FocusEntries | FocusPreview
-            | NextPreviewTab
+            | NextPreviewTab | PrevPreviewTab | NextPanel
             | TabNextPage | TabPrevPage | TabZoomIn | TabZoomOut | TabZoomReset | TabPanLeft | TabPanRight => "Navigation",
 
             ToggleSelect | SelectAll | Cancel => "Selection",
@@ -241,7 +243,9 @@ impl Action {
             Cancel => "Drop the current selection, or quit when nothing is selected",
             Undo => "Undo the last change to the library",
             Redo => "Redo the change that was last undone",
-            NextPreviewTab => "Cycle the preview panel between Info, Note and PDF",
+            NextPreviewTab => "Show the next preview tab (Info, Note, PDF)",
+            PrevPreviewTab => "Show the previous preview tab",
+            NextPanel => "Move focus to the next panel (Collections, Entries, Preview)",
             Search => "Filter entries by title, author, key or tag; filters collections when that panel has focus",
             CopyCitekey => "Copy the BibTeX citation key to the system clipboard",
             CopyCitation => "Copy a formatted citation (APA, IEEE or Chicago) to the clipboard",
@@ -397,7 +401,9 @@ fn global_bindings() -> Vec<Binding> {
         b("<C-c>", &[Quit]),
         b("<C-z>", &[Undo]),
         b("<C-y>", &[Redo]),
-        b("<Tab>", &[NextPreviewTab]),
+        b("<Tab>", &[NextPanel]),
+        b("]", &[NextPreviewTab]),
+        b("[", &[PrevPreviewTab]),
         b("/", &[Search]),
         b("y", &[CopyCitekey]),
         b("Y", &[CopyCitation]),
@@ -1022,7 +1028,9 @@ mod tests {
             ("<C-c>", &[Action::Quit]),
             ("<C-z>", &[Action::Undo]),
             ("<C-y>", &[Action::Redo]),
-            ("<Tab>", &[Action::NextPreviewTab]),
+            ("<Tab>", &[Action::NextPanel]),
+            ("]", &[Action::NextPreviewTab]),
+            ("[", &[Action::PrevPreviewTab]),
             ("/", &[Action::Search]),
             ("y", &[Action::CopyCitekey]),
             ("Y", &[Action::CopyCitation]),

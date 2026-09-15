@@ -138,7 +138,8 @@ bibox
 | `gg`/`G` | Jump to top/bottom |
 | `{n}j` | Move n lines (e.g., `5j`) |
 | `Ctrl+d`/`u` | Half-page down/up |
-| `Tab` | Switch preview mode (Info → Note → plugin tabs such as PDF) |
+| `Tab` | Move focus to the next panel (Collections → Entries → Preview) |
+| `[` / `]` | Show the previous/next preview tab (Info, Note, plugin tabs such as PDF) from any panel |
 | `n`/`p`, `+`/`-`, `0`, `H`/`L` | PDF tab: next/previous page, zoom in/out, fit width, pan (see below) |
 | `Space` | Toggle select entry |
 | `V` | Select/deselect all |
@@ -222,7 +223,7 @@ prepend_keymap = [
 
 | Layer | Actions |
 |-------|---------|
-| Any | `quit` `cancel` `undo` `redo` `next_preview_tab` `search` `copy_citekey` `open_pdf` `open_web` `fetch_metadata` `export_menu` `delete` `help` `edit_note` `sort_menu` `collections` `tags` `attach_pdf` `settings` `noop` |
+| Any | `quit` `cancel` `undo` `redo` `next_preview_tab` `prev_preview_tab` `next_panel` `search` `copy_citekey` `open_pdf` `open_web` `fetch_metadata` `export_menu` `delete` `help` `edit_note` `sort_menu` `collections` `tags` `attach_pdf` `settings` `noop` |
 | `normal.entries` | `entry_down` `entry_up` `entry_top` `entry_bottom` `entry_screen_top` `entry_screen_middle` `entry_screen_bottom` `entry_half_page_down` `entry_half_page_up` `toggle_select` `select_all` `focus_collections` `focus_preview` |
 | `normal.collections` | `collection_down` `collection_up` `collection_top` `collection_bottom` `collection_half_page_down` `collection_half_page_up` `focus_entries` |
 | `normal.preview` | `preview_scroll_down` `preview_scroll_up` `preview_top` `preview_bottom` `preview_half_page_down` `preview_half_page_up` `focus_entries` |
