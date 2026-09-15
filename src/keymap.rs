@@ -313,12 +313,6 @@ pub enum Flow {
     Quit,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct ExecCtx {
-    /// 숫자 접두사. 없으면 1. 이동 계열 액션만 읽는다.
-    pub count: usize,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct Binding {
     pub keys: Vec<KeyPress>,
@@ -423,6 +417,10 @@ fn global_bindings() -> Vec<Binding> {
         b("A", &[AttachPdf]),
         b(",", &[Settings]),
         b("<Enter>", &[Noop]),
+        // 패널로 바로. 어느 패널에서든 한 키
+        b("1", &[FocusCollections]),
+        b("2", &[FocusEntries]),
+        b("3", &[FocusPreview]),
     ]
 }
 
@@ -1050,6 +1048,10 @@ mod tests {
             ("A", &[Action::AttachPdf]),
             (",", &[Action::Settings]),
             ("<Enter>", &[Action::Noop]),
+            // 패널로 바로. 숫자 접두사(5j)를 없애고 얻은 자리(2026-09-15)
+            ("1", &[Action::FocusCollections]),
+            ("2", &[Action::FocusEntries]),
+            ("3", &[Action::FocusPreview]),
         ];
         for (layer, name) in [
             (&km.collections, "collections"),

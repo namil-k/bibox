@@ -16,7 +16,7 @@ use std::io;
 
 use crate::bibtex::entry_to_filename;
 use crate::config::Config;
-use crate::keymap::{default_keymap, resolve, Action, ExecCtx, Flow, KeyPress, Keymap, LayerId, Resolution};
+use crate::keymap::{default_keymap, resolve, Action, Flow, KeyPress, Keymap, LayerId, Resolution};
 use crate::models::Entry;
 use crate::plugin::protocol::{Final, UiAnswer, UiRequest};
 use crate::plugin::{PluginCmdId, PluginError, PluginHost, UiSink};
@@ -459,7 +459,6 @@ pub struct App {
     picker: Option<ChecklistPicker>,
     // 시퀀스 대기 상태(gg 등)와 숫자 접두사 버퍼. 판단은 keymap::resolve가 한다.
     pending: Vec<KeyPress>,
-    count_buf: String,
     keymap: Keymap,
     // Undo/Redo stacks (DB snapshots)
     undo_stack: Vec<Vec<Entry>>,
@@ -562,7 +561,6 @@ impl App {
             prev_sort_ascending: false,
             picker: None,
             pending: Vec::new(),
-            count_buf: String::new(),
             keymap: default_keymap(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -3231,14 +3229,14 @@ fn execute_context_action(app: &mut App, idx: usize) {
     let Some((_, action)) = app.context_menu_items().get(idx).cloned() else { return };
     match action {
         Action::Plugin(id) => app.start_plugin_command(id, "menu"),
-        other => { let _ = execute(app, other, ExecCtx { count: 1 }); }
+        other => { let _ = execute(app, other); }
     }
 }
 
 /// 액션 하나를 실행한다. 바디는 옛 `handle_normal`의 32갈래에서 그대로 옮겨 왔다.
 /// 포커스 분기가 있던 갈래는 패널별 액션으로 갈라졌으므로 여기에는 `app.focus`로
 /// 갈라지는 이동 코드가 없다.
-fn execute(app: &mut App, action: Action, ctx: ExecCtx) -> Result<Flow> {
+fn execute(app: &mut App, action: Action) -> Result<Flow> {
     match action {
         Action::Quit => return Ok(Flow::Quit),
         Action::Cancel => {
@@ -3274,27 +3272,23 @@ fn execute(app: &mut App, action: Action, ctx: ExecCtx) -> Result<Flow> {
             }
         }
 
-        // ── 한 칸 이동 (카운트를 읽는다) ──
-        Action::CollectionDown => { for _ in 0..ctx.count { app.move_col_down(); } }
-        Action::CollectionUp => { for _ in 0..ctx.count { app.move_col_up(); } }
-        Action::EntryDown => { for _ in 0..ctx.count { app.move_entry_down(); } }
-        Action::EntryUp => { for _ in 0..ctx.count { app.move_entry_up(); } }
+        // ── 한 칸 이동 ──
+        Action::CollectionDown => app.move_col_down(),
+        Action::CollectionUp => app.move_col_up(),
+        Action::EntryDown => app.move_entry_down(),
+        Action::EntryUp => app.move_entry_up(),
         Action::PreviewScrollDown => {
             if let Some((extent, view, _, _)) = app.tab_extents() {
-                for _ in 0..ctx.count { app.tab.scroll_down(app.tab_step(), extent, view); }
+                app.tab.scroll_down(app.tab_step(), extent, view);
             } else if !matches!(app.preview_mode, PreviewMode::Plugin(_)) {
-                for _ in 0..ctx.count {
-                    app.preview_scroll = app.preview_scroll.saturating_add(1).min(app.preview_max_scroll);
-                }
+                app.preview_scroll = app.preview_scroll.saturating_add(1).min(app.preview_max_scroll);
             }
         }
         Action::PreviewScrollUp => {
             if let Some((_, view, _, _)) = app.tab_extents() {
-                for _ in 0..ctx.count { app.tab.scroll_up(app.tab_step(), view); }
+                app.tab.scroll_up(app.tab_step(), view);
             } else if !matches!(app.preview_mode, PreviewMode::Plugin(_)) {
-                for _ in 0..ctx.count {
-                    app.preview_scroll = app.preview_scroll.saturating_sub(1);
-                }
+                app.preview_scroll = app.preview_scroll.saturating_sub(1);
             }
         }
 
@@ -3617,21 +3611,7 @@ fn layer_for(focus: Panel) -> LayerId {
 }
 
 fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
-    // ① 숫자 접두사. 키맵 바깥의 고정 전처리기다. 접두사이므로 시퀀스 대기
-    //    중에는 받지 않는다. 맨 앞의 '0'은 카운트가 아니라 바인딩 가능한 키다.
-    if let KeyCode::Char(c @ '0'..='9') = key.code {
-        if app.pending.is_empty()
-            && key.modifiers == KeyModifiers::NONE
-            && (!app.count_buf.is_empty() || c != '0')
-        {
-            app.count_buf.push(c);
-            return Ok(false);
-        }
-    }
-
-    let count: usize = app.count_buf.parse().unwrap_or(1);
-
-    // ② 시퀀스 해석
+    // ① 시퀀스 해석. 숫자도 보통 키다(2026-09-15에 vim식 숫자 접두사를 없애고 1/2/3을 패널 이동에 줌)
     let press = KeyPress::new(key.code, key.modifiers);
     let resolution = resolve(app.keymap.layer(layer_for(app.focus)), &app.pending, press);
 
@@ -3641,15 +3621,13 @@ fn handle_normal(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool>
         }
         Resolution::Unbound => {
             app.pending.clear();
-            app.count_buf.clear();
         }
         Resolution::Run(actions) => {
             app.pending.clear();
-            app.count_buf.clear();
 
-            // ③ 실행. 배열은 순서대로 돌고, 종료나 모드 전환에서 중단한다.
+            // ② 실행. 배열은 순서대로 돌고, 종료나 모드 전환에서 중단한다.
             for action in actions {
-                if execute(app, action, ExecCtx { count })? == Flow::Quit {
+                if execute(app, action)? == Flow::Quit {
                     return Ok(true);
                 }
                 if !matches!(app.mode, Mode::Normal) {
