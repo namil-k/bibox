@@ -223,7 +223,7 @@ prepend_keymap = [
 | Any | `quit` `cancel` `undo` `redo` `next_preview_tab` `search` `copy_citekey` `open_pdf` `open_web` `fetch_metadata` `export_menu` `delete` `help` `edit_note` `sort_menu` `collections` `tags` `attach_pdf` `settings` `noop` |
 | `normal.entries` | `entry_down` `entry_up` `entry_top` `entry_bottom` `entry_screen_top` `entry_screen_middle` `entry_screen_bottom` `entry_half_page_down` `entry_half_page_up` `toggle_select` `select_all` `focus_collections` `focus_preview` |
 | `normal.collections` | `collection_down` `collection_up` `collection_top` `collection_bottom` `collection_half_page_down` `collection_half_page_up` `focus_entries` |
-| `normal.preview` | `preview_scroll_down` `preview_scroll_up` `preview_top` `preview_bottom` `preview_half_page_down` `preview_half_page_up` `next_tab` `prev_tab` `prev_tab_or_focus_entries` `focus_entries` |
+| `normal.preview` | `preview_scroll_down` `preview_scroll_up` `preview_top` `preview_bottom` `preview_half_page_down` `preview_half_page_up` `focus_entries` |
 
 Action names say what they move, not which panel has focus, so binding `entry_down` inside `[normal.preview]` is allowed and does what it says.
 

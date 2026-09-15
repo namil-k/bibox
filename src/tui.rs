@@ -1519,16 +1519,11 @@ impl App {
         }
     }
 
-    fn preview_next(&self, wrap: bool) -> Option<PreviewMode> {
+    /// Tab으로만 돈다. 마지막 탭 다음은 첫 탭.
+    fn preview_next(&self) -> Option<PreviewMode> {
         let modes = self.preview_modes();
         let i = modes.iter().position(|m| *m == self.preview_mode).unwrap_or(0);
-        if i + 1 < modes.len() { Some(modes[i + 1]) } else if wrap { Some(modes[0]) } else { None }
-    }
-
-    fn preview_prev(&self) -> Option<PreviewMode> {
-        let modes = self.preview_modes();
-        let i = modes.iter().position(|m| *m == self.preview_mode).unwrap_or(0);
-        if i > 0 { Some(modes[i - 1]) } else { None }
+        Some(modes[(i + 1) % modes.len()])
     }
 
     /// 탭을 바꿀 때 한 자리에서. Note는 노트를 읽고, 다른 플러그인 탭으로 옮기면 캐시를 비운다
@@ -2594,7 +2589,7 @@ fn status_bar_text(keymap: &Keymap, focus: Panel) -> String {
             push_pair(&mut parts, k(Action::EntryDown), k(Action::EntryUp), "navigate");
         }
         Panel::Preview => {
-            push_arrow(&mut parts, k(Action::PrevTabOrFocusEntries), "←entries");
+            push_arrow(&mut parts, k(Action::FocusEntries), "←entries");
             push(&mut parts, k(Action::NextPreviewTab), "switch mode");
             push_pair(&mut parts, k(Action::PreviewScrollDown), k(Action::PreviewScrollUp), "scroll");
         }
@@ -3499,24 +3494,6 @@ fn execute(app: &mut App, action: Action) -> Result<Flow> {
         Action::FocusCollections => { app.focus = Panel::Collections; }
         Action::FocusEntries => { app.focus = Panel::Entries; }
         Action::FocusPreview => { app.focus = Panel::Preview; }
-        Action::PrevTabOrFocusEntries => {
-            if let Some(prev) = app.preview_prev() {
-                app.set_preview_mode(prev);
-            } else {
-                app.focus = Panel::Entries;
-            }
-        }
-        Action::NextTab => {
-            if let Some(next) = app.preview_next(false) {
-                app.set_preview_mode(next);
-            }
-        }
-        Action::PrevTab => {
-            if let Some(prev) = app.preview_prev() {
-                app.set_preview_mode(prev);
-            }
-        }
-
         // ── 한 칸 이동 ──
         Action::CollectionDown => app.move_col_down(),
         Action::CollectionUp => app.move_col_up(),
@@ -3631,7 +3608,7 @@ fn execute(app: &mut App, action: Action) -> Result<Flow> {
         }
 
         Action::NextPreviewTab => {
-            if let Some(m) = app.preview_next(true) {
+            if let Some(m) = app.preview_next() {
                 app.set_preview_mode(m);
             }
         }

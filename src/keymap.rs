@@ -171,9 +171,6 @@ pub enum Action {
     PreviewBottom,
     PreviewHalfPageDown,
     PreviewHalfPageUp,
-    NextTab,
-    PrevTab,
-    PrevTabOrFocusEntries,
     // ── 플러그인 미리보기 탭 전용. 다른 탭에서는 무동작 ──
     TabNextPage,
     TabPrevPage,
@@ -203,7 +200,7 @@ impl Action {
             CollectionDown, CollectionUp, CollectionTop, CollectionBottom,
             CollectionHalfPageDown, CollectionHalfPageUp, FocusEntries,
             PreviewScrollDown, PreviewScrollUp, PreviewTop, PreviewBottom,
-            PreviewHalfPageDown, PreviewHalfPageUp, NextTab, PrevTab, PrevTabOrFocusEntries,
+            PreviewHalfPageDown, PreviewHalfPageUp,
             TabNextPage, TabPrevPage, TabZoomIn, TabZoomOut, TabZoomReset, TabPanLeft, TabPanRight,
         ]
     }
@@ -218,7 +215,7 @@ impl Action {
             | PreviewScrollDown | PreviewScrollUp | PreviewTop | PreviewBottom
             | PreviewHalfPageDown | PreviewHalfPageUp
             | FocusCollections | FocusEntries | FocusPreview
-            | NextTab | PrevTab | PrevTabOrFocusEntries | NextPreviewTab
+            | NextPreviewTab
             | TabNextPage | TabPrevPage | TabZoomIn | TabZoomOut | TabZoomReset | TabPanLeft | TabPanRight => "Navigation",
 
             ToggleSelect | SelectAll | Cancel => "Selection",
@@ -291,9 +288,6 @@ impl Action {
             PreviewBottom => "Jump to the bottom of the preview",
             PreviewHalfPageDown => "Scroll the preview down half a screen",
             PreviewHalfPageUp => "Scroll the preview up half a screen",
-            NextTab => "Step forward a preview tab",
-            PrevTab => "Step back a preview tab",
-            PrevTabOrFocusEntries => "Step back a preview tab, or leave for the Entries panel",
             TabNextPage => "Next page of the preview tab",
             TabPrevPage => "Previous page of the preview tab",
             TabZoomIn => "Zoom the preview tab in by 25%",
@@ -464,10 +458,8 @@ pub fn default_keymap() -> Keymap {
     collections.extend(global_bindings());
 
     let mut preview = vec![
-        b("h", &[PrevTabOrFocusEntries]),
-        b("<Left>", &[PrevTabOrFocusEntries]),
-        b("l", &[NextTab]),
-        b("<Right>", &[NextTab]),
+        b("h", &[FocusEntries]),
+        b("<Left>", &[FocusEntries]),
         b("j", &[PreviewScrollDown]),
         b("<Down>", &[PreviewScrollDown]),
         b("k", &[PreviewScrollUp]),
@@ -948,8 +940,8 @@ mod tests {
     fn action_names_are_snake_case_in_toml() {
         let a: Action = serde_json::from_str("\"entry_down\"").unwrap();
         assert_eq!(a, Action::EntryDown);
-        let b: Action = serde_json::from_str("\"prev_tab_or_focus_entries\"").unwrap();
-        assert_eq!(b, Action::PrevTabOrFocusEntries);
+        let b: Action = serde_json::from_str("\"preview_half_page_down\"").unwrap();
+        assert_eq!(b, Action::PreviewHalfPageDown);
     }
 
     #[test]
@@ -1086,8 +1078,7 @@ mod tests {
                 ("<C-d>", Action::CollectionHalfPageDown), ("<C-u>", Action::CollectionHalfPageUp),
             ]),
             ("preview", &[
-                ("h", Action::PrevTabOrFocusEntries), ("<Left>", Action::PrevTabOrFocusEntries),
-                ("l", Action::NextTab), ("<Right>", Action::NextTab),
+                ("h", Action::FocusEntries), ("<Left>", Action::FocusEntries),
                 ("j", Action::PreviewScrollDown), ("<Down>", Action::PreviewScrollDown),
                 ("k", Action::PreviewScrollUp), ("<Up>", Action::PreviewScrollUp),
                 ("G", Action::PreviewBottom),
