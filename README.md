@@ -171,7 +171,7 @@ The bar at the bottom carries panel navigation and the few actions used many tim
 
 ### PDF tab
 
-The PDF tab is drawn by the built-in `pdf-view` plugin, which needs poppler (`brew install poppler`, or `apt install poppler-utils`). In a terminal that can show pictures (kitty, Ghostty, WezTerm, iTerm2, foot; anything else falls back to half-block characters) each page is rendered to fit the panel width; elsewhere, and inside tmux or screen, the tab shows the page's text. The status line at the bottom says `page 3/14  100%` (or `text`).
+The PDF tab is drawn by the built-in `pdf-view` plugin, which needs poppler (`brew install poppler`, or `apt install poppler-utils`). It is off until you turn it on: `,` then Plugins, or `bibox plugin install pdf-view`. In a terminal that can show pictures (kitty, Ghostty, WezTerm, iTerm2, foot; anything else falls back to half-block characters) each page is rendered to fit the panel width; elsewhere, and inside tmux or screen, the tab shows the page's text. The status line at the bottom says `page 3/14  100%` (or `text`).
 
 | Key | Action |
 |-----|--------|
@@ -183,7 +183,7 @@ The PDF tab is drawn by the built-in `pdf-view` plugin, which needs poppler (`br
 | `0` | Fit the page to the panel width again |
 | `H`/`L` | Pan left / right when the page is wider than the panel |
 
-Remove the plugin (`,` then Plugins) and the tab disappears; `bibox plugin install pdf-view` brings it back.
+Remove the plugin (`,` then Plugins) and the tab disappears; `bibox plugin install pdf-view` brings it back. If the tab feels slow, run with `BIBOX_TRACE=/tmp/bibox-trace.log` and attach the file to a bug report: it records each request, the plugin round trip, decoding, and every frame that took over 20ms.
 
 ### Customizing keybindings
 
@@ -500,13 +500,13 @@ run = "python3 cli.py"
 
 `before_add` runs before an entry is saved and may return `apply` to change it; if the plugin fails the entry is added unchanged. `after_write` and `after_note_save` run in the background after the save and cannot open popups. Plugin settings live in `config.toml` under `[plugins.<name>]` and arrive as `context.config`. Declared settings get a typed row on the plugin page and `bibox doctor` warns about values of the wrong type and keys that match no declaration (with a spelling suggestion). bibox does not fill in defaults: read `context.config` with a fallback as before.
 
-A `[[tabs]]` entry adds a tab to the preview panel. When the tab is visible bibox calls its command in the background with `trigger = "tab"` and `tab: {"page": 3, "width_px": 840, "images": true}`; the command answers `{"tab": {"image": "/path/page.png", "pages": 14}}` or, when `images` is false, `{"tab": {"lines": ["..."], "pages": 14}}`. bibox owns page, zoom, scrolling and the cache; the plugin only renders one page at one width. It cannot open popups. The built-in `pdf-view` is written this way.
+A `[[tabs]]` entry adds a tab to the preview panel. When the tab is visible bibox calls its command in the background with `trigger = "tab"` and `tab: {"page": 3, "width_px": 840, "images": true}`; the command answers `{"tab": {"image": "/path/page.png", "pages": 14}}` (PNG or JPEG) or, when `images` is false, `{"tab": {"lines": ["..."], "pages": 14}}`. bibox owns page, zoom, scrolling and the cache; the plugin only renders one page at one width. It cannot open popups. The built-in `pdf-view` is written this way.
 
 **Environment.** Every plugin process gets `BIBOX_BIN`, `BIBOX_CONFIG_DIR`, `BIBOX_DB_PATH`, `BIBOX_NOTES_DIR`, `BIBOX_PDF_DIR`, `BIBOX_HOME` (when set) and `BIBOX_PLUGIN_DIR`. To change the library, call `$BIBOX_BIN` (`modify`, `note --stdin`, `add --json`) and return `refresh`, or return `apply` for a few entries. The plugin's stderr goes to `plugins/<name>/stderr.log`, truncated on every start.
 
 **When it breaks.** A broken plugin never stops bibox. Manifest problems are shown before the TUI opens and by `bibox doctor`. A plugin that exits, hangs (press Esc) or prints something that is not JSON is reported in the status line and restarted on the next call. Default keys that collide with built-in keys are dropped with a warning; bind them yourself in `keymap.toml`.
 
-**Built-in plugins** live inside the bibox binary and appear in `bibox plugin list` as `built-in`: `git-sync` (commits db.json and notes on every write when the portable home is a git repository; `g s` syncs, `g t` shows status) and `pdf-view` (the PDF tab; needs poppler). Remove one like any plugin; `bibox plugin install git-sync` puts it back. **Example plugin** (`plugins/` in this repository): `summarize` (`S`, PDF to the note's Summary section with Claude; needs `pip install anthropic` and `ANTHROPIC_API_KEY`).
+**Built-in plugins** live inside the bibox binary and appear in `bibox plugin list` as `built-in`: `git-sync` (commits db.json and notes on every write when the portable home is a git repository; `g s` syncs, `g t` shows status) and `pdf-view` (the PDF tab; needs poppler, so it is not installed until you ask). Remove one like any plugin; `bibox plugin install git-sync` puts it back. **Example plugin** (`plugins/` in this repository): `summarize` (`S`, PDF to the note's Summary section with Claude; needs `pip install anthropic` and `ANTHROPIC_API_KEY`).
 
 ## Settings
 

@@ -1,4 +1,4 @@
-//! 플러그인 미리보기 탭의 상태. 쪽·배율·스크롤·pan과 캐시, 창 계산은 여기(순수), 그리기와
+//! 플러그인 미리보기 탭의 상태. 쪽·배율·스크롤·pan과 캐시, 행·열 계산은 여기(순수), 그리기와
 //! 플러그인 호출은 tui.rs. 플러그인은 "n쪽을 W픽셀 폭으로"만 안다.
 
 use std::collections::HashMap;
@@ -10,6 +10,13 @@ use crate::plugin::TabResponse;
 pub const BOTTOM: u32 = u32::MAX;
 pub const ZOOM_STEP: u32 = 25;
 pub const ZOOM_MIN: u32 = 25;
+/// 엔트리 커서가 이만큼 멈춰야 탭을 요청한다. 목록을 훑는 동안 지나가는 엔트리를 렌더하지 않기 위해.
+pub const SETTLE_MS: u64 = 150;
+
+/// `since`(엔트리가 바뀐 시각)로부터 `SETTLE_MS`가 지났는가.
+pub fn settled(since: std::time::Instant, now: std::time::Instant) -> bool {
+    now.saturating_duration_since(since) >= std::time::Duration::from_millis(SETTLE_MS)
+}
 
 /// 패널 안쪽 크기(칸)와 칸의 픽셀 크기. `rows`는 상태 줄을 뺀 것.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,21 +37,22 @@ pub fn width_px(vp: &Viewport, zoom_pct: u32) -> u32 {
     vp.view_w() * zoom_pct / 100
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Window {
-    pub x: u32,
-    pub y: u32,
-    pub w: u32,
-    pub h: u32,
+/// 렌더 대기 표시. 80ms마다 한 칸, 점자 10프레임.
+pub fn spinner(elapsed_ms: u128) -> char {
+    const FRAMES: [char; 10] = ['\u{280B}', '\u{2819}', '\u{2839}', '\u{2838}', '\u{283C}', '\u{2834}', '\u{2826}', '\u{2827}', '\u{2807}', '\u{280F}'];
+    FRAMES[(elapsed_ms / 80 % 10) as usize]
 }
 
-/// 이미지에서 보이는 부분. 이미지보다 창이 크면 이미지 전체, 스크롤·pan은 끝에서 멈춘다.
-pub fn window(vp: &Viewport, img_w: u32, img_h: u32, scroll_px: u32, pan_px: u32) -> Window {
+/// 픽셀 스크롤을 칸 행으로. 올림이라 바닥이 칸에 안 맞아도 마지막 조각 행이 보인다.
+pub fn scroll_rows(scroll_px: u32, cell_h: u16) -> u16 {
+    if cell_h == 0 { return 0; }
+    scroll_px.div_ceil(cell_h as u32).min(u16::MAX as u32) as u16
+}
+
+/// 보이는 열 `(x, w)`. 이미지가 창보다 넓을 때만(줌) pan만큼 잘라 낸다.
+pub fn columns(vp: &Viewport, img_w: u32, pan_px: u32) -> (u32, u32) {
     let w = img_w.min(vp.view_w());
-    let h = img_h.min(vp.view_h());
-    let x = pan_px.min(img_w.saturating_sub(w));
-    let y = scroll_px.min(img_h.saturating_sub(h));
-    Window { x, y, w, h }
+    (pan_px.min(img_w.saturating_sub(w)), w)
 }
 
 /// 플러그인이 준 이미지를 요청한 폭에 정확히 맞춘다. dpi 반올림으로 몇 픽셀 어긋난 것을 바로잡는다.
@@ -64,8 +72,20 @@ pub struct CacheKey {
 }
 
 pub enum Content {
+    /// halfblocks/sixel/iterm2용 원본. kitty가 아닐 때만.
     Image(image::DynamicImage),
+    /// kitty용, 이미 압축·인코딩된 전송 시퀀스. 원본은 들고 있지 않는다(2240px 쪽 하나가 28MB).
+    Kitty(crate::kitty::Page),
     Lines(Vec<String>),
+}
+
+impl Content {
+    fn kitty_id(&self) -> Option<u32> {
+        match self {
+            Content::Kitty(p) => Some(p.id),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -73,11 +93,25 @@ pub struct Cache {
     map: HashMap<CacheKey, Content>,
 }
 
+/// 캐시에서 빠진 kitty 그림의 id. 터미널에 `delete`를 보내야 메모리가 풀린다.
 impl Cache {
     pub fn get(&self, k: &CacheKey) -> Option<&Content> { self.map.get(k) }
-    pub fn insert(&mut self, k: CacheKey, v: Content) { self.map.insert(k, v); }
+    pub fn insert(&mut self, k: CacheKey, v: Content) -> Vec<u32> {
+        self.map.insert(k, v).and_then(|old| old.kitty_id()).into_iter().collect()
+    }
     /// 항목이 바뀌면 그 항목 것만 남긴다.
-    pub fn retain_entry(&mut self, key: &str) { self.map.retain(|k, _| k.entry_key == key); }
+    pub fn retain_entry(&mut self, key: &str) -> Vec<u32> {
+        let mut gone = Vec::new();
+        self.map.retain(|k, v| {
+            let keep = k.entry_key == key;
+            if !keep { gone.extend(v.kitty_id()); }
+            keep
+        });
+        gone
+    }
+    pub fn clear(&mut self) -> Vec<u32> {
+        self.map.drain().filter_map(|(_, v)| v.kitty_id()).collect()
+    }
 }
 
 /// 플러그인 응답에서 내용의 출처와 쪽수. image가 lines보다 우선.
@@ -97,6 +131,19 @@ pub fn parse_response(tab: Option<TabResponse>) -> Result<(Source, u32), String>
         return Ok((Source::Lines(l), pages));
     }
     Err("empty tab response".to_string())
+}
+
+/// 응답을 캐시에 넣을 내용으로. 그림은 여기서 읽고 요청 폭에 맞춘다. 워커 스레드에서 부른다(메인은 넣기만).
+pub fn decode(tab: Option<TabResponse>, width_px: u32) -> Result<(Content, u32), String> {
+    let (source, pages) = parse_response(tab)?;
+    let content = match source {
+        Source::Lines(l) => Content::Lines(l),
+        Source::Image(p) => match image::open(&p) {
+            Ok(img) => Content::Image(fit_width(img, width_px)),
+            Err(e) => return Err(format!("cannot read {}: {}", p.display(), e)),
+        },
+    };
+    Ok((content, pages))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,10 +168,10 @@ impl TabState {
         TabState { entry_key: None, page: 1, pages: 1, zoom_pct: 100, scroll: 0, pan: 0, pending: None, error: None }
     }
 
-    /// 항목이 바뀌면 첫 쪽 꼭대기. 배율은 유지.
-    pub fn on_entry(&mut self, key: Option<&str>) {
+    /// 항목이 바뀌면 첫 쪽 꼭대기. 배율은 유지. 바뀌었으면 true.
+    pub fn on_entry(&mut self, key: Option<&str>) -> bool {
         if self.entry_key.as_deref() == key {
-            return;
+            return false;
         }
         self.entry_key = key.map(str::to_string);
         self.page = 1;
@@ -133,6 +180,7 @@ impl TabState {
         self.pan = 0;
         self.pending = None;
         self.error = None;
+        true
     }
 
     pub fn set_pages(&mut self, n: u32) {
@@ -230,18 +278,29 @@ mod tests {
     }
 
     #[test]
-    fn the_window_is_clamped_to_the_image() {
-        // 800x1200 이미지, 창 800x600
-        let w = window(&vp(), 800, 1200, 0, 0);
-        assert_eq!((w.x, w.y, w.w, w.h), (0, 0, 800, 600));
-        let w = window(&vp(), 800, 1200, 900, 0);
-        assert_eq!(w.y, 600, "scroll past the end stops at the bottom");
-        let w = window(&vp(), 800, 400, 50, 0);
-        assert_eq!((w.y, w.h), (0, 400), "a short page shows whole and ignores scroll");
-        let w = window(&vp(), 1000, 1200, 0, 500);
-        assert_eq!((w.x, w.w), (200, 800), "pan stops at the right edge");
-        let w = window(&vp(), 600, 1200, 0, 100);
-        assert_eq!((w.x, w.w), (0, 600), "a narrow page never pans");
+    fn the_spinner_advances_every_80ms_and_wraps() {
+        assert_eq!(spinner(0), spinner(79), "one frame lasts 80ms");
+        assert_ne!(spinner(0), spinner(80));
+        assert_eq!(spinner(0), spinner(800), "ten frames, then around again");
+        assert_eq!(spinner(0), '\u{280B}', "starts at the braille dot pattern ⠋");
+    }
+
+    #[test]
+    fn scroll_rows_rounds_up_so_the_last_partial_row_is_shown() {
+        assert_eq!(scroll_rows(0, 20), 0);
+        assert_eq!(scroll_rows(60, 20), 3, "j steps are whole rows");
+        assert_eq!(scroll_rows(61, 20), 4, "a bottom that is not row aligned still reaches the end");
+        assert_eq!(scroll_rows(2_000_000, 20), u16::MAX, "never wraps around");
+        assert_eq!(scroll_rows(10, 0), 0, "a zero cell is not a division by zero");
+    }
+
+    #[test]
+    fn columns_crop_only_when_the_image_is_wider_than_the_panel() {
+        // 창 폭 800
+        assert_eq!(columns(&vp(), 800, 0), (0, 800));
+        assert_eq!(columns(&vp(), 600, 100), (0, 600), "a narrow image shows whole and ignores pan");
+        assert_eq!(columns(&vp(), 1000, 100), (100, 800));
+        assert_eq!(columns(&vp(), 1000, 500), (200, 800), "pan past the end stops at the right edge");
     }
 
     #[test]
@@ -322,13 +381,45 @@ mod tests {
         s.scroll = 100;
         s.pan = 30;
         s.zoom_pct = 150;
-        s.on_entry(Some("a"));
+        assert!(s.on_entry(Some("a")), "a different entry is a change");
         assert_eq!((s.page, s.scroll, s.pan, s.zoom_pct, s.pages), (1, 0, 0, 150, 1));
         assert_eq!(s.entry_key.as_deref(), Some("a"));
-        s.on_entry(Some("a"));
+        assert!(!s.on_entry(Some("a")), "the same entry is not");
         s.page = 5;
         s.set_pages(3);
         assert_eq!(s.page, 3, "pages shrinking pulls the page back");
+    }
+
+    /// 엔트리 목록을 훑는 동안은 요청하지 않는다. 커서가 멈춘 지 SETTLE_MS가 지나야 한다.
+    #[test]
+    fn a_request_waits_until_the_cursor_has_settled() {
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        assert!(!settled(t0, t0));
+        assert!(!settled(t0, t0 + Duration::from_millis(SETTLE_MS - 1)));
+        assert!(settled(t0, t0 + Duration::from_millis(SETTLE_MS)));
+    }
+
+    /// 스레드에서 다 끝내고 메인은 넣기만 한다. 그림은 읽어서 요청 폭에 맞춘 채로 온다.
+    #[test]
+    fn decode_reads_the_image_off_the_main_thread_and_fits_the_width() {
+        use crate::plugin::TabResponse;
+        let dir = std::env::temp_dir().join(format!("bibox-decode-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = dir.join("p.png");
+        image::DynamicImage::new_rgb8(10, 20).save(&png).unwrap();
+        let (content, pages) = decode(Some(TabResponse { image: Some(png.clone()), lines: None, pages: Some(3) }), 20).unwrap();
+        assert_eq!(pages, 3);
+        assert!(matches!(content, Content::Image(ref i) if i.width() == 20 && i.height() == 40), "fitted to the wanted width");
+        let (content, _) = decode(Some(TabResponse { image: None, lines: Some(vec!["a".into()]), pages: None }), 20).unwrap();
+        assert!(matches!(content, Content::Lines(ref l) if l == &vec!["a".to_string()]));
+        let e = match decode(Some(TabResponse { image: Some(dir.join("missing.png")), lines: None, pages: None }), 20) {
+            Err(e) => e,
+            Ok(_) => panic!("a missing file is an error"),
+        };
+        assert!(e.contains("missing.png"), "{}", e);
+        assert!(decode(None, 20).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -349,9 +440,26 @@ mod tests {
         let mut c = Cache::default();
         c.insert(CacheKey { entry_key: "a".into(), page: 1, width_px: 800 }, Content::Lines(vec![]));
         c.insert(CacheKey { entry_key: "b".into(), page: 1, width_px: 800 }, Content::Lines(vec![]));
-        c.retain_entry("b");
+        assert!(c.retain_entry("b").is_empty(), "text pages have nothing to delete in the terminal");
         assert!(c.get(&CacheKey { entry_key: "a".into(), page: 1, width_px: 800 }).is_none());
         assert!(c.get(&CacheKey { entry_key: "b".into(), page: 1, width_px: 800 }).is_some());
+    }
+
+    /// 터미널에 올린 그림은 캐시에서 빠질 때 id를 돌려받아 지운다(안 지우면 터미널 메모리에 영영 남는다).
+    #[test]
+    fn evicted_kitty_pages_hand_back_their_ids() {
+        let page = |id| Content::Kitty(crate::kitty::encode(&image::DynamicImage::new_rgb8(4, 4), id));
+        let k = |e: &str, p| CacheKey { entry_key: e.into(), page: p, width_px: 800 };
+        let mut c = Cache::default();
+        c.insert(k("a", 1), page(11));
+        c.insert(k("a", 2), page(12));
+        c.insert(k("b", 1), page(21));
+        assert_eq!(c.insert(k("b", 1), page(22)), vec![21], "replacing a key evicts the old picture");
+        let mut ids = c.retain_entry("b");
+        ids.sort();
+        assert_eq!(ids, vec![11, 12]);
+        assert_eq!(c.clear(), vec![22]);
+        assert!(c.get(&k("b", 1)).is_none());
     }
 
     #[test]

@@ -35,7 +35,8 @@ enum Panel {
 }
 
 /// 탭 렌더 스레드의 답: (요청한 탭 인덱스, 요청 키, 결과).
-type TabRender = (usize, crate::preview_tabs::CacheKey, Result<Final, PluginError>);
+/// 탭 스레드의 결과. 플러그인 호출·해석·그림 읽기·폭 맞춤까지 끝난 것. 오류에는 플러그인 이름이 붙어 있다.
+type TabRender = (usize, crate::preview_tabs::CacheKey, Result<(crate::preview_tabs::Content, u32), String>);
 
 #[derive(Clone, Copy, PartialEq)]
 enum PreviewMode {
@@ -481,8 +482,14 @@ pub struct App {
     bg_tab: Option<Receiver<TabRender>>,
     /// 이미지를 그릴 수 있으면 Some. `detect_images`가 시작 때 정한다(설정과 터미널).
     images: Option<ratatui_image::picker::Picker>,
-    /// 마지막으로 인코딩한 (키, 창, 프로토콜). 창이 그대로면 다시 인코딩하지 않는다.
-    tab_proto: Option<(crate::preview_tabs::CacheKey, crate::preview_tabs::Window, ratatui_image::protocol::StatefulProtocol)>,
+    /// 올려 둔 쪽 (키, pan, 프로토콜). 쪽·배율·pan이 그대로면 다시 만들지 않고 행만 옮겨 그린다.
+    tab_sliced: Option<(crate::preview_tabs::CacheKey, u32, ratatui_image::sliced::SlicedProtocol)>,
+    /// 지금 만드는 중인 요청을 보낸 시각. 스피너 프레임의 기준.
+    tab_pending_since: Option<std::time::Instant>,
+    /// 미리보기 항목이 바뀐 시각. `SETTLE_MS`가 지나야 요청한다(목록을 훑는 동안 지나가는 항목은 렌더하지 않음).
+    tab_entry_since: std::time::Instant,
+    /// 캐시에서 빠진 kitty 그림 id. 다음 프레임 뒤에 터미널에서 지운다.
+    kitty_deletes: Vec<u32>,
     hooks: crate::hooks::HookRunner,
     bg_hooks: Vec<Receiver<crate::hooks::HookOutcome>>,
 }
@@ -574,7 +581,10 @@ impl App {
             tab_cache: Default::default(),
             bg_tab: None,
             images: None,
-            tab_proto: None,
+            tab_sliced: None,
+            tab_pending_since: None,
+            tab_entry_since: std::time::Instant::now(),
+            kitty_deletes: Vec::new(),
             bg_hooks: Vec::new(),
         })
     }
@@ -1189,9 +1199,10 @@ impl App {
         self.settings.plugins = plugin_rows();
         self.settings_fix_cursor();
         // 탭 목록이 바뀌었다. 인덱스가 밀렸을 수 있으니 캐시를 버리고 없어진 탭은 Info로
-        self.tab_cache = Default::default();
+        let gone = self.tab_cache.clear();
+        self.kitty_deletes.extend(gone);
         self.tab.pending = None;
-        self.tab_proto = None;
+        self.tab_sliced = None;
         if let PreviewMode::Plugin(i) = self.preview_mode {
             if i >= self.host.tabs().len() {
                 self.preview_mode = PreviewMode::Info;
@@ -1298,7 +1309,8 @@ impl App {
     /// (캐시 키에 플러그인이 없다. 탭 하나·항목 하나만 캐시한다).
     fn set_preview_mode(&mut self, m: PreviewMode) {
         if matches!(m, PreviewMode::Plugin(_)) && m != self.preview_mode {
-            self.tab_cache = Default::default();
+            let gone = self.tab_cache.clear();
+            self.kitty_deletes.extend(gone);
             self.tab.pending = None;
         }
         self.preview_mode = m;
@@ -1314,51 +1326,47 @@ impl App {
         let context = self.plugin_context(&t.plugin);
         let host = Arc::clone(&self.host);
         let req = crate::plugin::TabRequest { page: key.page, width_px: key.width_px, images };
+        let kitty = self.images.as_ref().map(|p| p.protocol_type() == ratatui_image::picker::ProtocolType::Kitty).unwrap_or(false);
         let (tx, rx) = std::sync::mpsc::channel();
         let k = key.clone();
+        crate::trace::log(|| format!("tab.req {} p{} w{}", k.entry_key, k.page, k.width_px));
         std::thread::spawn(move || {
+            let t0 = std::time::Instant::now();
             let result = host.invoke_with(t.cmd, "tab", context, Some(req), &mut crate::plugin::NoUiSink);
-            let _ = tx.send((tab_index, k, result));
+            crate::trace::log(|| format!("tab.plugin {:.0}ms p{} ok={}", t0.elapsed().as_secs_f64() * 1000.0, k.page, result.is_ok()));
+            // 그림 읽기와 폭 맞춤도 여기서. 메인 스레드는 캐시에 넣기만 한다
+            let decoded = match result {
+                Err(e) => Err(format!("{}: {}", t.plugin, e)),
+                Ok(Final { error: Some(e), .. }) => Err(format!("{}: {}", t.plugin, e)),
+                Ok(f) => crate::preview_tabs::decode(f.tab, k.width_px).map_err(|e| format!("{}: {}", t.plugin, e)),
+            };
+            // kitty면 압축·인코딩까지 여기서. 원본은 버린다
+            let decoded = decoded.map(|(content, pages)| match content {
+                crate::preview_tabs::Content::Image(img) if kitty => (crate::preview_tabs::Content::Kitty(crate::kitty::encode(&img, crate::kitty::next_id())), pages),
+                other => (other, pages),
+            });
+            crate::trace::log(|| format!("tab.decoded {:.0}ms p{}", t0.elapsed().as_secs_f64() * 1000.0, k.page));
+            let _ = tx.send((tab_index, k, decoded));
         });
         self.bg_tab = Some(rx);
         self.tab.pending = Some(key);
+        self.tab_pending_since = Some(std::time::Instant::now());
     }
 
-    /// 응답을 캐시에 넣는다. 이미지는 여기서 읽는다(PNG 디코드).
-    fn finish_tab(&mut self, key: crate::preview_tabs::CacheKey, plugin: &str, result: Result<Final, PluginError>) {
-        use crate::preview_tabs::{parse_response, Content, Source};
+    /// 스레드가 끝낸 결과를 캐시에 넣는다.
+    fn finish_tab(&mut self, key: crate::preview_tabs::CacheKey, result: Result<(crate::preview_tabs::Content, u32), String>) {
         self.tab.pending = None;
         // 항목이 바뀐 뒤 도착한 답은 버린다(쪽수도 옛 항목 것)
         if self.tab.entry_key.as_deref() != Some(key.entry_key.as_str()) {
             return;
         }
-        let f = match result {
-            Ok(f) => f,
-            Err(e) => {
-                self.tab.error = Some(format!("{}: {}", plugin, e));
-                return;
-            }
-        };
-        if let Some(e) = f.error {
-            self.tab.error = Some(format!("{}: {}", plugin, e));
-            return;
-        }
-        match parse_response(f.tab) {
-            Err(e) => self.tab.error = Some(format!("{}: {}", plugin, e)),
-            Ok((source, pages)) => {
+        match result {
+            Err(e) => self.tab.error = Some(e),
+            Ok((content, pages)) => {
                 self.tab.set_pages(pages);
                 self.tab.error = None;
-                let content = match source {
-                    Source::Lines(l) => Content::Lines(l),
-                    Source::Image(p) => match image::open(&p) {
-                        Ok(img) => Content::Image(crate::preview_tabs::fit_width(img, key.width_px)),
-                        Err(e) => {
-                            self.tab.error = Some(format!("{}: cannot read {}: {}", plugin, p.display(), e));
-                            return;
-                        }
-                    },
-                };
-                self.tab_cache.insert(key, content);
+                let gone = self.tab_cache.insert(key, content);
+                self.kitty_deletes.extend(gone);
             }
         }
     }
@@ -1404,6 +1412,7 @@ impl App {
         match self.tab_cache.get(&self.tab_key()?)? {
             Content::Lines(l) => Some((l.len() as u32, vp.rows as u32, 0, 0)),
             Content::Image(img) => Some((img.height(), vp.view_h(), img.width(), vp.view_w())),
+            Content::Kitty(page) => Some((page.height, vp.view_h(), page.width, vp.view_w())),
         }
     }
 
@@ -2208,8 +2217,11 @@ fn draw_preview_plugin(f: &mut Frame, app: &mut App, area: Rect, tab_index: usiz
         f.render_widget(Paragraph::new(app.config.msgs.tab_no_entry()).style(Style::default().fg(theme().muted)), area);
         return;
     };
-    app.tab.on_entry(Some(&entry.bibtex_key));
-    app.tab_cache.retain_entry(&entry.bibtex_key);
+    if app.tab.on_entry(Some(&entry.bibtex_key)) {
+        app.tab_entry_since = std::time::Instant::now();
+    }
+    let gone = app.tab_cache.retain_entry(&entry.bibtex_key);
+    app.kitty_deletes.extend(gone);
     if entry.file_path.is_none() {
         f.render_widget(Paragraph::new(app.config.msgs.tab_no_pdf()).style(Style::default().fg(theme().muted)), area);
         return;
@@ -2218,8 +2230,11 @@ fn draw_preview_plugin(f: &mut Frame, app: &mut App, area: Rect, tab_index: usiz
     let body = rows[0];
     let images = app.images_on();
     let Some(key) = app.tab_key() else { return };
-    // 오류가 남아 있으면 다시 묻지 않는다(매 프레임 플러그인을 띄우는 루프를 막는다). 쪽·배율을 바꾸면 오류가 지워져 다시 묻는다
-    if app.tab.error.is_none() && app.tab_cache.get(&key).is_none() && app.tab.pending.as_ref() != Some(&key) && app.bg_tab.is_none() {
+    // 오류가 남아 있으면 다시 묻지 않는다(매 프레임 플러그인을 띄우는 루프를 막는다). 쪽·배율을 바꾸면 오류가 지워져 다시 묻는다.
+    // 항목이 방금 바뀌었으면 커서가 멈출 때까지 기다린다
+    let waiting = app.tab.error.is_none() && app.tab_cache.get(&key).is_none();
+    let settled = crate::preview_tabs::settled(app.tab_entry_since, std::time::Instant::now());
+    if waiting && settled && app.tab.pending.as_ref() != Some(&key) && app.bg_tab.is_none() {
         app.request_tab(tab_index, key.clone(), images);
     }
     // error를 복제해 두어야 아래 팔에서 app.tab을 고칠 수 있다(match 대상이 빌린 채로 남는다)
@@ -2227,6 +2242,11 @@ fn draw_preview_plugin(f: &mut Frame, app: &mut App, area: Rect, tab_index: usiz
     let pending = app.tab.pending.is_some();
     let (cell_w, cell_h) = app.tab_cell();
     let dim = Style::default().fg(theme().muted);
+    // 만드는 중이면 스피너. 루프가 16ms마다 그리므로 시각만으로 돈다
+    let rendering = {
+        let ms = app.tab_pending_since.map(|t| t.elapsed().as_millis()).unwrap_or(0);
+        format!("{} {}", crate::preview_tabs::spinner(ms), app.config.msgs.tab_rendering(app.tab.page))
+    };
     let status = match (error, pending, app.tab_cache.get(&key)) {
         // 오류는 본문에 줄바꿈해서. 상태 줄 한 칸에는 poppler 안내 같은 긴 문장이 안 들어간다
         (Some(e), _, _) => {
@@ -2239,30 +2259,44 @@ fn draw_preview_plugin(f: &mut Frame, app: &mut App, area: Rect, tab_index: usiz
             let p = Paragraph::new(lines.iter().map(|l| Line::from(l.as_str())).collect::<Vec<_>>()).scroll((app.tab.scroll as u16, 0));
             f.render_widget(p, body);
             if pending {
-                Line::from(Span::styled(app.config.msgs.tab_rendering(app.tab.page), dim))
+                Line::from(Span::styled(rendering.clone(), dim))
             } else {
                 Line::from(Span::styled(format!("page {}/{}  text", app.tab.page, app.tab.pages), dim))
+            }
+        }
+        (None, _, Some(Content::Kitty(page))) => {
+            let vp = crate::preview_tabs::Viewport { cols: body.width, rows: body.height, cell_w, cell_h };
+            app.tab.clamp(page.height, vp.view_h(), page.width, vp.view_w());
+            let scroll_rows = crate::preview_tabs::scroll_rows(app.tab.scroll, cell_h);
+            let pan_cols = (app.tab.pan / cell_w.max(1) as u32).min(u16::MAX as u32) as u16;
+            f.render_widget(KittyPage { page, scroll_rows, pan_cols, cell_w, cell_h }, body);
+            if pending {
+                Line::from(Span::styled(rendering.clone(), dim))
+            } else {
+                Line::from(vec![
+                    Span::styled(format!("page {}/{}  {}%", app.tab.page, app.tab.pages, app.tab.zoom_pct), dim),
+                    Span::styled("  [kitty]", dim.add_modifier(Modifier::DIM)),
+                ])
             }
         }
         (None, _, Some(Content::Image(img))) => {
             let vp = crate::preview_tabs::Viewport { cols: body.width, rows: body.height, cell_w, cell_h };
             app.tab.clamp(img.height(), vp.view_h(), img.width(), vp.view_w());
-            let win = crate::preview_tabs::window(&vp, img.width(), img.height(), app.tab.scroll, app.tab.pan);
-            // 잘린 이미지는 창마다 다르다. 창이 그대로면 인코딩을 다시 하지 않는다
-            let stale = app.tab_proto.as_ref().map(|(k, w, _)| *k != key || *w != win).unwrap_or(true);
+            // 쪽은 한 번만 올린다. 스크롤은 행만 옮기고, 쪽·배율·pan이 바뀔 때만 다시 만든다
+            let stale = app.tab_sliced.as_ref().map(|(k, p, _)| *k != key || *p != app.tab.pan).unwrap_or(true);
             if stale {
                 if let Some(picker) = app.images.as_ref() {
-                    let cropped = img.crop_imm(win.x, win.y, win.w, win.h);
-                    app.tab_proto = Some((key.clone(), win, picker.new_resize_protocol(cropped)));
+                    let t0 = std::time::Instant::now();
+                    app.tab_sliced = page_protocol(picker, img, &vp, app.tab.pan).map(|s| (key.clone(), app.tab.pan, s));
+                    crate::trace::log(|| format!("tab.proto {:.0}ms {}x{} p{}", t0.elapsed().as_secs_f64() * 1000.0, img.width(), img.height(), key.page));
                 }
             }
-            if let Some((_, _, proto)) = app.tab_proto.as_mut() {
-                let widget = ratatui_image::StatefulImage::new().resize(ratatui_image::Resize::Crop(None));
-                f.render_stateful_widget(widget, body, proto);
+            if let Some((_, _, sliced)) = app.tab_sliced.as_ref() {
+                f.render_widget(page_widget(sliced, crate::preview_tabs::scroll_rows(app.tab.scroll, cell_h)), body);
             }
             let proto_name = app.images.as_ref().map(|p| format!("{:?}", p.protocol_type()).to_lowercase()).unwrap_or_default();
             if pending {
-                Line::from(Span::styled(app.config.msgs.tab_rendering(app.tab.page), dim))
+                Line::from(Span::styled(rendering.clone(), dim))
             } else {
                 Line::from(vec![
                     Span::styled(format!("page {}/{}  {}%", app.tab.page, app.tab.pages, app.tab.zoom_pct), dim),
@@ -2270,8 +2304,13 @@ fn draw_preview_plugin(f: &mut Frame, app: &mut App, area: Rect, tab_index: usiz
                 ])
             }
         }
-        (None, true, None) => Line::from(Span::styled(app.config.msgs.tab_rendering(app.tab.page), dim)),
-        (None, false, None) => Line::from(""),
+        // 아직 아무것도 없으면(만드는 중이거나 커서가 멈추길 기다리는 중) 본문 한가운데에. 상태 줄 한 칸은 눈에 안 띈다
+        (None, _, None) if waiting => {
+            let mid = Rect { y: body.y + body.height / 2, height: 1.min(body.height), ..body };
+            f.render_widget(Paragraph::new(rendering.clone()).style(Style::default().fg(theme().fg)).alignment(ratatui::layout::Alignment::Center), mid);
+            Line::from("")
+        }
+        (None, _, None) => Line::from(""),
     };
     f.render_widget(Paragraph::new(status), rows[1]);
 }
@@ -4322,6 +4361,10 @@ pub fn run_tui(config: &Config) -> Result<()> {
 
     let result = run_loop(&mut terminal, &mut app);
 
+    // 올려 둔 그림을 터미널에서 거둔다. 안 하면 창을 닫을 때까지 남는다
+    let gone = app.tab_cache.clear();
+    app.kitty_deletes.extend(gone);
+    let _ = flush_kitty_deletes(&mut app);
     host.shutdown();
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
@@ -4349,6 +4392,59 @@ fn detect_images(images: crate::config::Images) -> Option<ratatui_image::picker:
         Images::Auto if crate::config::in_multiplexer() => None,
         Images::Auto => Picker::from_query_stdio().ok(),
     }
+}
+
+/// kitty 쪽을 플레이스홀더로 그린다. 처음 한 번은 전송 시퀀스를 첫 칸에 같이 싣는다(ratatui-image와 같은 방식).
+/// 나머지 칸은 diff에서 건너뛰어 ratatui가 덮어쓰지 않게 한다.
+struct KittyPage<'a> {
+    page: &'a crate::kitty::Page,
+    scroll_rows: u16,
+    pan_cols: u16,
+    cell_w: u16,
+    cell_h: u16,
+}
+
+impl ratatui::widgets::Widget for KittyPage<'_> {
+    fn render(self, area: Rect, buf: &mut ratatui::buffer::Buffer) {
+        use ratatui::buffer::CellDiffOption;
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        let page_cols = (self.page.width.div_ceil(self.cell_w.max(1) as u32)).min(u16::MAX as u32) as u16;
+        let page_rows = (self.page.height.div_ceil(self.cell_h.max(1) as u32)).min(u16::MAX as u32) as u16;
+        let cols = area.width.min(page_cols.saturating_sub(self.pan_cols));
+        let rows = area.height.min(page_rows.saturating_sub(self.scroll_rows));
+        if cols == 0 {
+            return;
+        }
+        let mut transmit = self.page.take_transmit();
+        for y in 0..rows {
+            let mut symbol = transmit.take().unwrap_or_default();
+            symbol.push_str(&self.page.row(self.scroll_rows + y, self.pan_cols, cols, area.width.saturating_sub(1), area.height.saturating_sub(1)));
+            for x in 1..cols {
+                if let Some(cell) = buf.cell_mut((area.x + x, area.y + y)) {
+                    cell.set_diff_option(CellDiffOption::Skip);
+                }
+            }
+            if let Some(cell) = buf.cell_mut((area.x, area.y + y)) {
+                cell.set_symbol(&symbol).set_diff_option(CellDiffOption::ForcedWidth(std::num::NonZeroU16::new(1).unwrap()));
+            }
+        }
+    }
+}
+
+/// 쪽 하나를 통째로 올린다. 이미지가 창보다 넓으면(줌) pan만큼 열만 잘라 낸다.
+/// kitty는 한 번 전송한 뒤 플레이스홀더 행만 바꿔 스크롤하고, halfblocks/sixel도 한 번 인코딩한 것을 행 단위로 쓴다.
+fn page_protocol(picker: &ratatui_image::picker::Picker, img: &image::DynamicImage, vp: &crate::preview_tabs::Viewport, pan_px: u32) -> Option<ratatui_image::sliced::SlicedProtocol> {
+    let (x, w) = crate::preview_tabs::columns(vp, img.width(), pan_px);
+    let page = if w < img.width() { img.crop_imm(x, 0, w, img.height()) } else { img.clone() };
+    ratatui_image::sliced::SlicedProtocol::new(picker, page, None).ok()
+}
+
+/// 올려 둔 쪽을 `scroll_rows`행 위로 밀어 그린다.
+fn page_widget(sliced: &ratatui_image::sliced::SlicedProtocol, scroll_rows: u16) -> ratatui_image::sliced::SlicedImage<'_> {
+    let y = -(scroll_rows.min(i16::MAX as u16) as i16);
+    ratatui_image::sliced::SlicedImage::new(sliced, ratatui_image::sliced::SignedPosition { x: 0, y })
 }
 
 fn draw_search_result_picker(f: &mut Frame, state: &SearchResultPickerState, area: Rect) {
@@ -4608,12 +4704,32 @@ fn handle_fetch_preview(app: &mut App, key: crossterm::event::KeyEvent) -> Resul
     Ok(false)
 }
 
+/// 캐시에서 빠진 kitty 그림을 터미널에서 지운다. 프레임 사이에 쓰므로 ratatui 출력과 섞이지 않는다.
+fn flush_kitty_deletes(app: &mut App) -> Result<()> {
+    if app.kitty_deletes.is_empty() {
+        return Ok(());
+    }
+    use std::io::Write as _;
+    let mut out = io::stdout().lock();
+    for id in app.kitty_deletes.drain(..) {
+        out.write_all(crate::kitty::delete(id).as_bytes())?;
+    }
+    out.flush()?;
+    Ok(())
+}
+
 fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
 ) -> Result<()> {
     loop {
+        let t_frame = std::time::Instant::now();
         terminal.draw(|f| draw(f, app))?;
+        let frame_ms = t_frame.elapsed().as_secs_f64() * 1000.0;
+        flush_kitty_deletes(app)?;
+        if frame_ms >= 20.0 {
+            crate::trace::log(|| format!("frame {:.0}ms plugin_tab={} pending={}", frame_ms, matches!(app.preview_mode, PreviewMode::Plugin(_)), app.tab.pending.is_some()));
+        }
 
         if event::poll(std::time::Duration::from_millis(16))? {
             let ev = event::read()?;
@@ -4633,6 +4749,7 @@ fn run_loop(
             } else {
                 let mut quit = false;
                 for key in keys {
+                    crate::trace::log(|| format!("key {:?}", key.code));
                     if handle_key(app, key)? { quit = true; break; }
                 }
                 if quit { break; }
@@ -4868,13 +4985,13 @@ fn run_loop(
         if let Some(ref rx) = app.bg_tab {
             match rx.try_recv() {
                 Ok((tab_index, key, result)) => {
+                    crate::trace::log(|| format!("tab.recv p{}", key.page));
                     app.bg_tab = None;
                     // 다른 탭으로 옮긴 뒤 온 답은 버린다(캐시 키에 플러그인이 없다)
                     if app.preview_mode != PreviewMode::Plugin(tab_index) {
                         app.tab.pending = None;
                     } else {
-                        let plugin = app.host.tabs().get(tab_index).map(|t| t.plugin.clone()).unwrap_or_default();
-                        app.finish_tab(key, &plugin, result);
+                        app.finish_tab(key, result);
                     }
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {}
@@ -4960,6 +5077,80 @@ fn run_fetch_pdf(entry: &Entry, bibox_dir: &std::path::Path) -> Result<(String, 
 mod tests {
     use super::{collection_paths, plugin_page_title};
     use crate::models::{Entry, EntryType};
+
+    /// 쪽 그림은 한 번만 전송되고, 스크롤은 유니코드 플레이스홀더의 행 번호만 바꾼다.
+    /// (창마다 잘라 새로 보내던 옛 방식은 j 한 번에 수 MB를 다시 보냈다.)
+    #[test]
+    fn a_page_is_transmitted_once_and_scrolling_only_moves_placeholder_rows() {
+        use super::{page_protocol, page_widget};
+        use crate::preview_tabs::Viewport;
+        use ratatui::{buffer::Buffer, layout::Rect, widgets::Widget};
+        use ratatui_image::picker::{Picker, ProtocolType};
+
+        let mut picker = Picker::halfblocks(); // 10x20 칸
+        picker.set_protocol_type(ProtocolType::Kitty);
+        let vp = Viewport { cols: 40, rows: 10, cell_w: 10, cell_h: 20 };
+        // 패널 폭 그대로, 60행짜리 쪽
+        let img = image::DynamicImage::new_rgb8(400, 1200);
+        let sliced = page_protocol(&picker, &img, &vp, 0).expect("kitty protocol");
+        let area = Rect::new(0, 0, 40, 10);
+        let dump = |b: &Buffer| b.content().iter().map(|c| c.symbol().to_string()).collect::<String>();
+
+        let mut first = Buffer::empty(area);
+        page_widget(&sliced, 0).render(area, &mut first);
+        let d1 = dump(&first);
+        assert!(d1.contains("\x1b_Gq=2,i=") && d1.contains("a=T,U=1"), "the first frame transmits the page");
+
+        let mut second = Buffer::empty(area);
+        page_widget(&sliced, 3).render(area, &mut second);
+        let d2 = dump(&second);
+        assert!(!d2.contains("\x1b_G"), "scrolling three rows sends no image data");
+        assert_eq!(second.cell((0, 0)).unwrap().symbol(), first.cell((0, 3)).unwrap().symbol(), "the top row now shows the page's fourth row");
+    }
+
+    /// kitty 경로: 전송 시퀀스는 첫 프레임의 첫 칸에 한 번, 그 뒤 스크롤·pan은 플레이스홀더의 행·열 diacritic만 바뀐다.
+    #[test]
+    fn a_kitty_page_is_sent_once_and_then_only_placeholders_move() {
+        use super::KittyPage;
+        use crate::kitty::{diacritic, encode, PLACEHOLDER};
+        use ratatui::{buffer::Buffer, layout::Rect, widgets::Widget};
+
+        // 10x20 칸, 40열 60행짜리 쪽
+        let page = encode(&image::DynamicImage::new_rgb8(400, 1200), 5);
+        let area = Rect::new(0, 0, 40, 10);
+        let mut first = Buffer::empty(area);
+        KittyPage { page: &page, scroll_rows: 0, pan_cols: 0, cell_w: 10, cell_h: 20 }.render(area, &mut first);
+        let top = first.cell((0, 0)).unwrap().symbol().to_string();
+        assert!(top.contains("\x1b_Gq=2,i=5,a=T,U=1,f=24,o=z,t=d,s=400,v=1200,m="), "first cell carries the transmit");
+        assert!(top.ends_with("\x1b[u\x1b[39C\x1b[9B"), "cursor restore to the area's far corner");
+        assert_eq!(first.cell((0, 3)).unwrap().symbol().matches(PLACEHOLDER).count(), 40, "a full row of placeholders");
+        assert!(!first.cell((0, 1)).unwrap().symbol().contains("\x1b_G"), "only the first row transmits");
+
+        let mut second = Buffer::empty(area);
+        KittyPage { page: &page, scroll_rows: 7, pan_cols: 2, cell_w: 10, cell_h: 20 }.render(area, &mut second);
+        let top = second.cell((0, 0)).unwrap().symbol().to_string();
+        assert!(!top.contains("\x1b_G"), "no image data on a scroll");
+        let expect = format!("{}{}{}{}", PLACEHOLDER, diacritic(7), diacritic(2), diacritic(0));
+        assert!(top.contains(&expect), "row 7, column 2: {:?}", &top[..40.min(top.len())]);
+        assert_eq!(second.cell((0, 0)).unwrap().symbol().matches(PLACEHOLDER).count(), 38, "two columns panned away leave 38 of the 40");
+    }
+
+    /// 줌으로 쪽이 창보다 넓으면 pan만큼 열을 잘라 낸 것을 올린다.
+    #[test]
+    fn page_protocol_crops_columns_to_the_pan() {
+        use super::page_protocol;
+        use crate::preview_tabs::Viewport;
+        use ratatui_image::picker::Picker;
+
+        let picker = Picker::halfblocks();
+        let vp = Viewport { cols: 40, rows: 10, cell_w: 10, cell_h: 20 };
+        let wide = image::DynamicImage::new_rgb8(800, 400);
+        let s = page_protocol(&picker, &wide, &vp, 100).unwrap();
+        assert_eq!((s.size().width, s.size().height), (40, 20), "40 columns of the 80, all 20 rows");
+        let narrow = image::DynamicImage::new_rgb8(200, 400);
+        let s = page_protocol(&picker, &narrow, &vp, 100).unwrap();
+        assert_eq!(s.size().width, 20, "a narrow page is not cropped");
+    }
 
     #[test]
     fn plugin_page_title_skips_an_empty_version() {

@@ -13,6 +13,7 @@ mod hooks;
 mod i18n;
 mod interactive;
 mod keymap;
+mod kitty;
 mod models;
 mod notes;
 mod openlibrary;
@@ -21,6 +22,7 @@ mod plugin;
 mod preview_tabs;
 mod settings;
 mod theme;
+mod trace;
 mod storage;
 #[cfg(feature = "tui")]
 mod tui;
