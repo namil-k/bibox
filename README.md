@@ -38,8 +38,10 @@ For humans: browse and edit in the TUI. For agents: manage entries and notes thr
 - **Portable home** - `bibox init` puts everything in one Git-syncable folder
 - **Export** - BibTeX, YAML, RIS, CSV, notes (`.md`). Include PDFs. Copy to clipboard. Zip it up.
 - **Templates** - Built-in and custom note templates with `{{variable}}` substitution
-- **Doctor** - `bibox doctor` diagnoses and auto-repairs DB issues: bad citekeys, LaTeX escapes, orphaned files
-- **Plugins** - Any executable becomes a bibox command, a context-menu item or a save hook. Declared by `plugin.toml`, talks JSON over stdin/stdout, can open bibox's own popups. Built-in plugins ship inside the binary and can be removed like any other; git sync is one.
+- **Doctor** - `bibox doctor` diagnoses and auto-repairs DB issues (bad citekeys, LaTeX escapes, orphaned files) and checks keymap, theme, plugin manifests and settings
+- **Plugins** - Any executable becomes a bibox command, a context-menu item, a save hook, a preview tab or a `bibox <name>` subcommand, with its own settings in the Settings screen. Declared by `plugin.toml`, talks JSON over stdin/stdout, can open bibox's own popups. Install from any GitHub repository or git URL. Built-in plugins ship inside the binary: git-sync (on by default) and pdf-view (opt-in).
+- **Settings screen** - `,` opens sections, values, descriptions and a search box; changes are saved as you make them
+- **Themes** - `dark`, `light`, or any VS Code color theme file dropped into `themes/`
 
 ## Install
 
@@ -136,7 +138,7 @@ bibox
 | `j`/`k` | Navigate within panel |
 | `gg`/`G` | Jump to top/bottom |
 | `Ctrl+d`/`u` | Half-page down/up |
-| `Tab` | Switch preview mode (Info → Note → PDF) |
+| `Tab` | Switch preview mode (Info → Note → plugin tabs such as PDF) |
 | `n`/`p`, `+`/`-`, `0`, `H`/`L` | PDF tab: next/previous page, zoom in/out, fit width, pan (see below) |
 | `Space` | Toggle select entry |
 | `V` | Select/deselect all |
@@ -432,7 +434,7 @@ cd ~/bibox && git init && git add . && git commit -m "init"
 # Settings: , then Plugins > git-sync, or [plugins.git-sync] include_pdfs = true / push_on_write = true in config.toml.
 
 # Store PDFs in iCloud, Google Drive, Dropbox, etc.
-# Add to ~/.config/bibox/config.toml:
+# Add to config.toml (macOS: ~/Library/Application Support/bibox/, Linux: ~/.config/bibox/; `bibox config` prints the path):
 pdf_dir = "~/Library/Mobile Documents/com~apple~CloudDocs/bibox-pdfs"  # iCloud
 # pdf_dir = "~/Google Drive/bibox-pdfs"                                # Google Drive
 # pdf_dir = "~/Dropbox/bibox-pdfs"                                     # Dropbox
@@ -440,7 +442,7 @@ pdf_dir = "~/Library/Mobile Documents/com~apple~CloudDocs/bibox-pdfs"  # iCloud
 
 ## Plugins
 
-A plugin is a directory with a `plugin.toml` and a program in any language. bibox starts the program the first time it is needed, keeps it running while the TUI is open, and talks to it one JSON line at a time.
+A plugin is a directory with a `plugin.toml` and a program in any language. bibox starts the program the first time it is needed, keeps it running while the TUI is open, and talks to it one JSON line at a time. A plugin can add commands with keys, right-click menu items, save hooks, a tab in the preview panel (the PDF tab is one), settings on its own page in the Settings screen, and a `bibox <name>` subcommand. Anyone can publish one: push the directory to a repository and others install it by its GitHub path or git URL.
 
 ```
 ~/Library/Application Support/bibox/plugins/   (Linux: ~/.config/bibox/plugins/)
@@ -470,6 +472,7 @@ A line with `"ui"` asks bibox to show something (`pick`, `prompt`, `confirm`, `p
 api = 1
 name = "summarize"                   # must equal the directory name
 run = "python3 main.py"              # split on spaces, no shell; cwd is the plugin directory
+guide = "AGENT.md"                   # optional: usage notes for AI agents; `bibox agent-guide` prints them
 
 [[commands]]
 id = "summarize"
@@ -499,6 +502,8 @@ run = "python3 cli.py"
 `before_add` runs before an entry is saved and may return `apply` to change it; if the plugin fails the entry is added unchanged. `after_write` and `after_note_save` run in the background after the save and cannot open popups. Plugin settings live in `config.toml` under `[plugins.<name>]` and arrive as `context.config`. Declared settings get a typed row on the plugin page and `bibox doctor` warns about values of the wrong type and keys that match no declaration (with a spelling suggestion). bibox does not fill in defaults: read `context.config` with a fallback as before.
 
 A `[[tabs]]` entry adds a tab to the preview panel. When the tab is visible bibox calls its command in the background with `trigger = "tab"` and `tab: {"page": 3, "width_px": 840, "images": true}`; the command answers `{"tab": {"image": "/path/page.png", "pages": 14}}` (PNG or JPEG) or, when `images` is false, `{"tab": {"lines": ["..."], "pages": 14}}`. bibox owns page, zoom, scrolling and the cache; the plugin only renders one page at one width. It cannot open popups. The built-in `pdf-view` is written this way.
+
+**For agents.** `bibox agent-guide` ends with an Installed plugins section generated from the manifests (commands, keys, hooks, tabs, settings) followed by each plugin's `guide` file, so an agent learns how to use `bibox <name>` without reading the code. Write that file for agents: what the plugin changes, how to call its CLI, what it needs. `bibox plugin new` creates a stub.
 
 **Environment.** Every plugin process gets `BIBOX_BIN`, `BIBOX_CONFIG_DIR`, `BIBOX_DB_PATH`, `BIBOX_NOTES_DIR`, `BIBOX_PDF_DIR`, `BIBOX_HOME` (when set) and `BIBOX_PLUGIN_DIR`. To change the library, call `$BIBOX_BIN` (`modify`, `note --stdin`, `add --json`) and return `refresh`, or return `apply` for a few entries. The plugin's stderr goes to `plugins/<name>/stderr.log`, truncated on every start.
 
