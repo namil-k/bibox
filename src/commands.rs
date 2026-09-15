@@ -1045,13 +1045,9 @@ pub async fn cmd_edit(
         .with_context(|| config.msgs.entry_not_found(&id_or_key))?;
 
     if let Some(src) = attach_pdf {
-        let filename = format!("{}.pdf", entry_to_filename(entry));
-        std::fs::create_dir_all(&config.bibox_dir)?;
-        let dest = config.bibox_dir.join(&filename);
-        std::fs::copy(&src, &dest)
-            .with_context(|| format!("Failed to copy PDF from {}", src.display()))?;
-        entry.file_path = Some(filename.clone());
-        println!("PDF attached: {}", dest.display());
+        // import와 같은 이름 규칙: 같은 이름이 이미 있으면 키를 붙여 덮어쓰지 않는다
+        let filename = attach_import_file(entry, &src, config, false).map_err(|e| anyhow::anyhow!("Failed to attach PDF: {}", e))?;
+        println!("PDF attached: {}", config.bibox_dir.join(&filename).display());
     } else if entry.file_path.is_some() {
         let new_filename = format!("{}.pdf", entry_to_filename(entry));
         let old_fp = entry.file_path.as_ref().unwrap().clone();
@@ -3028,6 +3024,38 @@ fn merge_into(existing: &mut Entry, rec: &mut ImportRecord, to: Option<&str>) ->
     n
 }
 
+/// PDF가 놓일 자리. 제목·저자가 있으면 `Author_Year_Title.pdf`, 없으면 원본 이름. 이미 있으면 `<stem>_<key>.pdf`.
+pub(crate) fn import_pdf_dest(entry: &Entry, src: &Path, config: &Config) -> PathBuf {
+    let filename = if entry.title.is_some() || !entry.author.is_empty() {
+        format!("{}.pdf", entry_to_filename(entry))
+    } else {
+        src.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| format!("{}.pdf", entry.bibtex_key))
+    };
+    let dest = config.bibox_dir.join(&filename);
+    if dest.exists() {
+        let stem = dest.file_stem().unwrap_or_default().to_string_lossy().to_string();
+        config.bibox_dir.join(format!("{}_{}.pdf", stem, entry.bibtex_key))
+    } else {
+        dest
+    }
+}
+
+/// `src`를 pdfs 디렉토리로 복사하고 `file_path`를 채운다. 원본은 그대로. 돌려주는 값은 basename.
+/// dry_run이면 이름만 정하고 아무것도 안 만든다.
+fn attach_import_file(entry: &mut Entry, src: &Path, config: &Config, dry_run: bool) -> std::result::Result<String, String> {
+    if !src.is_file() {
+        return Err(format!("file not found: {}", src.display()));
+    }
+    let dest = import_pdf_dest(entry, src, config);
+    let name = dest.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    if !dry_run {
+        std::fs::create_dir_all(&config.bibox_dir).map_err(|e| format!("cannot create {}: {}", config.bibox_dir.display(), e))?;
+        std::fs::copy(src, &dest).map_err(|e| format!("cannot copy {} to {}: {}", src.display(), dest.display(), e))?;
+        entry.file_path = Some(name.clone());
+    }
+    Ok(name)
+}
+
 /// 항목 하나를 DB에 넣거나 기존 항목에 합친다. 파일 쓰기는 안 한다(호출자가 save_db).
 fn import_record(db: &mut Database, input: usize, mut rec: ImportRecord, ctx: &mut ImportCtx) -> ImportOutcome {
     let msgs = &ctx.config.msgs;
@@ -3036,12 +3064,21 @@ fn import_record(db: &mut Database, input: usize, mut rec: ImportRecord, ctx: &m
         return ImportOutcome { input, key: rec.key.clone(), status: ImportStatus::Skipped, reason: Some("missing title, author or year".to_string()), human };
     }
     if let Some((idx, why)) = find_duplicate(db, &rec) {
-        let n = merge_into(&mut db.entries[idx], &mut rec, ctx.to.as_deref());
+        let mut n = merge_into(&mut db.entries[idx], &mut rec, ctx.to.as_deref());
+        let mut file_note = String::new();
+        if db.entries[idx].file_path.is_none() {
+            if let Some(src) = rec.file.take() {
+                match attach_import_file(&mut db.entries[idx], &src, ctx.config, ctx.dry_run) {
+                    Ok(_) => n += 1,
+                    Err(e) => file_note = format!("; {}", e),
+                }
+            }
+        }
         let key = db.entries[idx].bibtex_key.clone();
         return if n > 0 {
-            ImportOutcome { input, key: Some(key.clone()), status: ImportStatus::Merged, reason: Some(format!("{}; merged {} fields", why, n)), human: msgs.merged_fields(&key, n) }
+            ImportOutcome { input, key: Some(key.clone()), status: ImportStatus::Merged, reason: Some(format!("{}; merged {} fields{}", why, n, file_note)), human: msgs.merged_fields(&key, n) }
         } else {
-            ImportOutcome { input, key: Some(key.clone()), status: ImportStatus::Skipped, reason: Some(format!("{}; nothing new", why)), human: msgs.already_exists(&key) }
+            ImportOutcome { input, key: Some(key.clone()), status: ImportStatus::Skipped, reason: Some(format!("{}; nothing new{}", why, file_note)), human: msgs.already_exists(&key) }
         };
     }
     let base_key = rec.key.take().unwrap_or_else(|| generate_bibtex_key(&rec.authors, rec.year, rec.title.as_deref().unwrap_or("unknown")));
@@ -3080,14 +3117,21 @@ fn import_record(db: &mut Database, input: usize, mut rec: ImportRecord, ctx: &m
         created_at: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
         updated_at: None,
     };
-    let entry = match ctx.events {
+    let mut entry = match ctx.events {
         Some(ev) if !ctx.dry_run => run_before_add_with(ev, entry),
         _ => entry,
     };
+    // PDF는 키가 정해진 뒤에(충돌 이름에 키가 들어간다). 없는 파일은 항목을 막지 않는다
+    let mut reason = None;
+    if let Some(src) = rec.file.take() {
+        if let Err(e) = attach_import_file(&mut entry, &src, ctx.config, ctx.dry_run) {
+            reason = Some(e);
+        }
+    }
     let key = entry.bibtex_key.clone();
     ctx.pushed.push(entry.clone());
     db.entries.push(entry);
-    ImportOutcome { input, key: Some(key), status: ImportStatus::Added, reason: None, human: String::new() }
+    ImportOutcome { input, key: Some(key), status: ImportStatus::Added, reason, human: String::new() }
 }
 
 /// 사람용 요약: 추가 수, 병합된 것, 건너뛴 것.
@@ -4884,6 +4928,78 @@ mod tests {
         let recs = parse_json_import(text).unwrap();
         assert!(recs[0].file.is_none(), "file_path is the library's own basename, not a source to copy");
         assert_eq!(recs[0].title.as_deref(), Some("T"));
+    }
+
+    // ── attach_import_file ──
+
+    #[test]
+    fn attach_import_file_copies_and_suffixes_on_collision() {
+        let config = temp_config("attach");
+        let src_dir = std::env::temp_dir().join(format!("bibox-attach-src-{}", std::process::id()));
+        std::fs::create_dir_all(&src_dir).unwrap();
+        let src = src_dir.join("paper.pdf");
+        std::fs::write(&src, b"%PDF-1").unwrap();
+        let mut e = export_fixture("kim2025rust");
+        let name = attach_import_file(&mut e, &src, &config, false).unwrap();
+        assert_eq!(name, "Kim_2025_Rust systems programming.pdf");
+        assert_eq!(e.file_path.as_deref(), Some(name.as_str()));
+        assert!(config.bibox_dir.join(&name).is_file());
+        assert!(src.is_file(), "the source is copied, not moved");
+        let mut e2 = export_fixture("kim2025rusta");
+        let name2 = attach_import_file(&mut e2, &src, &config, false).unwrap();
+        assert_eq!(name2, "Kim_2025_Rust systems programming_kim2025rusta.pdf", "same title: the key disambiguates");
+        assert!(config.bibox_dir.join(&name2).is_file());
+    }
+
+    #[test]
+    fn attach_import_file_reports_a_missing_source_and_leaves_the_entry_alone() {
+        let config = temp_config("missing");
+        let mut e = export_fixture("kim2025rust");
+        let err = attach_import_file(&mut e, Path::new("/nonexistent/x.pdf"), &config, false).unwrap_err();
+        assert!(err.contains("file not found"), "{}", err);
+        assert!(e.file_path.is_none());
+    }
+
+    #[test]
+    fn attach_import_file_dry_run_copies_nothing_but_names_the_file() {
+        let config = temp_config("dry");
+        let src = std::env::temp_dir().join(format!("bibox-attach-dry-{}.pdf", std::process::id()));
+        std::fs::write(&src, b"%PDF-1").unwrap();
+        let mut e = export_fixture("kim2025rust");
+        let name = attach_import_file(&mut e, &src, &config, true).unwrap();
+        assert_eq!(name, "Kim_2025_Rust systems programming.pdf");
+        assert!(!config.bibox_dir.exists(), "dry run creates nothing");
+    }
+
+    #[test]
+    fn import_record_attaches_file_to_a_new_entry_and_to_an_existing_entry_without_one() {
+        let config = temp_config("recfile");
+        let src = std::env::temp_dir().join(format!("bibox-recfile-{}.pdf", std::process::id()));
+        std::fs::write(&src, b"%PDF-1").unwrap();
+        let mut db = Database { entries: vec![] };
+        let mut r = rec(Some("a"), Some("10.1/a"));
+        r.file = Some(src.clone());
+        let o = import_record(&mut db, 0, r, &mut ctx(&config, None));
+        assert!(matches!(o.status, ImportStatus::Added));
+        assert!(db.entries[0].file_path.is_some());
+        let mut r = rec(Some("b"), Some("10.1/a"));
+        r.file = Some(PathBuf::from("/nonexistent/y.pdf"));
+        let o = import_record(&mut db, 1, r, &mut ctx(&config, None));
+        assert!(matches!(o.status, ImportStatus::Skipped), "already has a file, nothing new: {:?}", o);
+        let mut existing = export_fixture("c2020");
+        existing.doi = Some("10.1/c".into());
+        db.entries.push(existing);
+        let mut r = rec(Some("c"), Some("10.1/c"));
+        r.file = Some(src.clone());
+        let o = import_record(&mut db, 2, r, &mut ctx(&config, None));
+        assert!(matches!(o.status, ImportStatus::Merged), "{:?}", o);
+        assert!(db.entries[1].file_path.is_some(), "an existing entry without a PDF gets one on merge");
+        let mut r = rec(Some("d"), Some("10.1/d"));
+        r.file = Some(PathBuf::from("/nonexistent/z.pdf"));
+        let o = import_record(&mut db, 3, r, &mut ctx(&config, None));
+        assert!(matches!(o.status, ImportStatus::Added), "a missing PDF is not fatal");
+        assert!(o.reason.as_deref().unwrap().contains("file not found"), "{:?}", o.reason);
+        assert!(db.entries[2].file_path.is_none());
     }
 
     #[test]
