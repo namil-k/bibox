@@ -2805,6 +2805,111 @@ impl From<RawBibEntry> for ImportRecord {
     }
 }
 
+/// `bibox import <file.json>`의 항목 하나. `bibox show --json`의 모양과 같고, `file`은 복사해 올 PDF의 절대 경로.
+/// 모르는 키(id, file_path, created_at 등)는 무시한다.
+#[derive(Debug, serde::Deserialize)]
+struct JsonImportEntry {
+    #[serde(default)]
+    bibtex_key: Option<String>,
+    #[serde(default)]
+    entry_type: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    author: Vec<String>,
+    #[serde(default, deserialize_with = "lenient_year")]
+    year: Option<u32>,
+    #[serde(default)]
+    journal: Option<String>,
+    #[serde(default)]
+    volume: Option<String>,
+    #[serde(default)]
+    number: Option<String>,
+    #[serde(default)]
+    pages: Option<String>,
+    #[serde(default)]
+    publisher: Option<String>,
+    #[serde(default)]
+    editor: Option<String>,
+    #[serde(default)]
+    edition: Option<String>,
+    #[serde(default)]
+    isbn: Option<String>,
+    #[serde(default)]
+    booktitle: Option<String>,
+    #[serde(default)]
+    doi: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default, rename = "abstract")]
+    abstract_text: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    howpublished: Option<String>,
+    #[serde(default)]
+    month: Option<String>,
+    #[serde(default)]
+    note: Option<String>,
+    #[serde(default)]
+    collections: Vec<String>,
+    #[serde(default)]
+    file: Option<PathBuf>,
+}
+
+/// 연도는 숫자든 "2025" 같은 문자열이든 받는다. 못 읽으면 None.
+fn lenient_year<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<u32>, D::Error> {
+    let v: Option<serde_json::Value> = serde::Deserialize::deserialize(d)?;
+    Ok(match v {
+        Some(serde_json::Value::Number(n)) => n.as_u64().map(|n| n as u32),
+        Some(serde_json::Value::String(s)) => s.trim().chars().take(4).collect::<String>().parse().ok(),
+        _ => None,
+    })
+}
+
+impl From<JsonImportEntry> for ImportRecord {
+    fn from(j: JsonImportEntry) -> ImportRecord {
+        ImportRecord {
+            key: j.bibtex_key.filter(|k| !k.trim().is_empty()),
+            entry_type: j.entry_type.as_deref().and_then(|t| t.parse().ok()).unwrap_or(EntryType::Misc),
+            title: j.title,
+            authors: j.author.into_iter().map(|a| a.trim().to_string()).filter(|a| !a.is_empty()).collect(),
+            year: j.year,
+            journal: j.journal,
+            volume: j.volume,
+            number: j.number,
+            pages: j.pages,
+            publisher: j.publisher,
+            editor: j.editor,
+            edition: j.edition,
+            isbn: j.isbn,
+            booktitle: j.booktitle,
+            doi: j.doi,
+            url: j.url,
+            abstract_text: j.abstract_text,
+            howpublished: j.howpublished,
+            month: j.month,
+            note: j.note,
+            tags: j.tags.into_iter().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect(),
+            collections: j.collections.into_iter().map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).collect(),
+            file: j.file,
+        }
+    }
+}
+
+/// 최상위는 배열이어야 한다.
+fn parse_json_import(content: &str) -> Result<Vec<ImportRecord>> {
+    let v: serde_json::Value = serde_json::from_str(content).context("not JSON")?;
+    let arr = v.as_array().ok_or_else(|| anyhow::anyhow!("the JSON top level must be an array of entries"))?;
+    arr.iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let j: JsonImportEntry = serde_json::from_value(item.clone()).with_context(|| format!("entries[{}]", i))?;
+            Ok(j.into())
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 enum ImportStatus {
@@ -4740,6 +4845,45 @@ mod tests {
         assert_eq!(db.entries[0].collections, vec!["A/B", "zotero"], "to is added once");
         assert_eq!(c.pushed.len(), 1);
         assert_eq!(c.pushed[0].bibtex_key, "k");
+    }
+
+    // ── parse_json_import ──
+
+    #[test]
+    fn parse_json_import_reads_entry_shape() {
+        let text = r#"[{"bibtex_key": "kim2025", "entry_type": "article", "title": "T", "author": ["Kim, N.", "Lee, A."], "year": "2025",
+            "journal": "J", "number": "3", "doi": "10.1/x", "abstract": "Abs", "tags": ["a"], "collections": ["Parent/Child"], "file": "/tmp/p.pdf", "note": "arXiv:1"},
+            {"title": "Bare", "year": 2024, "entry_type": "thesis"}]"#;
+        let recs = parse_json_import(text).unwrap();
+        assert_eq!(recs.len(), 2);
+        let r = &recs[0];
+        assert_eq!(r.key.as_deref(), Some("kim2025"));
+        assert_eq!(r.entry_type, EntryType::Article);
+        assert_eq!(r.authors, vec!["Kim, N.", "Lee, A."]);
+        assert_eq!(r.year, Some(2025), "a numeric string is a year");
+        assert_eq!(r.number.as_deref(), Some("3"));
+        assert_eq!(r.abstract_text.as_deref(), Some("Abs"));
+        assert_eq!(r.collections, vec!["Parent/Child"]);
+        assert_eq!(r.file.as_deref(), Some(Path::new("/tmp/p.pdf")));
+        assert_eq!(recs[1].year, Some(2024));
+        assert_eq!(recs[1].entry_type, EntryType::Misc, "unknown types become misc");
+        assert!(recs[1].key.is_none() && recs[1].authors.is_empty());
+    }
+
+    #[test]
+    fn parse_json_import_rejects_non_array_and_bad_json() {
+        assert!(parse_json_import(r#"{"title": "x"}"#).is_err());
+        assert!(parse_json_import("not json").is_err());
+        assert!(parse_json_import("[]").unwrap().is_empty());
+    }
+
+    /// `bibox show --json`의 출력을 그대로 넣어도 된다: id, file_path, created_at는 무시된다.
+    #[test]
+    fn parse_json_import_ignores_file_path_and_unknown_keys() {
+        let text = r#"[{"id": "u", "bibtex_key": "k", "entry_type": "misc", "title": "T", "file_path": "old.pdf", "created_at": "2020-01-01 00:00:00", "updated_at": null, "zzz": 1}]"#;
+        let recs = parse_json_import(text).unwrap();
+        assert!(recs[0].file.is_none(), "file_path is the library's own basename, not a source to copy");
+        assert_eq!(recs[0].title.as_deref(), Some("T"));
     }
 
     #[test]
