@@ -1097,6 +1097,19 @@ fn field_style(color: &Option<String>) -> Style {
     Style::default().fg(c)
 }
 
+/// Info 탭의 플러그인 줄. 내장 필드와 같은 12칸 라벨(`Cited by:`) 뒤에 값.
+fn info_field_lines(cells: &[(String, crate::plugin::fields::Placed)]) -> Vec<Line<'static>> {
+    cells
+        .iter()
+        .map(|(label, p)| {
+            Line::from(vec![
+                Span::styled(format!("{:<12}", format!("{}:", label)), Style::default().fg(theme().accent)),
+                Span::styled(p.text.clone(), field_style(&p.color)),
+            ])
+        })
+        .collect()
+}
+
 /// `commands/execute`의 이름은 keymap.toml의 액션 이름과 같다(snake_case). 플러그인 명령은 안 된다.
 fn action_by_name(name: &str) -> Option<Action> {
     serde_json::from_value(Value::String(name.to_string())).ok()
@@ -2232,6 +2245,8 @@ fn draw_preview_info(f: &mut Frame, app: &mut App, area: Rect) {
             Span::styled("No PDF", Style::default().fg(theme().muted)),
         ]));
     }
+    // 플러그인의 `place = "info"` 필드. 내장 필드 뒤, 초록 앞
+    lines.extend(info_field_lines(&crate::plugin::fields::info_cells(&app.field_decls, &app.fields, &entry.bibtex_key)));
     if let Some(ref abs) = entry.abstract_text {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled("Abstract:", Style::default().fg(theme().accent))));
@@ -5908,5 +5923,18 @@ mod tests {
         assert_eq!(segs[&("git-sync".to_string(), "ahead".to_string())].text, "↑2 unpushed");
         apply_status_set(&mut segs, "git-sync", serde_json::json!({"field": "ahead", "text": ""}));
         assert!(segs.is_empty());
+    }
+
+    /// Info 탭의 플러그인 줄은 내장 필드와 같은 12칸 라벨 뒤에 값.
+    #[test]
+    fn info_field_lines_use_the_same_label_column_as_built_in_fields() {
+        use super::info_field_lines;
+        use crate::plugin::fields::Placed;
+        let cells = vec![("Cited by".to_string(), Placed { anchor: None, text: "★ 312".into(), color: Some("accent".into()), width: 8 })];
+        let lines = info_field_lines(&cells);
+        assert_eq!(lines.len(), 1);
+        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "Cited by:   ★ 312");
+        assert!(info_field_lines(&[]).is_empty());
     }
 }

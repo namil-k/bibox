@@ -10,7 +10,7 @@ Prints one count per line in the order given; a blank line means unknown (no DOI
 
 ## In the TUI
 
-Each entry row shows `★ n` on the right of the first line. The status bar shows `citations 12/167` while counts load. `<C-r>` (or the right-click menu) refetches the selected entries.
+Each entry row shows `★ n` on the right of the first line, and the Info tab has a `Cited by:` line. The status bar shows `citations 12/167` while counts load. `<C-r>` (or the right-click menu) refetches the selected entries.
 
 ## Settings
 

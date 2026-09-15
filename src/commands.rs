@@ -3760,7 +3760,7 @@ push_on_write = false
 
 ## Plugins
 
-A plugin is a directory under `<config_dir>/bibox/plugins/<name>/` with a `plugin.toml` and a program in any language. bibox starts it once and talks JSON-RPC 2.0 over its stdin/stdout, one message per line (no Content-Length header). A plugin can add commands (keys, right-click menu items), fields in entry rows and the status bar, preview tabs (views), settings, and subscribe to events (`library/adding`, `library/written`, `note/saved`, `entry/selected`, `lifecycle/started`). A plugin with a `[cli]` section is run from the shell as `bibox <name> <args>`, with your stdin and stdout.
+A plugin is a directory under `<config_dir>/bibox/plugins/<name>/` with a `plugin.toml` and a program in any language. bibox starts it once and talks JSON-RPC 2.0 over its stdin/stdout, one message per line (no Content-Length header). A plugin can add commands (keys, right-click menu items), fields in entry rows, the Info tab and the status bar, preview tabs (views), settings, and subscribe to events (`library/adding`, `library/written`, `note/saved`, `entry/selected`, `lifecycle/started`). A plugin with a `[cli]` section is run from the shell as `bibox <name> <args>`, with your stdin and stdout.
 
 **Installed plugins and how to use them are listed at the end of this guide** (generated from what is installed right now; `bibox agent-guide --json` puts the same list in the `installed` array with each plugin's commands, fields, views, events, settings and the usage notes its author wrote in `guide = "AGENT.md"`). Read that section before calling a plugin's CLI.
 
@@ -3778,7 +3778,7 @@ Protocol: bibox sends `initialize` (paths, config, capabilities) once, then `com
 
 Every plugin process gets `BIBOX_BIN` (call it for `modify`, `note --stdin`, `add --json` and send `library/refresh`), `BIBOX_CONFIG_DIR`, `BIBOX_DB_PATH`, `BIBOX_NOTES_DIR`, `BIBOX_PDF_DIR`, `BIBOX_PLUGIN_DIR`; a `[cli]` run also gets `BIBOX_CLI=1`. A bibox call made from inside an event handler does not send events to external plugins again (`BIBOX_IN_HOOK=1`). The plugin's stderr is in `plugins/<name>/stderr.log`, truncated on every start.
 
-Users can move or hide any plugin field from `config.toml`: `[plugins.<name>.fields.<id>]` with `place = "row.1|row.2|row.3|status"`, `align = "right|left|after:key|after:pdf|after:year"`, `width = n`, `enabled = false`. `plugin_status_bar = false` at the top level hides every status segment.
+Users can move or hide any plugin field from `config.toml`: `[plugins.<name>.fields.<id>]` with `place = "row.1|row.2|row.3|info|status"`, `align = "right|left|after:key|after:pdf|after:year"`, `width = n`, `enabled = false`. `plugin_status_bar = false` at the top level hides every status segment.
 
 When writing a plugin, add `guide = "AGENT.md"` to plugin.toml and put the usage notes for agents in that file: what the plugin changes, how to call its CLI if it has one, which environment variables it needs. `bibox plugin new` creates a stub.
 

@@ -137,7 +137,7 @@ pub struct View {
 }
 
 pub const EVENTS: [&str; 5] = ["lifecycle/started", "entry/selected", "library/adding", "library/written", "note/saved"];
-pub const PLACES: [&str; 4] = ["row.1", "row.2", "row.3", "status"];
+pub const PLACES: [&str; 5] = ["row.1", "row.2", "row.3", "status", "info"];
 pub const ALIGNS: [&str; 5] = ["right", "left", "after:key", "after:pdf", "after:year"];
 pub const MENUS: [&str; 1] = ["context"];
 
@@ -514,8 +514,9 @@ fn build(dir: &Path, file: ManifestFile, run_override: Option<Vec<String>>, prob
     }
     let mut fields: Vec<FieldSpec> = Vec::new();
     for f in &file.fields {
-        if fields.iter().any(|x| x.id == f.id) {
-            problems.push(err(format!("duplicate field id \"{}\"", f.id)));
+        // 같은 id를 place만 다르게 두 번 선언하면 한 값이 두 자리에 그려진다
+        if fields.iter().any(|x| x.id == f.id && x.place == f.place) {
+            problems.push(err(format!("duplicate field id \"{}\" at {}", f.id, f.place)));
             fatal = true;
             continue;
         }
@@ -739,6 +740,20 @@ run = "python3 cli.py"
         }
     }
 
+    /// 같은 값을 두 자리에: id가 같아도 place가 다르면 둘 다 선언이다. place까지 같아야 중복이다.
+    #[test]
+    fn a_field_id_may_be_declared_once_per_place() {
+        let mut problems = vec![];
+        let text = "api = 2\nname = \"m\"\nrun = \"sh x\"\n[[fields]]\nid = \"count\"\nplace = \"row.1\"\ndesc = \"Times cited\"\n[[fields]]\nid = \"count\"\nplace = \"info\"\ndesc = \"Cited by\"\n";
+        let m = parse_manifest(&dir("m"), text, &mut problems).unwrap();
+        assert!(problems.is_empty(), "{:?}", problems);
+        assert_eq!(m.fields.iter().map(|f| (f.id.as_str(), f.place.as_str())).collect::<Vec<_>>(), vec![("count", "row.1"), ("count", "info")]);
+        let mut problems = vec![];
+        let text = "api = 2\nname = \"m\"\nrun = \"sh x\"\n[[fields]]\nid = \"count\"\nplace = \"info\"\n[[fields]]\nid = \"count\"\nplace = \"info\"\n";
+        assert!(parse_manifest(&dir("m"), text, &mut problems).is_none());
+        assert!(problems.iter().any(|p| matches!(p, PluginProblem::Manifest { detail, .. } if detail.contains("duplicate field"))), "{:?}", problems);
+    }
+
     #[test]
     fn fields_views_and_events_are_validated() {
         let bad = |extra: &str| {
@@ -750,7 +765,7 @@ run = "python3 cli.py"
         assert!(p.iter().any(|x| matches!(x, PluginProblem::Manifest { detail, .. } if detail.contains("place"))), "{:?}", p);
         let p = bad("[[fields]]\nid = \"a\"\nplace = \"row.1\"\nalign = \"middle\"\n");
         assert!(p.iter().any(|x| matches!(x, PluginProblem::Manifest { detail, .. } if detail.contains("align"))), "{:?}", p);
-        let p = bad("[[fields]]\nid = \"a\"\nplace = \"row.1\"\n[[fields]]\nid = \"a\"\nplace = \"row.2\"\n");
+        let p = bad("[[fields]]\nid = \"a\"\nplace = \"row.1\"\n[[fields]]\nid = \"a\"\nplace = \"row.1\"\n");
         assert!(p.iter().any(|x| matches!(x, PluginProblem::Manifest { detail, .. } if detail.contains("duplicate field"))), "{:?}", p);
         let p = bad("[[views]]\ntitle = \"T\"\nrun = \"nope\"\n");
         assert!(p.iter().any(|x| matches!(x, PluginProblem::Manifest { detail, .. } if detail.contains("nope"))), "{:?}", p);

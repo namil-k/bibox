@@ -445,7 +445,7 @@ pdf_dir = "~/Library/Mobile Documents/com~apple~CloudDocs/bibox-pdfs"  # iCloud
 A plugin is a directory with a `plugin.toml` and a program in any language. bibox starts the program once (on first use, or with the TUI if it asks), keeps it running while the TUI is open, and talks to it over JSON-RPC 2.0, one message per line on stdin/stdout, the same shape as an editor talking to a language server. A plugin declares what it contributes:
 
 - **commands**: a key and a right-click menu item that run a function in the plugin (`commands/run`)
-- **fields**: a text cell in every entry row (`place = "row.1"`, `align = "right"` or `after:key`) or a segment in the status bar (`place = "status"`), filled on demand (`fields/get`) or pushed any time (`fields/set`, `status/set`)
+- **fields**: a text cell in every entry row (`place = "row.1"`, `align = "right"` or `after:key`), a line in the Info tab (`place = "info"`, labelled by `desc`) or a segment in the status bar (`place = "status"`), filled on demand (`fields/get`) or pushed any time (`fields/set`, `status/set`)
 - **views**: a tab in the preview panel, rendered one page at a time (`views/render`; the PDF tab is one)
 - **events**: `library/adding` (may rewrite the entry before it is saved), `library/written`, `note/saved`, `entry/selected`, `lifecycle/started`
 - **settings**: a typed page in the Settings screen, delivered on start and on change
@@ -496,10 +496,15 @@ menus = ["context"]                  # right-click menu
 
 [[fields]]                           # optional: a value slot bibox draws for you
 id = "count"
-place = "row.1"                      # row.1 | row.2 | row.3 | status
+place = "row.1"                      # row.1 | row.2 | row.3 | info | status
 align = "right"                      # right | left | after:key | after:pdf | after:year
 width = 8                            # longest text; longer values are clipped with …
 desc = "Times cited"
+
+[[fields]]                           # the same id again with another place: one value, two slots
+id = "count"
+place = "info"                       # a line in the Info tab, labelled "Cited by:"
+desc = "Cited by"
 
 [[views]]                            # optional: a tab in the preview panel next to Info and Note
 title = "PDF"                        # 1 to 12 characters
@@ -518,7 +523,7 @@ desc = "Email for Crossref's polite pool"
 run = "python3 main.py"
 ```
 
-Row fields are pulled for the entries on screen and for the entry the cursor rests on, one `fields/get` per batch of keys; values the plugin pushes later with `fields/set` overwrite them, and a plugin that exits loses its cells while the list keeps drawing. Users move or hide any field from `config.toml`:
+Row fields are pulled for the entries on screen and for the entry the cursor rests on, one `fields/get` per batch of keys; values the plugin pushes later with `fields/set` overwrite them, and a plugin that exits loses its cells while the list keeps drawing. Users move or hide any field from `config.toml` (an override applies to every slot of that id):
 
 ```toml
 [plugins.citations.fields.count]

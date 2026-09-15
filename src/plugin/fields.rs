@@ -12,6 +12,8 @@ use crate::plugin::protocol::{FieldValue, FieldsMap};
 pub enum Place {
     Row(u8),
     Status,
+    /// 미리보기 Info 탭의 한 줄. 라벨은 desc.
+    Info,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,6 +36,7 @@ pub fn parse_place(s: &str) -> Option<Place> {
         "row.2" => Some(Place::Row(2)),
         "row.3" => Some(Place::Row(3)),
         "status" => Some(Place::Status),
+        "info" => Some(Place::Info),
         _ => None,
     }
 }
@@ -58,6 +61,8 @@ pub struct FieldDecl {
     pub align: Align,
     pub width: u16,
     pub color: Option<String>,
+    /// Info 탭의 라벨(desc, 없으면 id)
+    pub label: String,
     pub enabled: bool,
 }
 
@@ -79,10 +84,30 @@ pub fn decls(manifests: &[Manifest], config_tables: &BTreeMap<String, Value>) ->
                 if let Some(w) = o.get("width").and_then(Value::as_u64) { width = w.clamp(1, 80) as u16; }
                 if let Some(e) = o.get("enabled").and_then(Value::as_bool) { enabled = e; }
             }
-            out.push(FieldDecl { plugin: m.name.clone(), id: f.id.clone(), place, align, width, color: f.color.clone(), enabled });
+            let label = if f.desc.is_empty() { f.id.clone() } else { f.desc.clone() };
+            let decl = FieldDecl { plugin: m.name.clone(), id: f.id.clone(), place, align, width, color: f.color.clone(), label, enabled };
+            // 같은 id를 두 자리에 선언했는데 덮어쓰기가 한 자리로 모으면 하나만 남긴다
+            if !out.iter().any(|d: &FieldDecl| d.plugin == decl.plugin && d.id == decl.id && d.place == decl.place) {
+                out.push(decl);
+            }
         }
     }
     out
+}
+
+/// 한 항목의 Info 탭에 놓을 (라벨, 값). 선언 순. 값이 없거나 꺼진 필드는 없다.
+pub fn info_cells(decls: &[FieldDecl], store: &FieldStore, key: &str) -> Vec<(String, Placed)> {
+    decls
+        .iter()
+        .filter(|d| d.enabled && d.place == Place::Info)
+        .filter_map(|d| {
+            let v = store.get(key, &d.plugin, &d.id)?;
+            if v.text.is_empty() {
+                return None;
+            }
+            Some((d.label.clone(), Placed { anchor: None, text: v.text.clone(), color: v.color.clone().or_else(|| d.color.clone()), width: d.width }))
+        })
+        .collect()
 }
 
 /// 세션 캐시. 키마다 한 번만 묻고, 플러그인이 push한 값은 덮어쓴다.
@@ -255,6 +280,35 @@ mod tests {
         s.clear_plugin("cit");
         assert!(s.get("a", "cit", "count").is_none());
         assert_eq!(s.wanted(&keys, 10).len(), 3, "after a plugin dies every key is asked again once it is back");
+    }
+
+    /// Info 탭 줄: (라벨, 값). 라벨은 desc, 없으면 id. 값이 없거나 꺼진 필드는 없다.
+    #[test]
+    fn info_cells_pair_the_label_with_the_value_and_a_row_field_can_share_the_id() {
+        let text = "api = 2\nname = \"cit\"\nrun = \"sh x\"\n[[fields]]\nid = \"count\"\nplace = \"row.1\"\ndesc = \"Times cited\"\n[[fields]]\nid = \"count\"\nplace = \"info\"\ndesc = \"Cited by\"\n[[fields]]\nid = \"venue\"\nplace = \"info\"\n";
+        let mut problems = vec![];
+        let m = crate::plugin::manifest::parse_manifest(std::path::Path::new("/tmp/plugins/cit"), text, &mut problems).unwrap();
+        let d = decls(&[m.clone()], &BTreeMap::new());
+        assert_eq!(d.len(), 3);
+        assert_eq!(parse_place("info"), Some(Place::Info));
+        let mut s = FieldStore::default();
+        let mut fm: crate::plugin::protocol::FieldsMap = BTreeMap::new();
+        let e = fm.entry("k".into()).or_default();
+        e.insert("count".into(), FieldValue { text: "★ 12".into(), color: None });
+        e.insert("venue".into(), FieldValue { text: "NeurIPS".into(), color: Some("accent".into()) });
+        s.set_many("cit", &fm);
+        let info = info_cells(&d, &s, "k");
+        assert_eq!(info.iter().map(|(l, p)| (l.as_str(), p.text.as_str())).collect::<Vec<_>>(), vec![("Cited by", "★ 12"), ("venue", "NeurIPS")]);
+        assert_eq!(info[1].1.color.as_deref(), Some("accent"));
+        let (_, right) = row_cells(&d, &s, "k", 1);
+        assert_eq!(right.len(), 1, "the same value is also on row 1");
+        assert!(info_cells(&d, &s, "unknown").is_empty());
+        // 사용자가 id를 통째로 끄면 두 자리 다 사라진다
+        let mut tables = BTreeMap::new();
+        tables.insert("cit".to_string(), json!({"fields": {"count": {"enabled": false}}}));
+        let d = decls(&[m], &tables);
+        assert!(info_cells(&d, &s, "k").iter().all(|(l, _)| l != "Cited by"));
+        assert!(row_cells(&d, &s, "k", 1).1.is_empty());
     }
 
     #[test]

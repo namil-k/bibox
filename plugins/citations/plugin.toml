@@ -20,6 +20,11 @@ width = 8
 desc = "Times cited (Crossref is-referenced-by-count)"
 
 [[fields]]
+id = "count"
+place = "info"
+desc = "Cited by"
+
+[[fields]]
 id = "progress"
 place = "status"
 align = "right"
