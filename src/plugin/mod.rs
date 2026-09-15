@@ -4,6 +4,7 @@ pub mod guide;
 pub mod host;
 pub mod manifest;
 pub mod protocol;
+pub mod rpc;
 pub mod serve;
 
 use std::collections::HashSet;
