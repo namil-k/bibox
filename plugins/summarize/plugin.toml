@@ -1,4 +1,4 @@
-api = 1
+api = 2
 name = "summarize"
 version = "0.1.0"
 description = "Summarize the attached PDF into the note with Claude"
@@ -9,7 +9,7 @@ guide = "AGENT.md"
 id = "summarize"
 desc = "Summarize the PDF into the note"
 key = "S"
-menu = true
+menus = ["context"]
 
 [[settings]]
 key = "model"

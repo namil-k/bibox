@@ -342,7 +342,7 @@ pub fn scaffold(dest: &Path, name: &str) -> Result<()> {
     )?;
     std::fs::write(
         dest.join("main.py"),
-        "from bibox_plugin import serve, pick, prompt, confirm, progress, bibox, copy_to_clipboard  # noqa: F401\n\n\ndef hello(ctx):\n    entry = ctx.get(\"entry\")\n    title = entry[\"title\"] if entry else \"(no entry)\"\n    return {\"message\": f\"Hello from the plugin. Current entry: {title}\"}\n\n\nserve({\"hello\": hello})\n",
+        "from bibox_plugin import serve, on, window, status, fields, library, config, cache, bibox  # noqa: F401\n\n\ndef hello(params):\n    entry = params.get(\"entry\")\n    title = entry[\"title\"] if entry else \"(no entry)\"\n    return \"Hello from the plugin. Current entry: {}\".format(title)\n\n\n# def get_fields(keys, entries):\n#     return {k: {\"count\": \"0\"} for k in keys}\n#\n# @on(\"library/written\")\n# def written(params):\n#     window.message(\"{} entries written\".format(len(params[\"entries\"])))\n\nserve({\"hello\": hello})\n",
     )?;
     std::fs::write(dest.join("bibox_plugin.py"), HELPER_PY)?;
     std::fs::write(
@@ -565,8 +565,27 @@ mod tests {
         let m = crate::plugin::manifest::parse_manifest(&root.join("my-plugin"), &text, &mut problems).unwrap();
         assert!(problems.is_empty(), "{:?}", problems);
         assert_eq!(m.commands[0].id, "hello");
-        assert!(root.join("my-plugin/main.py").exists());
-        assert!(root.join("my-plugin/bibox_plugin.py").exists());
+        let main = std::fs::read_to_string(root.join("my-plugin/main.py")).unwrap();
+        assert!(main.contains("def hello(params):") && main.contains("serve({\"hello\": hello})"), "{}", main);
+        assert!(std::fs::read_to_string(root.join("my-plugin/bibox_plugin.py")).unwrap().contains("def serve("));
+        // 뼈대가 실제로 답하는지: 헬퍼째로 띄워 initialize와 hello를 돌려본다
+        let out = std::process::Command::new("python3")
+            .arg("main.py")
+            .current_dir(root.join("my-plugin"))
+            .env("BIBOX_PLUGIN_DIR", root.join("my-plugin"))
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .and_then(|mut c| {
+                use std::io::Write;
+                c.stdin.take().unwrap().write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"commands/run\",\"params\":{\"command\":\"hello\",\"entry\":{\"title\":\"T\"}}}\n{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"shutdown\",\"params\":{}}\n")?;
+                c.wait_with_output()
+            })
+            .unwrap();
+        let text = String::from_utf8(out.stdout).unwrap();
+        assert!(text.contains("\"protocol\":2") || text.contains("\"protocol\": 2"), "{}", text);
+        assert!(text.contains("Hello from the plugin. Current entry: T"), "{}", text);
         assert_eq!(std::fs::read_to_string(root.join("my-plugin/.gitignore")).unwrap().trim(), "stderr.log");
         // 에이전트 가이드 뼈대: 매니페스트가 가리키고 파일이 있어 파싱 때 읽힌다
         assert!(m.guide.as_deref().unwrap_or("").contains("bibox my-plugin <args>"), "{:?}", m.guide);

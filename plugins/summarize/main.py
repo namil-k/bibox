@@ -2,7 +2,7 @@ import os
 import shutil
 import subprocess
 
-from bibox_plugin import bibox, confirm, progress, serve
+from bibox_plugin import bibox, config, library, paths, serve, window
 
 PROMPT = (
     "Summarize this paper for a researcher's reading notes. Use Markdown with these bold headings: "
@@ -23,35 +23,34 @@ def extract_text(pdf_path):
     return "\n".join((page.extract_text() or "") for page in PdfReader(pdf_path).pages)
 
 
-def summarize(ctx):
-    entry = ctx.get("entry")
+def summarize(params):
+    entry = params.get("entry")
     if not entry:
-        return {"error": "no entry selected"}
+        raise RuntimeError("no entry selected")
     if not entry.get("file_path"):
-        return {"error": "this entry has no PDF attached"}
-    cfg = ctx.get("config", {})
-    model = cfg.get("model", "claude-opus-5")
-    effort = cfg.get("effort", "medium")
-    max_tokens = int(cfg.get("max_tokens", 4000))
-    max_chars = int(cfg.get("max_chars", 400000))
+        raise RuntimeError("this entry has no PDF attached")
+    model = config.get("model", "claude-opus-5")
+    effort = config.get("effort", "medium")
+    max_tokens = int(config.get("max_tokens", 4000))
+    max_chars = int(config.get("max_chars", 400000))
 
     try:
         import anthropic
     except ImportError:
-        return {"error": "run: pip install anthropic"}
+        raise RuntimeError("run: pip install anthropic")
 
-    note_path = os.path.join(ctx["paths"]["notes"], entry["bibtex_key"] + ".md")
+    note_path = os.path.join(paths["notes"], entry["bibtex_key"] + ".md")
     if os.path.exists(note_path):
         with open(note_path, encoding="utf-8") as f:
-            if "## Summary" in f.read() and not confirm("A Summary section exists. Overwrite?"):
-                return {}
+            if "## Summary" in f.read() and not window.confirm("A Summary section exists. Overwrite?"):
+                return None
 
-    progress("extracting text")
-    text = extract_text(os.path.join(ctx["paths"]["pdfs"], entry["file_path"]))
+    window.progress("extracting text")
+    text = extract_text(os.path.join(paths["pdfs"], entry["file_path"]))
     if len(text) > max_chars:
-        return {"error": "PDF text is {} chars, over max_chars={}; raise [plugins.summarize] max_chars to allow it".format(len(text), max_chars)}
+        raise RuntimeError("PDF text is {} chars, over max_chars={}; raise [plugins.summarize] max_chars to allow it".format(len(text), max_chars))
 
-    progress("asking {}".format(model))
+    window.progress("asking {}".format(model))
     client = anthropic.Anthropic()  # ANTHROPIC_API_KEY, or an `ant auth login` profile
     content = PROMPT + "Title: {}\nAuthors: {}\n\n{}".format(entry.get("title"), ", ".join(entry.get("author", [])), text)
     with client.beta.messages.stream(
@@ -66,14 +65,15 @@ def summarize(ctx):
             pass
         msg = stream.get_final_message()
     if msg.stop_reason == "refusal":
-        return {"error": "the model declined to summarize this document"}
+        raise RuntimeError("the model declined to summarize this document")
     summary = "".join(b.text for b in msg.content if b.type == "text").strip()
     if not summary:
-        return {"error": "empty response from the model"}
+        raise RuntimeError("empty response from the model")
 
-    progress("writing note")
+    window.progress("writing note")
     bibox("note", entry["bibtex_key"], "--section", "Summary", "--stdin", input=summary + "\n", json_output=False)
-    return {"refresh": True, "message": "Summary written by {}".format(msg.model)}
+    library.refresh()
+    return "Summary written by {}".format(msg.model)
 
 
 serve({"summarize": summarize})

@@ -694,6 +694,24 @@ mod tests {
         assert!(!alive(pid));
     }
 
+    /// 헬퍼 v2: 명령·팝업·상태 조각·fields/get·이벤트 데코레이터·initialize의 config.
+    #[test]
+    fn the_python_helper_speaks_v2() {
+        let host = host_for("smoke", "helper_smoke.py", &["library/written"]);
+        host.update_config_tables(BTreeMap::from([("smoke".to_string(), json!({"model": "m1"}))]));
+        let r = host.call_with_ui("smoke", "commands/run", json!({"command": "go", "trigger": "key"}), &mut Picks(vec![0])).unwrap();
+        assert_eq!(r["message"], "ran go with model m1");
+        let ev = wait_event(&host, |e| matches!(e, HostEvent::Incoming { msg: Incoming::Notification { method, .. }, .. } if method == "status/set")).expect("status/set");
+        let HostEvent::Incoming { msg: Incoming::Notification { params, .. }, .. } = ev else { unreachable!() };
+        assert_eq!(params["text"], "picked 0");
+        let r = host.call("smoke", "fields/get", json!({"keys": ["a"], "entries": []}), Some(Duration::from_secs(5))).unwrap();
+        assert_eq!(r["fields"]["a"]["count"]["text"], "1");
+        host.emit("library/written", json!({"reason": "add", "entries": [{"bibtex_key": "a"}]}));
+        let ev = wait_event(&host, |e| matches!(e, HostEvent::Incoming { msg: Incoming::Notification { method, .. }, .. } if method == "fields/set")).expect("fields/set");
+        let HostEvent::Incoming { msg: Incoming::Notification { params, .. }, .. } = ev else { unreachable!() };
+        assert_eq!(params["fields"]["a"]["count"]["color"], "accent");
+    }
+
     fn alive(pid: u32) -> bool {
         std::process::Command::new("kill").args(["-0", &pid.to_string()]).stderr(std::process::Stdio::null()).status().map(|s| s.success()).unwrap_or(false)
     }
