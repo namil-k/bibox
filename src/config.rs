@@ -116,6 +116,9 @@ pub struct Config {
     /// 화면 색. `terminal`(터미널 팔레트), 내장 `dark`/`light`, 또는 `themes/<name>.json`.
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// 플러그인의 `place = "status"` 조각을 하단 바 오른쪽에 그릴지. false면 조각은 안 보이고 힌트만 남는다.
+    #[serde(default = "default_true")]
+    pub plugin_status_bar: bool,
     /// `[plugins.<name>]` 테이블. bibox는 `enabled`만 해석하고 나머지는 플러그인에 그대로 넘긴다.
     /// TOML은 단순 값이 테이블보다 앞에 와야 하므로 마지막 필드다.
     #[serde(default)]
@@ -147,6 +150,7 @@ impl Default for Config {
             status_bar: true,
             images: Images::Auto,
             theme: default_theme(),
+            plugin_status_bar: true,
             plugins: BTreeMap::new(),
             msgs: Msgs::default(),
         }

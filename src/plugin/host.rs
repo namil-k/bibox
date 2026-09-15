@@ -255,7 +255,6 @@ impl PluginHost {
     pub fn commands(&self) -> &PluginCommands { &self.commands }
     pub fn views(&self) -> &[PluginView] { &self.views }
     pub fn manifests(&self) -> &[Manifest] { &self.manifests }
-    pub fn paths(&self) -> Paths { self.env.paths() }
     pub fn set_capabilities(&self, c: Capabilities) { *self.capabilities.write().unwrap_or_else(|p| p.into_inner()) = c; }
 
     /// Settings 화면이 `[plugins.<name>]`을 바꾼 뒤 부른다. 다음 initialize부터 새 값이 간다(떠 있는 것은 `config/changed`로).

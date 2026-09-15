@@ -18,9 +18,9 @@ use crate::bibtex::entry_to_filename;
 use crate::config::Config;
 use crate::keymap::{default_keymap, resolve, Action, Flow, KeyPress, Keymap, LayerId, Resolution};
 use crate::models::Entry;
-use crate::plugin::fields::{FieldDecl, FieldStore};
+use crate::plugin::fields::{row_cells, Anchor, FieldDecl, FieldStore, Place};
 use crate::plugin::host::{HostEvent, Incoming};
-use crate::plugin::protocol::{CommandParams, CommandResult, FieldValue, UiAnswer, UiRequest, ViewParams, ViewResult};
+use crate::plugin::protocol::{Capabilities, CommandParams, CommandResult, FieldValue, FieldsGetParams, FieldsResult, FieldsSetParams, SelectedParams, StatusSetParams, UiAnswer, UiRequest, ViewParams, ViewResult};
 use crate::plugin::rpc::{Id, RpcError};
 use crate::plugin::{PluginCmdId, PluginError, PluginHost};
 use serde_json::Value;
@@ -509,6 +509,8 @@ pub struct App {
     status_segments: BTreeMap<(String, String), FieldValue>,
     /// 커서가 마지막으로 움직인 시각. `SETTLE_MS` 뒤 `entry/selected`와 그 항목의 fields/get.
     sel_since: Option<std::time::Instant>,
+    /// 지난 프레임의 커서 항목. 바뀌면 `sel_since`를 찍는다(키·마우스·필터 어느 길이든).
+    last_sel_key: Option<String>,
     fields_rx: Vec<Receiver<(String, crate::plugin::protocol::FieldsResult)>>,
     /// 목록 패널의 안쪽 높이. `visible_keys`가 쓴다. 그릴 때마다 적는다.
     entries_area_height: u16,
@@ -613,6 +615,7 @@ impl App {
             fields: FieldStore::default(),
             status_segments: BTreeMap::new(),
             sel_since: None,
+            last_sel_key: None,
             fields_rx: Vec::new(),
             entries_area_height: 0,
         })
@@ -1058,6 +1061,42 @@ fn open_or_queue(open: &mut Option<PluginUiState>, q: &mut VecDeque<(String, Id,
     }
 }
 
+/// 왼쪽 내용 뒤 남는 폭에 오른쪽 정렬 조각. 안 들어가면 빈 문자열.
+fn row_suffix(width: u16, left: &str, right: &[(String, u16)]) -> String {
+    let used = left.chars().count() as u16;
+    let avail = width.saturating_sub(used);
+    if avail < 3 || right.is_empty() {
+        return String::new();
+    }
+    crate::plugin::fields::fit_right(avail, right)
+}
+
+/// `status/set` 하나. 빈 text는 조각을 지운다.
+fn apply_status_set(segs: &mut BTreeMap<(String, String), FieldValue>, plugin: &str, params: Value) {
+    let Ok(p) = serde_json::from_value::<StatusSetParams>(params) else { return };
+    let k = (plugin.to_string(), p.field);
+    if p.text.trim().is_empty() {
+        segs.remove(&k);
+    } else {
+        segs.insert(k, FieldValue { text: p.text, color: p.color });
+    }
+}
+
+/// 플러그인 필드 색. 테마 이름(accent, success, warning, error, muted, heading)이나 `#rrggbb`. 없거나 모르면 muted.
+fn field_style(color: &Option<String>) -> Style {
+    let t = theme();
+    let c = match color.as_deref() {
+        Some("accent") => t.accent,
+        Some("success") => t.success,
+        Some("warning") => t.warning,
+        Some("error") => t.error,
+        Some("heading") => t.heading,
+        Some("muted") | None => t.muted,
+        Some(hex) => crate::theme::parse_hex(hex).unwrap_or(t.muted),
+    };
+    Style::default().fg(c)
+}
+
 /// `commands/execute`의 이름은 keymap.toml의 액션 이름과 같다(snake_case). 플러그인 명령은 안 된다.
 fn action_by_name(name: &str) -> Option<Action> {
     serde_json::from_value(Value::String(name.to_string())).ok()
@@ -1378,10 +1417,78 @@ impl App {
         }
     }
 
-    // Task 10이 채운다
-    fn handle_field_notification(&mut self, _plugin: &str, _method: &str, _params: Value) {}
+    /// `status/set`은 선언된 상태 조각만 받고, `fields/set`은 캐시에 덮어쓴다.
+    fn handle_field_notification(&mut self, plugin: &str, method: &str, params: Value) {
+        match method {
+            "status/set" => {
+                let field = params.get("field").and_then(Value::as_str).unwrap_or("").to_string();
+                let declared = self.field_decls.iter().any(|d| d.plugin == plugin && d.id == field && d.place == Place::Status && d.enabled);
+                if declared {
+                    apply_status_set(&mut self.status_segments, plugin, params);
+                }
+            }
+            "fields/set" => {
+                if let Ok(p) = serde_json::from_value::<FieldsSetParams>(params) {
+                    self.fields.set_many(plugin, &p.fields);
+                }
+            }
+            _ => {}
+        }
+    }
 
-    fn on_plugin_exited(&mut self, _plugin: &str) {}
+    /// 죽은 플러그인의 값은 전부 빈칸. 목록은 그대로 그려진다.
+    fn on_plugin_exited(&mut self, plugin: &str) {
+        self.fields.clear_plugin(plugin);
+        self.status_segments.retain(|(p, _), _| p != plugin);
+    }
+
+    /// 지금 화면에 보이는 항목의 키. 목록 오프셋부터 (높이/3)개.
+    fn visible_keys(&self) -> Vec<String> {
+        let rows = (self.entries_area_height as usize / 3).max(1);
+        let start = self.list_state.offset();
+        self.filtered.iter().skip(start).take(rows).map(|&i| self.entries[i].bibtex_key.clone()).collect()
+    }
+
+    /// 아직 안 물은 키를 필드가 있는 플러그인마다 fields/get. 답은 fields_rx로 온다.
+    fn pull_fields(&mut self, keys: Vec<String>) {
+        let mut plugins: Vec<String> = self.field_decls.iter().filter(|d| d.enabled).map(|d| d.plugin.clone()).collect();
+        plugins.sort();
+        plugins.dedup();
+        if plugins.is_empty() {
+            return;
+        }
+        let wanted = self.fields.wanted(&keys, 50);
+        if wanted.is_empty() {
+            return;
+        }
+        let entries: Vec<Entry> = self.entries.iter().filter(|e| wanted.contains(&e.bibtex_key)).cloned().collect();
+        for plugin in plugins {
+            let params = serde_json::to_value(FieldsGetParams { keys: wanted.clone(), entries: entries.clone() }).unwrap_or(Value::Null);
+            let host = Arc::clone(&self.host);
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                if let Ok(v) = host.call(&plugin, "fields/get", params, Some(std::time::Duration::from_secs(30))) {
+                    if let Ok(r) = serde_json::from_value::<FieldsResult>(v) {
+                        let _ = tx.send((plugin, r));
+                    }
+                }
+            });
+            self.fields_rx.push(rx);
+        }
+    }
+
+    /// 커서가 멈춘 뒤: 그 항목의 필드를 묻고 구독자에게 `entry/selected`.
+    fn on_cursor_settled(&mut self) {
+        let Some(e) = self.selected_entry().cloned() else { return };
+        self.pull_fields(vec![e.bibtex_key.clone()]);
+        if !self.host.subscribers("entry/selected").is_empty() {
+            let host = Arc::clone(&self.host);
+            let params = serde_json::to_value(SelectedParams { entry: e }).unwrap_or(Value::Null);
+            std::thread::spawn(move || {
+                host.emit("entry/selected", params);
+            });
+        }
+    }
 
     // ── 미리보기 탭 ──────────────────────────────────────────────────────────
 
@@ -1892,6 +1999,10 @@ fn draw_collections_panel(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_entries_panel(f: &mut Frame, app: &mut App, area: Rect) {
+    app.entries_area_height = area.height.saturating_sub(2);
+    // 테두리 2 + highlight symbol 2
+    let inner_w = area.width.saturating_sub(4);
+    let (field_decls, fields) = (&app.field_decls, &app.fields);
     let focused = app.focus == Panel::Entries;
     let border_style = if focused {
         Style::default().fg(theme().accent)
@@ -1932,17 +2043,47 @@ fn draw_entries_panel(f: &mut Frame, app: &mut App, area: Rect) {
         let sel_mark = if is_selected { "✓ " } else { "  " };
         let sel_style = if is_selected { Style::default().fg(theme().success) } else { Style::default() };
 
-        let line1 = Line::from(vec![
-            Span::styled(line_num, num_style),
+        // 플러그인 필드: 앵커 뒤에 한 칸 띄워, 오른쪽 정렬은 줄 끝에
+        let (after1, right1) = row_cells(field_decls, fields, &e.bibtex_key, 1);
+        let (after2, right2) = row_cells(field_decls, fields, &e.bibtex_key, 2);
+        let (after3, right3) = row_cells(field_decls, fields, &e.bibtex_key, 3);
+        let anchored = |cells: &[crate::plugin::fields::Placed], a: Anchor| -> Vec<Span<'static>> {
+            cells.iter().filter(|c| c.anchor == Some(a)).map(|c| Span::styled(format!(" {}", c.text), field_style(&c.color))).collect()
+        };
+        let suffix = |left: &str, cells: &[crate::plugin::fields::Placed]| -> Option<Span<'static>> {
+            let right: Vec<(String, u16)> = cells.iter().map(|c| (c.text.clone(), c.width)).collect();
+            let s = row_suffix(inner_w, left, &right);
+            if s.is_empty() { None } else { Some(Span::styled(s, field_style(&cells.first().and_then(|c| c.color.clone())))) }
+        };
+        let key_after = anchored(&after1, Anchor::Key);
+        let pdf_after = anchored(&after1, Anchor::Pdf);
+        let left1 = format!("{}{}{}{}{}{}", line_num, sel_mark, e.bibtex_key, key_after.iter().map(|s| s.content.as_ref()).collect::<String>(), pdf_mark, pdf_after.iter().map(|s| s.content.as_ref()).collect::<String>());
+        let mut spans1 = vec![
+            Span::styled(line_num.clone(), num_style),
             Span::styled(sel_mark, sel_style),
             Span::styled(e.bibtex_key.clone(), Style::default().fg(theme().heading).add_modifier(Modifier::BOLD)),
-            Span::styled(pdf_mark.to_string(), Style::default().fg(theme().success)),
-        ]);
-        let line2 = Line::from(Span::raw(format!("{}  {}", pad, title)));
-        let line3 = Line::from(Span::styled(
-            format!("{}  {} · {}", pad, author, year),
-            Style::default().fg(theme().muted),
-        ));
+        ];
+        spans1.extend(key_after);
+        spans1.push(Span::styled(pdf_mark.to_string(), Style::default().fg(theme().success)));
+        spans1.extend(pdf_after);
+        spans1.extend(anchored(&after2, Anchor::Key));
+        spans1.extend(suffix(&left1, &right1));
+        let line1 = Line::from(spans1);
+        let left2 = format!("{}  {}", pad, title);
+        let mut spans2 = vec![Span::raw(left2.clone())];
+        spans2.extend(anchored(&after2, Anchor::Pdf));
+        spans2.extend(anchored(&after2, Anchor::Year));
+        spans2.extend(suffix(&left2, &right2));
+        let line2 = Line::from(spans2);
+        let left3 = format!("{}  {} · {}", pad, author, year);
+        let year_after = anchored(&after3, Anchor::Year);
+        let left3_full = format!("{}{}", left3, year_after.iter().map(|s| s.content.as_ref()).collect::<String>());
+        let mut spans3 = vec![Span::styled(left3, Style::default().fg(theme().muted))];
+        spans3.extend(anchored(&after3, Anchor::Key));
+        spans3.extend(anchored(&after3, Anchor::Pdf));
+        spans3.extend(year_after);
+        spans3.extend(suffix(&left3_full, &right3));
+        let line3 = Line::from(spans3);
 
         let mut item = ListItem::new(Text::from(vec![line1, line2, line3]));
         if is_selected {
@@ -2476,6 +2617,9 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         }
         _ => status_bar_text(&app.keymap, app.focus),
     };
+    // 오른쪽에 플러그인 조각. 조각이 없으면 지금과 같은 화면
+    let segments: Vec<String> = if app.config.plugin_status_bar { app.status_segments.values().map(|v| v.text.clone()).collect() } else { Vec::new() };
+    let status = crate::plugin::fields::status_line(area.width, &status, &segments);
     let status_widget = Paragraph::new(status).style(Style::default().fg(theme().muted));
     f.render_widget(status_widget, area);
 }
@@ -4414,12 +4558,15 @@ pub fn run_tui(config: &Config) -> Result<()> {
         status_bar: config.status_bar,
         images: config.images,
         theme: config.theme.clone(),
+        plugin_status_bar: config.plugin_status_bar,
         plugins: config.plugins.clone(),
         msgs: crate::i18n::Msgs::new(&config.language),
     };
 
     let mut app = App::new(config_clone, Arc::clone(&host))?;
     app.images = detect_images(config.images);
+    // 플러그인은 initialize에서 이걸 받는다. 그림 지원은 여기서야 안다
+    app.host.set_capabilities(Capabilities { images: app.images.is_some(), status_bar: config.plugin_status_bar });
     app.keymap = keymap_report.keymap;
     app.apply_filters();
 
@@ -4817,6 +4964,37 @@ fn run_loop(
                     if handle_key(app, key)? { quit = true; break; }
                 }
                 if quit { break; }
+            }
+        }
+
+        // fields/get 답 거두기
+        let mut done = Vec::new();
+        for (i, rx) in app.fields_rx.iter().enumerate() {
+            match rx.try_recv() {
+                Ok((plugin, r)) => {
+                    app.fields.set_many(&plugin, &r.fields);
+                    done.push(i);
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => done.push(i),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        for i in done.into_iter().rev() {
+            app.fields_rx.remove(i);
+        }
+        // 보이는 항목의 필드. wanted가 이미 물은 키를 거르므로 매 프레임 불러도 싸다
+        let keys = app.visible_keys();
+        app.pull_fields(keys);
+        // 커서가 SETTLE_MS 멈춘 뒤 한 번
+        let sel_key = app.selected_entry().map(|e| e.bibtex_key.clone());
+        if sel_key != app.last_sel_key {
+            app.last_sel_key = sel_key;
+            app.sel_since = Some(std::time::Instant::now());
+        }
+        if let Some(since) = app.sel_since {
+            if crate::preview_tabs::settled(since, std::time::Instant::now()) {
+                app.sel_since = None;
+                app.on_cursor_settled();
             }
         }
 
@@ -5706,5 +5884,29 @@ mod tests {
         assert_eq!(action_by_name("export_menu"), Some(Action::ExportMenu));
         assert_eq!(action_by_name("nope"), None);
         assert_eq!(action_by_name("plugin"), None, "plugin commands are not addressable this way");
+    }
+
+    /// 행 오른쪽 조각은 남는 폭에 오른쪽 정렬, 왼쪽 내용은 지킨다.
+    #[test]
+    fn row_suffix_right_aligns_within_the_remaining_width() {
+        use super::row_suffix;
+        let s = row_suffix(30, "kim2025 ◆", &[("★ 312".into(), 6), ("3 refs".into(), 8)]);
+        assert_eq!(s.chars().count(), 30 - "kim2025 ◆".chars().count());
+        assert!(s.ends_with("★ 312  3 refs"), "{:?}", s);
+        let s = row_suffix(12, "kim2025 ◆", &[("★ 312".into(), 6)]);
+        assert_eq!(s, "", "no room: the plugin cell goes, the key stays");
+    }
+
+    /// 상태 조각은 (plugin, field)로 놓이고 빈 text는 조각을 지운다.
+    #[test]
+    fn status_set_replaces_and_empty_text_removes() {
+        use super::apply_status_set;
+        use crate::plugin::protocol::FieldValue;
+        let mut segs: std::collections::BTreeMap<(String, String), FieldValue> = Default::default();
+        apply_status_set(&mut segs, "git-sync", serde_json::json!({"field": "ahead", "text": "↑2 unpushed"}));
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[&("git-sync".to_string(), "ahead".to_string())].text, "↑2 unpushed");
+        apply_status_set(&mut segs, "git-sync", serde_json::json!({"field": "ahead", "text": ""}));
+        assert!(segs.is_empty());
     }
 }
