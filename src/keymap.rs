@@ -1386,6 +1386,7 @@ mod tests {
                 tabs: vec![],
                 builtin: None,
                 dir: std::path::PathBuf::from("/tmp"),
+                guide: None,
             })
             .collect();
         let env = crate::plugin::PluginEnv {

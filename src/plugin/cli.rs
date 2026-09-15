@@ -336,7 +336,7 @@ pub fn scaffold(dest: &Path, name: &str) -> Result<()> {
     std::fs::write(
         dest.join("plugin.toml"),
         format!(
-            "api = 1\nname = \"{name}\"\nversion = \"0.1.0\"\ndescription = \"Describe what {name} does\"\nrun = \"python3 main.py\"\n\n[[commands]]\nid = \"hello\"\ndesc = \"Say hello from {name}\"\n# key = \"<C-h>\"          # default key; users can rebind in keymap.toml\n# menu = true            # show in the right-click menu\n\n# [[hooks]]\n# on = \"after_write\"     # before_add | after_write | after_note_save\n# run = \"hello\"\n",
+            "api = 1\nname = \"{name}\"\nversion = \"0.1.0\"\ndescription = \"Describe what {name} does\"\nrun = \"python3 main.py\"\nguide = \"AGENT.md\"          # usage notes for AI agents, shown by `bibox agent-guide`\n\n[[commands]]\nid = \"hello\"\ndesc = \"Say hello from {name}\"\n# key = \"<C-h>\"          # default key; users can rebind in keymap.toml\n# menu = true            # show in the right-click menu\n\n# [[hooks]]\n# on = \"after_write\"     # before_add | after_write | after_note_save\n# run = \"hello\"\n",
             name = name
         ),
     )?;
@@ -345,6 +345,13 @@ pub fn scaffold(dest: &Path, name: &str) -> Result<()> {
         "from bibox_plugin import serve, pick, prompt, confirm, progress, bibox, copy_to_clipboard  # noqa: F401\n\n\ndef hello(ctx):\n    entry = ctx.get(\"entry\")\n    title = entry[\"title\"] if entry else \"(no entry)\"\n    return {\"message\": f\"Hello from the plugin. Current entry: {title}\"}\n\n\nserve({\"hello\": hello})\n",
     )?;
     std::fs::write(dest.join("bibox_plugin.py"), HELPER_PY)?;
+    std::fs::write(
+        dest.join("AGENT.md"),
+        format!(
+            "# {name}\n\nWritten for AI agents: `bibox agent-guide` prints this file under Installed plugins.\n\nWhat it does: describe what {name} changes (entries, notes, files).\n\nHow to run it: the `hello` command runs from the TUI (bind a key or set `key =` in plugin.toml). If you add a `[cli]` section, agents call `bibox {name} <args>`; document the arguments here.\n\nNeeds: environment variables, external tools, network access.\n",
+            name = name
+        ),
+    )?;
     std::fs::write(dest.join(".gitignore"), "stderr.log\n")?;
     Ok(())
 }
@@ -561,6 +568,8 @@ mod tests {
         assert!(root.join("my-plugin/main.py").exists());
         assert!(root.join("my-plugin/bibox_plugin.py").exists());
         assert_eq!(std::fs::read_to_string(root.join("my-plugin/.gitignore")).unwrap().trim(), "stderr.log");
+        // 에이전트 가이드 뼈대: 매니페스트가 가리키고 파일이 있어 파싱 때 읽힌다
+        assert!(m.guide.as_deref().unwrap_or("").contains("bibox my-plugin <args>"), "{:?}", m.guide);
         let _ = std::fs::remove_dir_all(&root);
     }
     #[test]

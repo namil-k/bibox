@@ -5556,7 +5556,7 @@ mod tests {
                 Command { id: "run".into(), desc: "Normalize the entry".into(), key: Some(vec![parse_key("=").unwrap()]), layers: vec![LayerId::Entries], menu: true },
                 Command { id: "quiet".into(), desc: "No menu".into(), key: None, layers: vec![LayerId::Entries], menu: false },
             ],
-            hooks: vec![], cli: None, settings: vec![], tabs: vec![], builtin: None, dir: "/tmp".into(),
+            hooks: vec![], cli: None, settings: vec![], tabs: vec![], builtin: None, dir: "/tmp".into(), guide: None,
         };
         let env = crate::plugin::PluginEnv { bin: "/bin/true".into(), config_dir: "/tmp".into(), db: "/tmp/db.json".into(), notes: "/tmp/n".into(), pdfs: "/tmp/p".into(), home: None };
         crate::plugin::PluginHost::new(vec![m], Default::default(), env).commands().clone()

@@ -903,6 +903,8 @@ impl Msgs {
                 Some(s) => format!("  config.toml: [plugins.{}]의 {}는 {}의 설정이 아닙니다 ({}를 말한 건가요?)", plugin, key, plugin, s),
                 None => format!("  config.toml: [plugins.{}]의 {}는 {}의 설정이 아닙니다", plugin, key, plugin),
             },
+            (Lang::En, GuideMissing { plugin, path }) => format!("  {}: guide file {} is missing, so `bibox agent-guide` cannot describe this plugin", plugin, path),
+            (Lang::Ko, GuideMissing { plugin, path }) => format!("  {}: 가이드 파일 {}가 없어 `bibox agent-guide`가 이 플러그인을 설명하지 못합니다", plugin, path),
         }
     }
 

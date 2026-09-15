@@ -77,6 +77,9 @@ struct ManifestFile {
     settings: Vec<SettingFile>,
     #[serde(default)]
     tabs: Vec<TabFile>,
+    /// 에이전트용 사용 설명 파일(Markdown), 플러그인 디렉토리 기준 상대 경로. `bibox agent-guide`가 싣는다.
+    #[serde(default)]
+    guide: Option<String>,
 }
 
 /// `[[tabs]]`. 미리보기 패널의 탭 하나: 제목과 그 내용을 만드는 명령.
@@ -181,6 +184,8 @@ pub struct Manifest {
     pub tabs: Vec<Tab>,
     pub builtin: Option<String>,
     pub dir: PathBuf,
+    /// 에이전트용 사용 설명 본문. 외부 플러그인은 `guide` 파일을 파싱 때 읽고, 내장은 코드에 갖는다.
+    pub guide: Option<String>,
 }
 
 /// 미리보기 탭. `run`은 이 플러그인의 command id. 호스트가 `trigger = "tab"`으로 부른다.
@@ -220,6 +225,8 @@ pub enum PluginProblem {
     SettingTypeMismatch { plugin: String, key: String, expected: String, found: String },
     /// doctor 전용. `[plugins.x] key`가 선언에 없다. 선언이 하나라도 있는 플러그인만 검사한다.
     UndeclaredSetting { plugin: String, key: String, suggestion: Option<String> },
+    /// `guide = "..."`가 가리키는 파일이 없다. 플러그인은 뜨지만 에이전트 가이드에 설명이 빠진다.
+    GuideMissing { plugin: String, path: String },
 }
 
 impl PluginProblem {
@@ -238,7 +245,8 @@ impl PluginProblem {
             | PluginProblem::ToolMissing { plugin, .. }
             | PluginProblem::NameCollidesWithSubcommand { plugin }
             | PluginProblem::SettingTypeMismatch { plugin, .. }
-            | PluginProblem::UndeclaredSetting { plugin, .. } => plugin,
+            | PluginProblem::UndeclaredSetting { plugin, .. }
+            | PluginProblem::GuideMissing { plugin, .. } => plugin,
             PluginProblem::NoManifest { dir } => dir,
             PluginProblem::DanglingLink { name, .. } => name,
             PluginProblem::ConfigWithoutPlugin { name } => name,
@@ -360,6 +368,7 @@ fn expand_stub(
     let mut m = build(dir, embedded, Some(run), problems)?;
     m.builtin = Some(builtin.to_string());
     m.version = Some(env!("CARGO_PKG_VERSION").to_string());
+    m.guide = Some(b.guide.to_string());
     Some(m)
 }
 
@@ -544,6 +553,27 @@ fn build(dir: &Path, file: ManifestFile, run_override: Option<Vec<String>>, prob
     if fatal {
         return None;
     }
+    // 가이드 파일은 플러그인 디렉토리 안이어야 한다. 없으면 경고만 하고 로드한다
+    let guide = match &file.guide {
+        None => None,
+        Some(rel) => {
+            let p = Path::new(rel);
+            if p.is_absolute() || p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+                problems.push(err(format!("guide \"{}\" must be a file inside the plugin directory", rel)));
+                None
+            } else {
+                let full = dir.join(p);
+                match std::fs::read_to_string(&full) {
+                    Ok(text) => Some(text),
+                    Err(_) => {
+                        problems.push(PluginProblem::GuideMissing { plugin: plugin.clone(), path: full.to_string_lossy().to_string() });
+                        None
+                    }
+                }
+            }
+        }
+    };
+
     Some(Manifest {
         name: file.name,
         version: file.version,
@@ -556,6 +586,7 @@ fn build(dir: &Path, file: ManifestFile, run_override: Option<Vec<String>>, prob
         tabs,
         builtin: None,
         dir: dir.to_path_buf(),
+        guide,
     })
 }
 
@@ -771,6 +802,7 @@ run = "python3 cli.py"
         manifest: "api = 1\nname = \"demo\"\ndescription = \"Demo plugin\"\n[[commands]]\nid = \"hello\"\ndesc = \"Say hello\"\nkey = \"<C-g>\"\n[[hooks]]\non = \"after_write\"\nrun = \"hello\"\n",
         run: noop,
         seeded: true,
+        guide: "demo guide",
     }];
 
     const STUB: &str = "api = 1\nname = \"demo\"\nbuiltin = \"demo\"\n";
@@ -831,7 +863,40 @@ run = "python3 cli.py"
             let mut problems = vec![];
             let m = parse_manifest_with(&dir(b.name), &stub, &mut problems, crate::plugin::builtin::BUILTINS);
             assert!(m.is_some() && problems.is_empty(), "{}: {:?}", b.name, problems);
+            // 내장은 사용 설명을 코드에 갖는다. 에이전트 가이드가 그대로 싣는다
+            let guide = m.unwrap().guide.unwrap_or_default();
+            assert!(guide.len() > 80, "{} needs a guide for agents, got {:?}", b.name, guide);
         }
+    }
+
+    /// `guide = "AGENT.md"`: 플러그인 디렉토리 안의 파일. 파싱 때 읽어 두고, 없으면 경고만(플러그인은 로드).
+    #[test]
+    fn a_guide_file_is_read_at_parse_time_and_a_missing_one_is_only_a_warning() {
+        let d = std::env::temp_dir().join(format!("bibox-guide-{}", std::process::id())).join("guided");
+        let _ = std::fs::remove_dir_all(d.parent().unwrap());
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("AGENT.md"), "# guided\n\nRun `bibox guided <key>` to do the thing.\n").unwrap();
+        let text = "api = 1\nname = \"guided\"\nrun = \"sh x\"\nguide = \"AGENT.md\"\n[cli]\nrun = \"sh cli\"\n";
+        let mut problems = vec![];
+        let m = parse_manifest(&d, text, &mut problems).expect("manifest");
+        assert!(problems.is_empty(), "{:?}", problems);
+        assert_eq!(m.guide.as_deref(), Some("# guided\n\nRun `bibox guided <key>` to do the thing.\n"));
+
+        std::fs::remove_file(d.join("AGENT.md")).unwrap();
+        let mut problems = vec![];
+        let m = parse_manifest(&d, text, &mut problems).expect("still loads");
+        assert!(m.guide.is_none());
+        assert!(matches!(&problems[..], [PluginProblem::GuideMissing { plugin, path }] if plugin == "guided" && path.ends_with("AGENT.md")), "{:?}", problems);
+
+        let mut problems = vec![];
+        let m = parse_manifest(&d, "api = 1\nname = \"guided\"\nrun = \"sh x\"\nguide = \"../secret.md\"\n", &mut problems).expect("loads");
+        assert!(m.guide.is_none());
+        assert!(matches!(&problems[..], [PluginProblem::Manifest { detail, .. }] if detail.contains("guide")), "{:?}", problems);
+
+        let mut problems = vec![];
+        let m = parse_manifest(&d, "api = 1\nname = \"guided\"\nrun = \"sh x\"\n", &mut problems).unwrap();
+        assert!(m.guide.is_none() && problems.is_empty(), "no guide is fine");
+        let _ = std::fs::remove_dir_all(d.parent().unwrap());
     }
 
     #[test]

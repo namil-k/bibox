@@ -13,6 +13,8 @@ pub struct Builtin {
     pub run: fn(),
     /// 첫 실행 때 스텁을 만들어 켤 것인가. 외부 도구가 필요한 것(pdf-view의 poppler)은 옵트인.
     pub seeded: bool,
+    /// 에이전트용 사용 설명(Markdown). `bibox agent-guide`의 Installed plugins 절에 실린다.
+    pub guide: &'static str,
 }
 
 pub const BUILTINS: &[Builtin] = &[git_sync::BUILTIN, pdf_view::BUILTIN];

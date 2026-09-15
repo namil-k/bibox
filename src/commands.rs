@@ -3452,7 +3452,7 @@ pub fn cmd_template_export(name: &str, config: &Config) -> Result<()> {
 
 // ── agent-guide ─────────────────────────────────────────────────────────────
 
-const AGENT_GUIDE: &str = r##"# bibox — AI Agent Guide
+const AGENT_GUIDE: &str = r##"# bibox: AI Agent Guide
 
 bibox is a terminal-based bibliography manager. All commands support `--json` for machine-readable output.
 
@@ -3488,7 +3488,7 @@ bibox add --arxiv 2301.12345 --json
 # By ISBN
 bibox add --isbn 978-0-13-468599-1 --json
 
-# By URL (academic paper pages — extracts DOI automatically)
+# By URL (academic paper pages; extracts the DOI automatically)
 bibox add --url https://arxiv.org/abs/2301.12345 --json
 
 # Search by title (non-interactive: --index selects 0-based result)
@@ -3523,6 +3523,9 @@ bibox search "kim" --field author --json
 
 # Show single entry metadata
 bibox show kim2025rust --json
+
+# One formatted citation for a report (apa, ieee, chicago)
+bibox show kim2025rust --cite apa
 ```
 
 ## Notes (AI-agent-friendly Markdown notes)
@@ -3669,8 +3672,10 @@ bibox export --collection ml --notes-only -o ~/ml-notes
 
 ## Sync
 
+`bibox sync` reconciles the files on disk with the database (orphaned PDFs, missing entries). It is not git. Git is handled by the git-sync plugin, which has no CLI: it commits every write when the home is a git repository, and you push with git yourself (see the workflow below).
+
 ```bash
-# Non-interactive sync (for agents)
+# Non-interactive reconcile (for agents)
 bibox sync --yes --json
 ```
 
@@ -3733,14 +3738,16 @@ Issue types:
 - `latex_escape` - LaTeX escapes (\l, \&, \' etc.) in text/author [fixable: decodes to Unicode]
 - `orphaned_note` - Note file with no matching entry
 - `invalid_json` - db.json is not valid JSON (e.g. git merge conflict markers)
-- `plugin_problem` - A plugin.toml, its program, or its `[plugins.<name>]` config has a problem
+- `plugin_problem` - A plugin.toml, its program, a `[plugins.<name>]` setting (wrong type or unknown key), a plugin directory whose symlink target is gone, a missing tool such as poppler for pdf-view, or a missing `guide` file
+- `keymap_problem` - keymap.toml has a bad key, action or layer (the default keymap is used for that run)
+- `theme_problem` - `theme` names a file that does not exist or does not parse (terminal colors are used)
 
 ## PDF Storage (Cloud Sync)
 
 By default, PDFs live in `<home>/pdfs/`. To store them separately (e.g. iCloud, Google Drive, Dropbox), set `pdf_dir` in config.toml:
 
 ```toml
-# ~/.config/bibox/config.toml
+# config.toml: the path is in `bibox config --json` (macOS ~/Library/Application Support/bibox/, Linux ~/.config/bibox/)
 pdf_dir = "~/Library/Mobile Documents/com~apple~CloudDocs/bibox-pdfs"  # iCloud
 # pdf_dir = "~/Google Drive/bibox-pdfs"                                # Google Drive
 # pdf_dir = "~/Dropbox/bibox-pdfs"                                     # Dropbox
@@ -3748,9 +3755,33 @@ pdf_dir = "~/Library/Mobile Documents/com~apple~CloudDocs/bibox-pdfs"  # iCloud
 
 This lets you git-sync `db.json` + notes without committing large PDFs. `bibox config --json` shows the resolved `pdf_dir`.
 
+## Config keys
+
+`bibox config --json` prints the resolved values and the path of config.toml. Keys an agent may set there:
+
+```toml
+home = "~/bibox"                       # portable home (bibox init sets it)
+pdf_dir = "~/Dropbox/bibox-pdfs"       # PDFs outside the home (cloud sync)
+bib_export_dir = "~/Downloads"         # where `e` and `bibox export` write .bib files
+export_dir = "~/Downloads"             # other exports
+citekey_format = "{author}{year}{title}"
+language = "en"                        # en, ko
+images = "auto"                        # auto, off, kitty, iterm2, sixel, halfblocks (plugin tabs such as PDF)
+theme = "terminal"                     # terminal, dark, light, or a file name under themes/
+line_numbers = "absolute"              # absolute, relative, none
+panel_ratio = [2, 4, 4]
+status_bar = true
+
+[plugins.git-sync]                     # plugin settings live under [plugins.<name>]
+include_pdfs = false
+push_on_write = false
+```
+
 ## Plugins
 
-A plugin is a directory under `<config_dir>/bibox/plugins/<name>/` with a `plugin.toml` and a program in any language. It adds commands (keys, right-click menu items) and save hooks (`before_add`, `after_write`, `after_note_save`).
+A plugin is a directory under `<config_dir>/bibox/plugins/<name>/` with a `plugin.toml` and a program in any language. It adds commands (keys, right-click menu items), save hooks (`before_add`, `after_write`, `after_note_save`), preview tabs and settings. A plugin with a `[cli]` section is run from the shell as `bibox <name> <args>`, with your stdin and stdout.
+
+**Installed plugins and how to use them are listed at the end of this guide** (generated from what is installed right now; in `--json` it is the `installed` array). Each entry carries the plugin's commands, hooks, settings and the usage notes its author wrote (`guide = "AGENT.md"` in plugin.toml). Read that section before calling a plugin.
 
 ```bash
 bibox plugin list                                      # what is installed and whether it loaded
@@ -3766,7 +3797,9 @@ Protocol: one JSON object per line on stdin/stdout. bibox sends `{"type":"comman
 
 Every plugin process gets `BIBOX_BIN` (call it for `modify`, `note --stdin`, `add --json` and return `refresh`), `BIBOX_CONFIG_DIR`, `BIBOX_DB_PATH`, `BIBOX_NOTES_DIR`, `BIBOX_PDF_DIR`, `BIBOX_PLUGIN_DIR`. Inside a hook the helper sets `BIBOX_IN_HOOK=1` on that call so it does not fire hooks again. The plugin's stderr is in `plugins/<name>/stderr.log`, truncated on every start.
 
-A plugin can add a preview tab with `[[tabs]] { title, run }`; bibox calls the command with `trigger = "tab"` and `tab: { page, width_px, images }`, and the command answers `{"tab": {"image": "<png>" | "lines": [...], "pages": n}}`. The built-in `pdf-view` does this for PDFs (needs poppler).
+A plugin can add a preview tab with `[[tabs]] { title, run }`; bibox calls the command with `trigger = "tab"` and `tab: { page, width_px, images }`, and the command answers `{"tab": {"image": "<png or jpeg>" | "lines": [...], "pages": n}}`. The built-in `pdf-view` does this for PDFs (needs poppler; not installed until `bibox plugin install pdf-view`).
+
+When writing a plugin, add `guide = "AGENT.md"` to plugin.toml and put the usage notes for agents in that file: what the plugin changes, how to call its CLI if it has one, which environment variables it needs. `bibox plugin new` creates a stub.
 
 Test a plugin without the TUI: `printf '<request json>\n' | python3 main.py`. See the README's Plugins section for `plugin.toml` fields (including `[[settings]]`) and `[plugins.<name>]` settings in config.toml.
 
@@ -4443,7 +4476,15 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
     Ok(())
 }
 
+/// 설치된 플러그인의 요약과 작성자 가이드. 정적 텍스트 뒤에 붙는다.
+fn installed_plugins() -> Vec<crate::plugin::guide::Installed> {
+    let dir = crate::plugin::plugins_dir();
+    let (manifests, _) = crate::plugin::discover(&dir);
+    manifests.iter().map(|m| crate::plugin::guide::from_manifest(m, crate::plugin::cli::source_of(&dir, m))).collect()
+}
+
 pub fn cmd_agent_guide(json: bool) -> Result<()> {
+    let installed = installed_plugins();
     if json {
         let result = serde_json::json!({
             "guide": AGENT_GUIDE,
@@ -4452,11 +4493,15 @@ pub fn cmd_agent_guide(json: bool) -> Result<()> {
                 "dir": crate::plugin::plugins_dir().to_string_lossy(),
                 "commands": ["plugin list", "plugin install <source|built-in name>", "plugin remove <name>", "plugin new <name>", "plugin run <built-in name>"],
                 "protocol": "one JSON object per line on stdin/stdout; a line with \"ui\" is a popup request, a line without it is the final answer; see README",
+                "cli": "a plugin with a [cli] section runs as `bibox <name> <args>`",
             },
+            "installed": crate::plugin::guide::json(&installed),
         });
         println!("{}", serde_json::to_string_pretty(&result)?);
     } else {
         print!("{}", AGENT_GUIDE);
+        println!();
+        print!("{}", crate::plugin::guide::section(&installed));
     }
     Ok(())
 }

@@ -33,7 +33,9 @@ default = 300
 desc = "Never rasterize above this dpi"
 "#;
 
-pub const BUILTIN: Builtin = Builtin { name: "pdf-view", manifest: MANIFEST, run, seeded: false };
+pub const GUIDE: &str = "TUI only: adds the PDF tab to the preview panel (Tab cycles Info, Note, PDF; `n`/`p` pages, `+`/`-`/`0` zoom, `H`/`L` pan). Not installed by default; `bibox plugin install pdf-view` turns it on. Needs poppler on PATH (`pdfinfo`, `pdftoppm`, `pdftotext`; `brew install poppler` or `apt install poppler-utils`), which `bibox doctor` checks. Settings under `[plugins.pdf-view]`: `max_zoom` (percent, default 400) and `dpi_cap` (default 300).";
+
+pub const BUILTIN: Builtin = Builtin { name: "pdf-view", manifest: MANIFEST, run, seeded: false, guide: GUIDE };
 
 /// doctor가 PATH에서 찾는 도구들
 pub const TOOLS: [&str; 3] = ["pdfinfo", "pdftoppm", "pdftotext"];

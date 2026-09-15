@@ -3,6 +3,7 @@ name = "summarize"
 version = "0.1.0"
 description = "Summarize the attached PDF into the note with Claude"
 run = "python3 main.py"
+guide = "AGENT.md"
 
 [[commands]]
 id = "summarize"

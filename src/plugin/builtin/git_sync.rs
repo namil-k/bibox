@@ -43,7 +43,9 @@ on = "after_write"
 run = "commit"
 "#;
 
-pub const BUILTIN: Builtin = Builtin { name: "git-sync", manifest: MANIFEST, run, seeded: true };
+pub const GUIDE: &str = "No CLI. When the bibox home (`bibox config --json` -> `home`) is a git repository, every write through the CLI or the TUI is committed right away (`db.json` and notes; PDFs only if `include_pdfs = true`). To publish, run `git push` in the home directory, or set `push_on_write = true` under `[plugins.git-sync]` in config.toml. In the TUI, `g s` fetches, pulls with rebase and pushes; `g t` shows status. Nothing is committed when the home is not a git repository.";
+
+pub const BUILTIN: Builtin = Builtin { name: "git-sync", manifest: MANIFEST, run, seeded: true, guide: GUIDE };
 
 fn run() {
     let mut handler = |req: &Request, ui: &mut Ui| handle(req, ui);
