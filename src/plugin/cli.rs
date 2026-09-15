@@ -371,6 +371,8 @@ pub fn run_external(args: Vec<OsString>, config: &Config) -> Result<i32> {
     let mut cmd = std::process::Command::new(&argv[0]);
     cmd.args(&argv[1..]).args(&args[1..]).current_dir(&m.dir);
     apply_env(&mut cmd, &PluginEnv::from_config(config), &m.dir);
+    // 프로토콜 프로세스와 같은 프로그램이 [cli]도 맡을 수 있게 구분해 준다
+    cmd.env("BIBOX_CLI", "1");
     let status = cmd.status().with_context(|| format!("failed to run {}", argv[0]))?;
     Ok(status.code().unwrap_or(1))
 }

@@ -126,8 +126,10 @@ impl FieldStore {
         }
     }
 
+    /// 플러그인이 죽었을 때. 그 값은 지우고, 다시 뜨면 보이는 키를 다시 묻도록 물은 기록도 비운다.
     pub fn clear_plugin(&mut self, plugin: &str) {
         self.values.retain(|(p, _), _| p != plugin);
+        self.asked.clear();
     }
 }
 
@@ -252,6 +254,7 @@ mod tests {
         assert_eq!(s.wanted(&keys, 10), vec!["a"], "forgotten keys are asked again");
         s.clear_plugin("cit");
         assert!(s.get("a", "cit", "count").is_none());
+        assert_eq!(s.wanted(&keys, 10).len(), 3, "after a plugin dies every key is asked again once it is back");
     }
 
     #[test]

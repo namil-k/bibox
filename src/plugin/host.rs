@@ -712,6 +712,34 @@ mod tests {
         assert_eq!(params["fields"]["a"]["count"]["color"], "accent");
     }
 
+    /// citations는 캐시에 있는 DOI는 즉시 답하고 없거나 오래된 것은 빈칸으로 두고 뒤에서 받는다. BIBOX_CITATIONS_OFFLINE=1이면 받지 않는다.
+    #[test]
+    fn citations_answers_from_cache_without_the_network() {
+        let dir = std::env::temp_dir().join(format!("bibox-citations-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let plugin_dir = dir.join("citations");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins/citations");
+        for f in ["plugin.toml", "main.py", "bibox_plugin.py", "AGENT.md"] {
+            std::fs::copy(src.join(f), plugin_dir.join(f)).unwrap();
+        }
+        std::fs::copy(fixtures().join("citations_cache.json"), plugin_dir.join("cache.json")).unwrap();
+        let (manifests, problems) = crate::plugin::discover(&dir);
+        assert!(problems.is_empty(), "{:?}", problems);
+        let mut env = env();
+        env.extra.insert("BIBOX_CITATIONS_OFFLINE".into(), "1".into());
+        let host = PluginHost::new(manifests, BTreeMap::new(), env);
+        let entries = json!([
+            {"bibtex_key": "fresh", "doi": "10.1000/abc"},
+            {"bibtex_key": "stale", "doi": "10.1000/old"},
+            {"bibtex_key": "nodoi"},
+        ]);
+        let r = host.call("citations", "fields/get", json!({"keys": ["fresh", "stale", "nodoi"], "entries": entries}), Some(Duration::from_secs(5))).unwrap();
+        assert_eq!(r["fields"]["fresh"]["count"]["text"], "★ 312");
+        assert!(r["fields"].get("stale").is_none(), "stale is refetched later, not answered now");
+        assert!(r["fields"].get("nodoi").is_none());
+    }
+
     fn alive(pid: u32) -> bool {
         std::process::Command::new("kill").args(["-0", &pid.to_string()]).stderr(std::process::Stdio::null()).status().map(|s| s.success()).unwrap_or(false)
     }

@@ -1,0 +1,45 @@
+api = 2
+name = "citations"
+version = "0.1.0"
+description = "Citation counts from Crossref in every entry row"
+run = "python3 main.py"
+guide = "AGENT.md"
+activation = "startup"
+
+[[commands]]
+id = "refresh"
+desc = "Refetch the citation count of the selected entries"
+key = "<C-r>"
+menus = ["context"]
+
+[[fields]]
+id = "count"
+place = "row.1"
+align = "right"
+width = 8
+desc = "Times cited (Crossref is-referenced-by-count)"
+
+[[fields]]
+id = "progress"
+place = "status"
+align = "right"
+width = 18
+desc = "Fetch progress while counts are loading"
+
+[[settings]]
+key = "mailto"
+type = "string"
+default = ""
+desc = "Email for Crossref's polite pool (faster, optional)"
+
+[[settings]]
+key = "max_age_days"
+type = "int"
+default = 7
+desc = "Refetch a count older than this"
+
+[events]
+subscribe = ["library/written", "entry/selected"]
+
+[cli]
+run = "python3 main.py"
