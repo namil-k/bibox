@@ -1,11 +1,13 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum EntryType {
     Article,
     Book,
     InProceedings,
+    /// 모르는 타입은 전부 여기로. 가져오기 기본값이기도 하다.
+    #[default]
     Misc,
 }
 

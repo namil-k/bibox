@@ -11,7 +11,7 @@ use crate::config::Config;
 use crate::crossref;
 use crate::events::WriteReason;
 use crate::interactive::{interactive_select, SelectItem};
-use crate::models::{Entry, EntryType};
+use crate::models::{Database, Entry, EntryType};
 use crate::pdf;
 use crate::storage::{
     filter_entries, find_by_key, find_by_key_mut, generate_bibtex_key, generate_unique_key,
@@ -1214,152 +1214,27 @@ pub fn cmd_import(file: PathBuf, to: Option<String>, config: &Config) -> Result<
     let content = std::fs::read_to_string(&file)
         .with_context(|| config.msgs.file_read_failed(&file.to_string_lossy()))?;
 
-    let mut added = 0;
-    let mut pushed: Vec<Entry> = Vec::new();
-    let before_add_events = crate::events::Events::from_config(config);
-    let mut merged: Vec<String> = vec![];
-    let mut skipped: Vec<String> = vec![];
-
     let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
     let parsed = match ext.as_str() {
         "ris" => parse_ris(&content),
         _ => parse_bibtex(&content),
     };
 
-    for mut raw in parsed.entries {
-        let entry_type: EntryType = raw.entry_type.parse().unwrap_or(EntryType::Misc);
-
-        let authors: Vec<String> = raw
-            .author
-            .as_deref()
-            .unwrap_or("")
-            .split(" and ")
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-
-        let has_required = match entry_type {
-            EntryType::Article => {
-                raw.title.is_some() && !authors.is_empty() && raw.year.is_some()
-            }
-            EntryType::Book => {
-                raw.title.is_some() && !authors.is_empty() && raw.year.is_some()
-            }
-            EntryType::InProceedings => {
-                raw.title.is_some() && !authors.is_empty() && raw.year.is_some()
-            }
-            EntryType::Misc => true,
-        };
-
-        if !has_required {
-            skipped.push(format!(
-                "{} {}",
-                raw.key
-                    .unwrap_or_else(|| config.msgs.no_key().to_string()),
-                config.msgs.no_required_fields()
-            ));
-            continue;
-        }
-
-        // Duplicate DOI check — merge missing fields instead of skipping
-        if let Some(ref doi) = raw.doi {
-            let doi_norm = doi.trim().to_lowercase();
-            if let Some(idx) = db.entries.iter().position(|e| {
-                e.doi.as_ref()
-                    .map(|d| d.trim().to_lowercase() == doi_norm)
-                    .unwrap_or(false)
-            }) {
-                let existing_key = db.entries[idx].bibtex_key.clone();
-                let mut n = 0usize;
-                let e = &mut db.entries[idx];
-                if e.title.is_none() { if let Some(v) = raw.title.take() { e.title = Some(v); n += 1; } }
-                if e.author.is_empty() && !authors.is_empty() { e.author = authors.clone(); n += 1; }
-                if e.year.is_none() { if let Some(v) = raw.year.take() { e.year = Some(v); n += 1; } }
-                if e.journal.is_none() { if let Some(v) = raw.journal.take() { e.journal = Some(v); n += 1; } }
-                if e.volume.is_none() { if let Some(v) = raw.volume.take() { e.volume = Some(v); n += 1; } }
-                if e.number.is_none() { if let Some(v) = raw.number.take() { e.number = Some(v); n += 1; } }
-                if e.pages.is_none() { if let Some(v) = raw.pages.take() { e.pages = Some(v); n += 1; } }
-                if e.publisher.is_none() { if let Some(v) = raw.publisher.take() { e.publisher = Some(v); n += 1; } }
-                if e.editor.is_none() { if let Some(v) = raw.editor.take() { e.editor = Some(v); n += 1; } }
-                if e.edition.is_none() { if let Some(v) = raw.edition.take() { e.edition = Some(v); n += 1; } }
-                if e.isbn.is_none() { if let Some(v) = raw.isbn.take() { e.isbn = Some(v); n += 1; } }
-                if e.booktitle.is_none() { if let Some(v) = raw.booktitle.take() { e.booktitle = Some(v); n += 1; } }
-                if e.url.is_none() { if let Some(v) = raw.url.take() { e.url = Some(v); n += 1; } }
-                if e.note.is_none() { if let Some(v) = raw.note.take() { e.note = Some(v); n += 1; } }
-                if e.howpublished.is_none() { if let Some(v) = raw.howpublished.take() { e.howpublished = Some(v); n += 1; } }
-                if e.month.is_none() { if let Some(v) = raw.month.take() { e.month = Some(v); n += 1; } }
-                if n > 0 {
-                    merged.push(config.msgs.merged_fields(&existing_key, n));
-                } else {
-                    skipped.push(config.msgs.already_exists(&existing_key));
-                }
-                continue;
-            }
-        }
-
-        let base_key = raw.key.unwrap_or_else(|| {
-            generate_bibtex_key(
-                &authors,
-                raw.year,
-                raw.title.as_deref().unwrap_or("unknown"),
-            )
-        });
-        let bibtex_key = generate_unique_key(&db, &base_key);
-        let collections: Vec<String> = to.clone().map(|c| vec![c]).unwrap_or_default();
-
-        let entry = Entry {
-            id: Uuid::new_v4().to_string(),
-            bibtex_key,
-            entry_type,
-            title: raw.title,
-            author: authors,
-            year: raw.year,
-            journal: raw.journal,
-            volume: raw.volume,
-            number: raw.number,
-            pages: raw.pages,
-            publisher: raw.publisher,
-            editor: raw.editor,
-            edition: raw.edition,
-            isbn: raw.isbn,
-            booktitle: raw.booktitle,
-            doi: raw.doi,
-            url: raw.url,
-            abstract_text: raw.abstract_text,
-            tags: raw.keywords
-                .map(|k| k.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
-                .unwrap_or_default(),
-            howpublished: raw.howpublished,
-            month: raw.month,
-            note: raw.note,
-            collections,
-            file_path: None,
-            created_at: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-            updated_at: None,
-        };
-
-        let entry = run_before_add_with(&before_add_events, entry);
-        pushed.push(entry.clone());
-        db.entries.push(entry);
-        added += 1;
-    }
+    let before_add_events = crate::events::Events::from_config(config);
+    let mut ctx = ImportCtx { config, to, dry_run: false, events: Some(&before_add_events), pushed: Vec::new() };
+    let outcomes: Vec<ImportOutcome> = parsed
+        .entries
+        .into_iter()
+        .enumerate()
+        .map(|(i, raw)| import_record(&mut db, i, raw.into(), &mut ctx))
+        .collect();
+    let pushed = std::mem::take(&mut ctx.pushed);
     before_add_events.host.shutdown();
 
     save_db(&db, &db_path)?;
     after_write(config, WriteReason::Import, pushed);
 
-    println!("{}", config.msgs.import_complete(added));
-    if !merged.is_empty() {
-        for m in &merged {
-            println!("  ~ {}", m);
-        }
-    }
-    if !skipped.is_empty() {
-        println!("{}", config.msgs.skipped_header(skipped.len()));
-        for s in &skipped {
-            println!("  - {}", s);
-        }
-    }
+    print_import_summary(config, &outcomes);
 
     // Warn about fields the parser saw but could not map (e.g. address, eprint),
     // filtering out known reference-manager cruft to avoid noise.
@@ -2858,6 +2733,273 @@ async fn try_arxiv_fallback(title: &str, config: &Config) -> Option<PathBuf> {
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+/// 가져오기 한 항목의 정규화된 꼴. .bib/.ris/.json 파서가 전부 이걸로 모인다.
+#[derive(Debug, Default)]
+struct ImportRecord {
+    key: Option<String>,
+    entry_type: EntryType,
+    title: Option<String>,
+    authors: Vec<String>,
+    year: Option<u32>,
+    journal: Option<String>,
+    volume: Option<String>,
+    number: Option<String>,
+    pages: Option<String>,
+    publisher: Option<String>,
+    editor: Option<String>,
+    edition: Option<String>,
+    isbn: Option<String>,
+    booktitle: Option<String>,
+    doi: Option<String>,
+    url: Option<String>,
+    abstract_text: Option<String>,
+    howpublished: Option<String>,
+    month: Option<String>,
+    note: Option<String>,
+    tags: Vec<String>,
+    collections: Vec<String>,
+    /// 복사해 올 PDF의 절대 경로(JSON 가져오기만)
+    file: Option<PathBuf>,
+}
+
+impl From<RawBibEntry> for ImportRecord {
+    fn from(raw: RawBibEntry) -> ImportRecord {
+        let authors: Vec<String> = raw
+            .author
+            .as_deref()
+            .unwrap_or("")
+            .split(" and ")
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let tags: Vec<String> = raw
+            .keywords
+            .map(|k| k.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
+            .unwrap_or_default();
+        ImportRecord {
+            key: raw.key,
+            entry_type: raw.entry_type.parse().unwrap_or(EntryType::Misc),
+            title: raw.title,
+            authors,
+            year: raw.year,
+            journal: raw.journal,
+            volume: raw.volume,
+            number: raw.number,
+            pages: raw.pages,
+            publisher: raw.publisher,
+            editor: raw.editor,
+            edition: raw.edition,
+            isbn: raw.isbn,
+            booktitle: raw.booktitle,
+            doi: raw.doi,
+            url: raw.url,
+            abstract_text: raw.abstract_text,
+            howpublished: raw.howpublished,
+            month: raw.month,
+            note: raw.note,
+            tags,
+            collections: vec![],
+            file: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+enum ImportStatus {
+    Added,
+    Merged,
+    Skipped,
+}
+
+/// 항목 하나의 결과. `--json`이 그대로 찍는다. `reason`은 영어(기계용).
+#[derive(Debug, serde::Serialize)]
+struct ImportOutcome {
+    input: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key: Option<String>,
+    status: ImportStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    /// 사람용 요약 한 줄(i18n). `--json`에는 안 실린다.
+    #[serde(skip)]
+    human: String,
+}
+
+/// 가져오기 한 번의 공통 상태. `events`가 None이면 library/adding을 안 보낸다(dry-run, 테스트).
+struct ImportCtx<'a> {
+    config: &'a Config,
+    to: Option<String>,
+    dry_run: bool,
+    events: Option<&'a crate::events::Events>,
+    /// 새로 넣은 항목. `library/written`에 실린다.
+    pushed: Vec<Entry>,
+}
+
+/// article/book/inproceedings는 제목·저자·연도가 있어야 한다. misc는 뭐든 된다.
+fn missing_required(rec: &ImportRecord) -> bool {
+    match rec.entry_type {
+        EntryType::Misc => false,
+        _ => rec.title.is_none() || rec.authors.is_empty() || rec.year.is_none(),
+    }
+}
+
+fn norm_title(t: &str) -> String {
+    t.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+}
+
+/// 이미 있는 항목 찾기: DOI가 있으면 DOI로, 없으면 (제목, 연도)로. (인덱스, 이유)
+fn find_duplicate(db: &Database, rec: &ImportRecord) -> Option<(usize, String)> {
+    if let Some(doi) = rec.doi.as_deref().map(|d| d.trim().to_lowercase()).filter(|d| !d.is_empty()) {
+        return db
+            .entries
+            .iter()
+            .position(|e| e.doi.as_ref().map(|d| d.trim().to_lowercase() == doi).unwrap_or(false))
+            .map(|i| (i, format!("same DOI as {}", db.entries[i].bibtex_key)));
+    }
+    let title = rec.title.as_deref().map(norm_title)?;
+    let year = rec.year?;
+    db.entries
+        .iter()
+        .position(|e| e.year == Some(year) && e.title.as_deref().map(norm_title).as_deref() == Some(title.as_str()))
+        .map(|i| (i, format!("same title and year as {}", db.entries[i].bibtex_key)))
+}
+
+/// 기존 항목의 빈 필드를 채우고 태그·컬렉션을 합친다. 채운 개수를 돌려준다.
+fn merge_into(existing: &mut Entry, rec: &mut ImportRecord, to: Option<&str>) -> usize {
+    let mut n = 0usize;
+    macro_rules! fill {
+        ($field:ident) => {
+            if existing.$field.is_none() {
+                if let Some(v) = rec.$field.take() {
+                    existing.$field = Some(v);
+                    n += 1;
+                }
+            }
+        };
+    }
+    fill!(title);
+    if existing.author.is_empty() && !rec.authors.is_empty() {
+        existing.author = std::mem::take(&mut rec.authors);
+        n += 1;
+    }
+    if existing.year.is_none() {
+        if let Some(y) = rec.year.take() {
+            existing.year = Some(y);
+            n += 1;
+        }
+    }
+    fill!(journal);
+    fill!(volume);
+    fill!(number);
+    fill!(pages);
+    fill!(publisher);
+    fill!(editor);
+    fill!(edition);
+    fill!(isbn);
+    fill!(booktitle);
+    fill!(doi);
+    fill!(url);
+    fill!(abstract_text);
+    fill!(note);
+    fill!(howpublished);
+    fill!(month);
+    for t in rec.tags.drain(..) {
+        if !existing.tags.contains(&t) {
+            existing.tags.push(t);
+            n += 1;
+        }
+    }
+    for c in rec.collections.drain(..).chain(to.map(str::to_string)) {
+        if !existing.collections.contains(&c) {
+            existing.collections.push(c);
+            n += 1;
+        }
+    }
+    if n > 0 {
+        existing.updated_at = Some(Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+    }
+    n
+}
+
+/// 항목 하나를 DB에 넣거나 기존 항목에 합친다. 파일 쓰기는 안 한다(호출자가 save_db).
+fn import_record(db: &mut Database, input: usize, mut rec: ImportRecord, ctx: &mut ImportCtx) -> ImportOutcome {
+    let msgs = &ctx.config.msgs;
+    if missing_required(&rec) {
+        let human = format!("{} {}", rec.key.as_deref().unwrap_or_else(|| msgs.no_key()), msgs.no_required_fields());
+        return ImportOutcome { input, key: rec.key.clone(), status: ImportStatus::Skipped, reason: Some("missing title, author or year".to_string()), human };
+    }
+    if let Some((idx, why)) = find_duplicate(db, &rec) {
+        let n = merge_into(&mut db.entries[idx], &mut rec, ctx.to.as_deref());
+        let key = db.entries[idx].bibtex_key.clone();
+        return if n > 0 {
+            ImportOutcome { input, key: Some(key.clone()), status: ImportStatus::Merged, reason: Some(format!("{}; merged {} fields", why, n)), human: msgs.merged_fields(&key, n) }
+        } else {
+            ImportOutcome { input, key: Some(key.clone()), status: ImportStatus::Skipped, reason: Some(format!("{}; nothing new", why)), human: msgs.already_exists(&key) }
+        };
+    }
+    let base_key = rec.key.take().unwrap_or_else(|| generate_bibtex_key(&rec.authors, rec.year, rec.title.as_deref().unwrap_or("unknown")));
+    let bibtex_key = generate_unique_key(db, &base_key);
+    let mut collections = std::mem::take(&mut rec.collections);
+    if let Some(to) = &ctx.to {
+        if !collections.contains(to) {
+            collections.push(to.clone());
+        }
+    }
+    let entry = Entry {
+        id: Uuid::new_v4().to_string(),
+        bibtex_key: bibtex_key.clone(),
+        entry_type: rec.entry_type.clone(),
+        title: rec.title.take(),
+        author: std::mem::take(&mut rec.authors),
+        year: rec.year,
+        journal: rec.journal.take(),
+        volume: rec.volume.take(),
+        number: rec.number.take(),
+        pages: rec.pages.take(),
+        publisher: rec.publisher.take(),
+        editor: rec.editor.take(),
+        edition: rec.edition.take(),
+        isbn: rec.isbn.take(),
+        booktitle: rec.booktitle.take(),
+        doi: rec.doi.take(),
+        url: rec.url.take(),
+        abstract_text: rec.abstract_text.take(),
+        tags: std::mem::take(&mut rec.tags),
+        howpublished: rec.howpublished.take(),
+        month: rec.month.take(),
+        note: rec.note.take(),
+        collections,
+        file_path: None,
+        created_at: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        updated_at: None,
+    };
+    let entry = match ctx.events {
+        Some(ev) if !ctx.dry_run => run_before_add_with(ev, entry),
+        _ => entry,
+    };
+    let key = entry.bibtex_key.clone();
+    ctx.pushed.push(entry.clone());
+    db.entries.push(entry);
+    ImportOutcome { input, key: Some(key), status: ImportStatus::Added, reason: None, human: String::new() }
+}
+
+/// 사람용 요약: 추가 수, 병합된 것, 건너뛴 것.
+fn print_import_summary(config: &Config, outcomes: &[ImportOutcome]) {
+    let added = outcomes.iter().filter(|o| o.status == ImportStatus::Added).count();
+    println!("{}", config.msgs.import_complete(added));
+    for o in outcomes.iter().filter(|o| o.status == ImportStatus::Merged) {
+        println!("  ~ {}", o.human);
+    }
+    let skipped: Vec<&ImportOutcome> = outcomes.iter().filter(|o| o.status == ImportStatus::Skipped).collect();
+    if !skipped.is_empty() {
+        println!("{}", config.msgs.skipped_header(skipped.len()));
+        for o in skipped {
+            println!("  - {}", o.human);
+        }
+    }
+}
 
 struct RawBibEntry {
     key: Option<String>,
@@ -4490,6 +4632,115 @@ pub fn cmd_agent_guide(json: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── import_record ──
+
+    fn rec(key: Option<&str>, doi: Option<&str>) -> ImportRecord {
+        ImportRecord {
+            key: key.map(str::to_string),
+            entry_type: EntryType::Article,
+            title: Some("Rust systems programming".into()),
+            authors: vec!["Kim, Jinho".into()],
+            year: Some(2025),
+            doi: doi.map(str::to_string),
+            ..ImportRecord::default()
+        }
+    }
+
+    fn ctx<'a>(config: &'a Config, to: Option<&str>) -> ImportCtx<'a> {
+        ImportCtx { config, to: to.map(str::to_string), dry_run: false, events: None, pushed: vec![] }
+    }
+
+    fn temp_config(tag: &str) -> Config {
+        let mut c = Config::default();
+        c.bibox_dir = std::env::temp_dir().join(format!("bibox-import-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&c.bibox_dir);
+        c
+    }
+
+    #[test]
+    fn import_record_merges_on_doi_and_counts_new_fields_tags_and_collections() {
+        let config = temp_config("merge");
+        let mut existing = export_fixture("kim2025rust");
+        existing.doi = Some("10.1/X".into());
+        existing.journal = None;
+        existing.tags = vec!["a".into()];
+        existing.collections = vec!["c1".into()];
+        let mut db = Database { entries: vec![existing] };
+        let mut r = rec(Some("other"), Some("10.1/x"));
+        r.journal = Some("J".into());
+        r.tags = vec!["a".into(), "b".into()];
+        r.collections = vec!["c2".into()];
+        let mut c = ctx(&config, None);
+        let o = import_record(&mut db, 0, r, &mut c);
+        assert!(matches!(o.status, ImportStatus::Merged), "{:?}", o);
+        assert_eq!(o.key.as_deref(), Some("kim2025rust"));
+        assert_eq!(db.entries.len(), 1);
+        let e = &db.entries[0];
+        assert_eq!(e.journal.as_deref(), Some("J"));
+        assert_eq!(e.tags, vec!["a", "b"]);
+        assert_eq!(e.collections, vec!["c1", "c2"]);
+        assert!(e.updated_at.is_some());
+        assert!(o.reason.as_deref().unwrap().contains('3'), "three things merged: {:?}", o.reason);
+        assert!(c.pushed.is_empty(), "a merge is not a new entry");
+    }
+
+    #[test]
+    fn import_record_merges_a_doiless_entry_by_title_and_year() {
+        let config = temp_config("title");
+        let mut db = Database { entries: vec![export_fixture("kim2025rust")] };
+        let mut r = rec(None, None);
+        r.title = Some("RUST systems programming ".into());
+        let o = import_record(&mut db, 0, r, &mut ctx(&config, None));
+        assert!(matches!(o.status, ImportStatus::Skipped), "nothing new to merge: {:?}", o);
+        assert!(o.reason.as_deref().unwrap().contains("same title and year"), "{:?}", o.reason);
+        assert_eq!(db.entries.len(), 1);
+        let mut r = rec(None, None);
+        r.year = Some(2024);
+        let o = import_record(&mut db, 1, r, &mut ctx(&config, None));
+        assert!(matches!(o.status, ImportStatus::Added), "a different year is a different paper");
+    }
+
+    #[test]
+    fn import_record_skips_non_misc_without_required_fields() {
+        let config = temp_config("skip");
+        let mut db = Database { entries: vec![] };
+        let mut r = rec(Some("x"), None);
+        r.year = None;
+        let o = import_record(&mut db, 0, r, &mut ctx(&config, None));
+        assert!(matches!(o.status, ImportStatus::Skipped));
+        assert!(db.entries.is_empty());
+        let mut r = rec(None, None);
+        r.entry_type = EntryType::Misc;
+        r.year = None;
+        r.authors = vec![];
+        assert!(matches!(import_record(&mut db, 1, r, &mut ctx(&config, None)).status, ImportStatus::Added), "misc needs nothing");
+    }
+
+    #[test]
+    fn import_record_suffixes_a_colliding_key() {
+        let config = temp_config("key");
+        let mut db = Database { entries: vec![export_fixture("kim2025rust")] };
+        let o = import_record(&mut db, 0, rec(Some("kim2025rust"), Some("10.9/new")), &mut ctx(&config, None));
+        assert!(matches!(o.status, ImportStatus::Added));
+        assert_eq!(o.key.as_deref(), Some("kim2025rusta"));
+        let o = import_record(&mut db, 1, rec(None, Some("10.9/new2")), &mut ctx(&config, None));
+        assert_eq!(o.key.as_deref(), Some("kim2025rustb"), "generated keys collide the same way");
+    }
+
+    #[test]
+    fn import_record_applies_to_as_an_extra_collection_and_pushes_the_entry() {
+        let config = temp_config("to");
+        let mut db = Database { entries: vec![] };
+        let mut r = rec(Some("k"), None);
+        r.collections = vec!["A/B".into(), "zotero".into()];
+        let mut c = ctx(&config, Some("zotero"));
+        let o = import_record(&mut db, 0, r, &mut c);
+        assert!(matches!(o.status, ImportStatus::Added));
+        assert_eq!(db.entries[0].collections, vec!["A/B", "zotero"], "to is added once");
+        assert_eq!(c.pushed.len(), 1);
+        assert_eq!(c.pushed[0].bibtex_key, "k");
+    }
 
     #[test]
     fn the_agent_guide_describes_protocol_2_not_hooks() {
