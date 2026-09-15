@@ -59,11 +59,6 @@ impl PluginCommands {
     pub fn iter(&self) -> impl Iterator<Item = (PluginCmdId, &PluginCommand)> {
         self.list.iter().enumerate().map(|(i, c)| (PluginCmdId(i as u16), c))
     }
-
-    #[cfg(test)]
-    pub fn len(&self) -> usize {
-        self.list.len()
-    }
 }
 
 // ── 실행 환경 ────────────────────────────────────────────────────────────────
@@ -112,8 +107,10 @@ pub trait UiSink {
     fn ask(&mut self, plugin: &str, req: UiRequest) -> UiAnswer;
 }
 
+#[cfg(test)]
 pub struct NoUiSink;
 
+#[cfg(test)]
 impl UiSink for NoUiSink {
     fn ask(&mut self, _plugin: &str, req: UiRequest) -> UiAnswer {
         UiAnswer::cancel_for(&req)
@@ -450,10 +447,11 @@ impl PluginHost {
             if !slot.ready.load(Ordering::SeqCst) && slot.child.lock().unwrap_or_else(|p| p.into_inner()).is_none() {
                 continue;
             }
+            // 답 기다림과 종료 기다림이 같은 유예를 나눠 쓴다. 답을 안 하는 플러그인도 grace 뒤에는 죽는다
+            let deadline = std::time::Instant::now() + grace;
             let _ = self.call_raw(slot, "shutdown", Value::Object(Default::default()), Some(grace));
             *slot.stdin.lock().unwrap_or_else(|p| p.into_inner()) = None;
             slot.ready.store(false, Ordering::SeqCst);
-            let deadline = std::time::Instant::now() + grace;
             let mut guard = slot.child.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(mut c) = guard.take() {
                 loop {
@@ -510,7 +508,7 @@ fn reader(plugin: String, slot: Arc<Slot>, stdout: ChildStdout, tx: Sender<HostE
     *slot.stdin.lock().unwrap_or_else(|p| p.into_inner()) = None;
     slot.ready.store(false, Ordering::SeqCst);
     for (_, p) in slot.pending.lock().unwrap_or_else(|p| p.into_inner()).drain() {
-        let _ = p.send(Err(RpcError { code: EXITED, message: "plugin exited".into(), data: status.map(|c| Value::from(c)) }));
+        let _ = p.send(Err(RpcError { code: EXITED, message: "plugin exited".into(), data: status.map(Value::from) }));
     }
     if !slot.killed.swap(false, Ordering::SeqCst) {
         let _ = tx.send(HostEvent::Exited { plugin, status });
@@ -698,6 +696,6 @@ mod tests {
     }
 
     fn alive(pid: u32) -> bool {
-        std::process::Command::new("kill").args(["-0", &pid.to_string()]).status().map(|s| s.success()).unwrap_or(false)
+        std::process::Command::new("kill").args(["-0", &pid.to_string()]).stderr(std::process::Stdio::null()).status().map(|s| s.success()).unwrap_or(false)
     }
 }

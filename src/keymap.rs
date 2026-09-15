@@ -1369,7 +1369,7 @@ mod tests {
                 desc: format!("{} desc", id),
                 key: key.map(|k| k.split(' ').map(|t| parse_key(t).unwrap()).collect()),
                 layers: layers.to_vec(),
-                menu: false,
+                menus: vec![],
             });
         }
         let manifests: Vec<Manifest> = by_plugin
@@ -1380,10 +1380,12 @@ mod tests {
                 description: None,
                 run: vec!["sh".into()],
                 commands,
-                hooks: vec![],
+                activation: crate::plugin::manifest::Activation::Lazy,
+                fields: vec![],
+                views: vec![],
+                events: vec![],
                 cli: None,
                 settings: vec![],
-                tabs: vec![],
                 builtin: None,
                 dir: std::path::PathBuf::from("/tmp"),
                 guide: None,
@@ -1391,7 +1393,7 @@ mod tests {
             .collect();
         let env = crate::plugin::PluginEnv {
             bin: "/bin/true".into(), config_dir: "/tmp".into(), db: "/tmp/db.json".into(),
-            notes: "/tmp/n".into(), pdfs: "/tmp/p".into(), home: None,
+            notes: "/tmp/n".into(), pdfs: "/tmp/p".into(), home: None, extra: Default::default(),
         };
         crate::plugin::PluginHost::new(manifests, Default::default(), env).commands().clone()
     }

@@ -354,7 +354,8 @@ fn expand_stub(
         problems.push(err("a built-in stub carries only api, name and builtin".to_string()));
         return None;
     }
-    if file.api != SUPPORTED_API {
+    // 스텁의 api는 내장 이름을 가리킬 뿐이라 옛 bibox가 쓴 `api = 1` 스텁도 그대로 읽는다. 진짜 매니페스트는 바이너리 안의 것이다
+    if file.api == 0 || file.api > SUPPORTED_API {
         problems.push(err(format!("bibox needs api {}, plugin declares {}", SUPPORTED_API, file.api)));
         return None;
     }
@@ -728,7 +729,7 @@ run = "python3 cli.py"
     #[test]
     fn api_1_and_the_old_keys_are_errors_that_name_the_new_ones() {
         let mut problems = vec![];
-        assert!(parse_manifest(&dir("m"), "api = 2\nname = \"m\"\nrun = \"sh x\"\n", &mut problems).is_none());
+        assert!(parse_manifest(&dir("m"), "api = 1\nname = \"m\"\nrun = \"sh x\"\n", &mut problems).is_none());
         assert!(matches!(&problems[0], PluginProblem::Manifest { detail, .. } if detail.contains("api 2")), "{:?}", problems);
         for (old, hint) in [("[[hooks]]\non = \"after_write\"\nrun = \"go\"\n", "[events]"), ("[[tabs]]\ntitle = \"T\"\nrun = \"go\"\n", "[[views]]"), ("[[commands]]\nid = \"go\"\ndesc = \"G\"\nmenu = true\n", "menus")] {
             let mut problems = vec![];
@@ -1117,12 +1118,12 @@ default = "claude-opus-5"
         assert!(c.accepts(&String("a".into())) && !c.accepts(&String("b".into())));
     }
 
-    const WITH_TAB: &str = r#"
+    const WITH_VIEW: &str = r#"
 api = 2
 name = "x"
 run = "sh run.sh"
 
-[[tabs]]
+[[views]]
 title = "PDF"
 run = "render"
 
@@ -1132,35 +1133,35 @@ desc = "Render a page"
 "#;
 
     #[test]
-    fn a_tab_names_its_command() {
+    fn a_view_names_its_command() {
         let mut problems = vec![];
-        let m = parse_manifest(&dir("x"), WITH_TAB, &mut problems).expect("manifest");
+        let m = parse_manifest(&dir("x"), WITH_VIEW, &mut problems).expect("manifest");
         assert!(problems.is_empty(), "{:?}", problems);
-        assert_eq!(m.tabs, vec![Tab { title: "PDF".into(), run: "render".into() }]);
+        assert_eq!(m.views, vec![View { title: "PDF".into(), run: "render".into() }]);
     }
 
     #[test]
-    fn a_tab_whose_run_is_not_a_command_is_a_manifest_error() {
-        let text = "api = 2\nname = \"x\"\nrun = \"sh\"\n[[tabs]]\ntitle = \"PDF\"\nrun = \"nope\"\n";
+    fn a_view_whose_run_is_not_a_command_is_a_manifest_error() {
+        let text = "api = 2\nname = \"x\"\nrun = \"sh\"\n[[views]]\ntitle = \"PDF\"\nrun = \"nope\"\n";
         let mut problems = vec![];
         assert!(parse_manifest(&dir("x"), text, &mut problems).is_none());
-        assert!(matches!(&problems[0], PluginProblem::Manifest { detail, .. } if detail.contains("tab \"PDF\" refers to unknown command \"nope\"")));
+        assert!(matches!(&problems[0], PluginProblem::Manifest { detail, .. } if detail.contains("view \"PDF\" runs unknown command \"nope\"")));
     }
 
     #[test]
-    fn a_tab_title_must_be_one_to_twelve_chars() {
+    fn a_view_title_must_be_one_to_twelve_chars() {
         for title in ["", "ThirteenChars"] {
-            let text = format!("api = 2\nname = \"x\"\nrun = \"sh\"\n[[tabs]]\ntitle = \"{}\"\nrun = \"r\"\n[[commands]]\nid = \"r\"\ndesc = \"R\"\n", title);
+            let text = format!("api = 2\nname = \"x\"\nrun = \"sh\"\n[[views]]\ntitle = \"{}\"\nrun = \"r\"\n[[commands]]\nid = \"r\"\ndesc = \"R\"\n", title);
             let mut problems = vec![];
             assert!(parse_manifest(&dir("x"), &text, &mut problems).is_none(), "{:?}", title);
-            assert!(matches!(&problems[0], PluginProblem::Manifest { detail, .. } if detail.contains("tab title")));
+            assert!(matches!(&problems[0], PluginProblem::Manifest { detail, .. } if detail.contains("title must be 1 to 12")));
         }
     }
 
     #[test]
-    fn a_stub_with_tabs_is_rejected() {
+    fn a_stub_with_views_is_rejected() {
         let mut problems = vec![];
-        let text = "api = 2\nname = \"demo\"\nbuiltin = \"demo\"\n[[tabs]]\ntitle = \"T\"\nrun = \"r\"\n";
+        let text = "api = 2\nname = \"demo\"\nbuiltin = \"demo\"\n[[views]]\ntitle = \"T\"\nrun = \"r\"\n";
         assert!(parse_manifest_with(&dir("demo"), text, &mut problems, TEST_BUILTINS).is_none());
         assert!(matches!(&problems[0], PluginProblem::Manifest { detail, .. } if detail.contains("only api, name and builtin")));
     }

@@ -11,7 +11,7 @@ pub mod serve;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-pub use host::{CliSink, NoUiSink, PluginCmdId, PluginCommands, PluginEnv, PluginError, PluginHost, UiSink};
+pub use host::{CliSink, PluginCmdId, PluginCommands, PluginEnv, PluginError, PluginHost, UiSink};
 pub use cli::{commit_staged, discard_staged, install_local, stage_from_git, Staged};
 pub use manifest::{Manifest, PluginProblem, SettingDecl, SettingKind};
 
@@ -51,7 +51,7 @@ const SEEDED_HEADER: &str = "# plugins bibox has installed once; delete a line t
 
 /// 사용자 디렉토리에 놓이는 스텁. 나머지는 바이너리 안의 매니페스트에서 온다.
 pub fn stub_text(name: &str) -> String {
-    format!("api = 1\nname = \"{0}\"\nbuiltin = \"{0}\"\n", name)
+    format!("api = 2\nname = \"{0}\"\nbuiltin = \"{0}\"\n", name)
 }
 
 pub fn write_stub(plugins_dir: &Path, name: &str) -> std::io::Result<PathBuf> {
@@ -221,7 +221,7 @@ mod tests {
 
     #[test]
     fn stub_text_is_three_lines() {
-        assert_eq!(stub_text("git-sync"), "api = 1\nname = \"git-sync\"\nbuiltin = \"git-sync\"\n");
+        assert_eq!(stub_text("git-sync"), "api = 2\nname = \"git-sync\"\nbuiltin = \"git-sync\"\n");
     }
     #[test]
     fn obsolete_settings_are_reported_once_each() {

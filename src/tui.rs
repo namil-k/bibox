@@ -18,11 +18,16 @@ use crate::bibtex::entry_to_filename;
 use crate::config::Config;
 use crate::keymap::{default_keymap, resolve, Action, Flow, KeyPress, Keymap, LayerId, Resolution};
 use crate::models::Entry;
-use crate::plugin::protocol::{Final, UiAnswer, UiRequest};
-use crate::plugin::{PluginCmdId, PluginError, PluginHost, UiSink};
+use crate::plugin::fields::{FieldDecl, FieldStore};
+use crate::plugin::host::{HostEvent, Incoming};
+use crate::plugin::protocol::{CommandParams, CommandResult, FieldValue, UiAnswer, UiRequest, ViewParams, ViewResult};
+use crate::plugin::rpc::{Id, RpcError};
+use crate::plugin::{PluginCmdId, PluginError, PluginHost};
+use serde_json::Value;
+use std::collections::{BTreeMap, VecDeque};
 use crate::theme::theme;
 use crate::storage::{find_by_key_mut, load_db, save_db};
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
 // ── State ────────────────────────────────────────────────────────────────────
@@ -489,8 +494,24 @@ pub struct App {
     tab_entry_since: std::time::Instant,
     /// 캐시에서 빠진 kitty 그림 id. 다음 프레임 뒤에 터미널에서 지운다.
     kitty_deletes: Vec<u32>,
-    hooks: crate::hooks::HookRunner,
-    bg_hooks: Vec<Receiver<crate::hooks::HookOutcome>>,
+    events: crate::events::Events,
+    /// 팝업이 열려 있는 동안 온 `window/*` 요청. 앞 것이 닫히면 다음 것이 열린다.
+    ui_queue: VecDeque<(String, Id, UiRequest)>,
+    /// 팝업·로딩 중에 온 메시지. Normal로 돌아오면 하나씩 보인다.
+    pending_messages: VecDeque<String>,
+    /// `commands/execute`로 요청된 내장 액션. 키 처리 뒤 메인 루프가 실행한다.
+    queued_actions: VecDeque<Action>,
+    /// 첫 프레임을 그렸는가. 그 뒤 `lifecycle/started`를 보낸다.
+    started: bool,
+    /// 플러그인 필드 선언(매니페스트 + config 덮어쓰기)과 세션 캐시, 상태 바 조각.
+    field_decls: Vec<FieldDecl>,
+    fields: FieldStore,
+    status_segments: BTreeMap<(String, String), FieldValue>,
+    /// 커서가 마지막으로 움직인 시각. `SETTLE_MS` 뒤 `entry/selected`와 그 항목의 fields/get.
+    sel_since: Option<std::time::Instant>,
+    fields_rx: Vec<Receiver<(String, crate::plugin::protocol::FieldsResult)>>,
+    /// 목록 패널의 안쪽 높이. `visible_keys`가 쓴다. 그릴 때마다 적는다.
+    entries_area_height: u16,
 }
 
 /// Collect every collection path referenced by `entries`, sorted and deduplicated.
@@ -517,7 +538,8 @@ impl App {
         let db_path = crate::config::resolve_db_path(&config);
         let db = load_db(&db_path)?;
         let entries = db.entries;
-        let hooks = crate::hooks::HookRunner { host: Arc::clone(&host), db_path: db_path.clone() };
+        let events = crate::events::Events { host: Arc::clone(&host) };
+        let field_decls = crate::plugin::fields::decls(host.manifests(), &crate::config::plugin_tables(&config));
 
         let collections = collection_paths(&entries);
 
@@ -572,7 +594,7 @@ impl App {
             help_filtering: false,
             help_scroll: 0,
             context_menu: ContextMenuState { x: 0, y: 0, index: 0 },
-            hooks,
+            events,
             host,
             plugin_run: None,
             tab: crate::preview_tabs::TabState::new(),
@@ -583,7 +605,16 @@ impl App {
             tab_pending_since: None,
             tab_entry_since: std::time::Instant::now(),
             kitty_deletes: Vec::new(),
-            bg_hooks: Vec::new(),
+            ui_queue: VecDeque::new(),
+            pending_messages: VecDeque::new(),
+            queued_actions: VecDeque::new(),
+            started: false,
+            field_decls,
+            fields: FieldStore::default(),
+            status_segments: BTreeMap::new(),
+            sel_since: None,
+            fields_rx: Vec::new(),
+            entries_area_height: 0,
         })
     }
 
@@ -792,7 +823,7 @@ impl App {
             let key = entry.bibtex_key.clone();
             let removed = entry.clone();
             self.entries.retain(|e| e.bibtex_key != key);
-            self.persist(crate::hooks::WriteReason::Delete, vec![removed], true)?;
+            self.persist(crate::events::WriteReason::Delete, vec![removed], true)?;
             self.rebuild_collections();
             self.apply_filters();
         }
@@ -822,7 +853,7 @@ impl App {
         if let Some(snapshot) = self.undo_stack.pop() {
             self.redo_stack.push(self.entries.clone());
             self.entries = snapshot;
-            self.persist(crate::hooks::WriteReason::Undo, vec![], true)?;
+            self.persist(crate::events::WriteReason::Undo, vec![], true)?;
             self.rebuild_collections();
             self.apply_filters();
             self.mode = Mode::Message(format!("Undo ({})", self.undo_stack.len()));
@@ -836,7 +867,7 @@ impl App {
         if let Some(snapshot) = self.redo_stack.pop() {
             self.undo_stack.push(self.entries.clone());
             self.entries = snapshot;
-            self.persist(crate::hooks::WriteReason::Redo, vec![], true)?;
+            self.persist(crate::events::WriteReason::Redo, vec![], true)?;
             self.rebuild_collections();
             self.apply_filters();
             self.mode = Mode::Message(format!("Redo ({})", self.redo_stack.len()));
@@ -900,7 +931,7 @@ impl App {
             }
         }
         let affected: Vec<Entry> = self.entries.iter().filter(|e| self.selected_keys.contains(&e.bibtex_key)).cloned().collect();
-        self.persist(crate::hooks::WriteReason::Edit, affected, true)?;
+        self.persist(crate::events::WriteReason::Edit, affected, true)?;
 
         let count = self.selected_keys.len();
         self.selected_keys.clear();
@@ -934,7 +965,7 @@ impl App {
         self.picker = None;
         self.entries[idx].collections = new_cols;
         let affected = vec![self.entries[idx].clone()];
-        self.persist(crate::hooks::WriteReason::Edit, affected, true)?;
+        self.persist(crate::events::WriteReason::Edit, affected, true)?;
         self.rebuild_collections();
         self.apply_filters();
         Ok(())
@@ -949,7 +980,7 @@ impl App {
         self.picker = None;
         self.entries[idx].tags = new_tags;
         let affected = vec![self.entries[idx].clone()];
-        self.persist(crate::hooks::WriteReason::Edit, affected, true)?;
+        self.persist(crate::events::WriteReason::Edit, affected, true)?;
         self.apply_filters();
         Ok(())
     }
@@ -1010,36 +1041,26 @@ fn draw_citation_popup(f: &mut Frame, idx: usize, area: Rect) {
 
 // ── Plugins ─────────────────────────────────────────────────────────────────
 
-/// 워커 스레드 -> 메인 루프.
-enum PluginEvent {
-    Ui(UiRequest, Sender<UiAnswer>),
-    Progress(String),
-    Done(Result<Final, PluginError>),
-}
-
+/// 돌고 있는 플러그인 명령. 답은 워커 스레드가 채널로 보낸다. 팝업·진행은 호스트 이벤트로 온다.
 struct PluginRun {
     plugin: String,
-    rx: Receiver<PluginEvent>,
+    rx: Receiver<Result<Value, PluginError>>,
 }
 
-/// 워커의 UI 싱크. 팝업 요청은 메인 루프에 보내고 답을 기다린다. progress는 기다리지 않는다.
-struct TuiSink {
-    tx: Sender<PluginEvent>,
-}
-
-impl UiSink for TuiSink {
-    fn ask(&mut self, _plugin: &str, req: UiRequest) -> UiAnswer {
-        if let UiRequest::Progress { text } = req {
-            let _ = self.tx.send(PluginEvent::Progress(text));
-            return UiAnswer::Ack {};
-        }
-        let cancel = UiAnswer::cancel_for(&req);
-        let (rtx, rrx) = std::sync::mpsc::channel();
-        if self.tx.send(PluginEvent::Ui(req, rtx)).is_err() {
-            return cancel;
-        }
-        rrx.recv().unwrap_or(cancel)
+/// 팝업이 열려 있으면 뒤에 온 요청은 줄을 선다. 즉시 답할 수 있는 요청(빈 pick)은 호출자가 먼저 걸러 둔다.
+fn open_or_queue(open: &mut Option<PluginUiState>, q: &mut VecDeque<(String, Id, UiRequest)>, plugin: &str, id: Id, req: UiRequest) {
+    if open.is_some() {
+        q.push_back((plugin.to_string(), id, req));
+    } else if let Ok(kind) = PluginUiKind::from_request(plugin, req.clone()) {
+        *open = Some(PluginUiState { plugin: plugin.to_string(), id, kind });
+    } else {
+        q.push_front((plugin.to_string(), id, req));
     }
+}
+
+/// `commands/execute`의 이름은 keymap.toml의 액션 이름과 같다(snake_case). 플러그인 명령은 안 된다.
+fn action_by_name(name: &str) -> Option<Action> {
+    serde_json::from_value(Value::String(name.to_string())).ok()
 }
 
 #[derive(Debug)]
@@ -1071,8 +1092,9 @@ impl PluginUiKind {
 
 struct PluginUiState {
     plugin: String,
+    /// 답할 요청의 id
+    id: Id,
     kind: PluginUiKind,
-    reply: Sender<UiAnswer>,
 }
 
 /// 팝업 키 하나. 답이 정해지면 `Some`. 키는 기존 팝업(정렬 메뉴, 검색창, 확인)과 같다.
@@ -1134,7 +1156,16 @@ impl App {
         if let Err(e) = crate::config::save_config(&self.config) {
             self.settings.notice = Some((format!("Could not save config.toml: {}", e), true));
         }
-        self.host.update_config_tables(crate::config::plugin_tables(&self.config));
+        let tables = crate::config::plugin_tables(&self.config);
+        self.host.update_config_tables(tables.clone());
+        self.field_decls = crate::plugin::fields::decls(self.host.manifests(), &tables);
+        // 떠 있는 플러그인에게만. 안 뜬 것은 다음 initialize가 새 값을 싣는다
+        for m in self.host.manifests() {
+            if self.host.is_running(&m.name) {
+                let config = tables.get(&m.name).cloned().unwrap_or_else(|| Value::Object(Default::default()));
+                let _ = self.host.notify(&m.name, "config/changed", serde_json::json!({"config": config}));
+            }
+        }
     }
 
     /// Install from… 의 입력. 내장과 로컬은 바로, 저장소는 clone 스레드 뒤 확인 팝업.
@@ -1192,7 +1223,8 @@ impl App {
         let (host, _problems) = PluginHost::discover(&self.config);
         let host = Arc::new(host);
         self.keymap = crate::keymap::load_keymap(host.commands()).keymap;
-        self.hooks.host = Arc::clone(&host);
+        self.events.host = Arc::clone(&host);
+        self.field_decls = crate::plugin::fields::decls(host.manifests(), &crate::config::plugin_tables(&self.config));
         self.host = host;
         self.settings.plugins = plugin_rows();
         self.settings_fix_cursor();
@@ -1202,7 +1234,7 @@ impl App {
         self.tab.pending = None;
         self.tab_sliced = None;
         if let PreviewMode::Plugin(i) = self.preview_mode {
-            if i >= self.host.tabs().len() {
+            if i >= self.host.views().len() {
                 self.preview_mode = PreviewMode::Info;
             }
         }
@@ -1223,7 +1255,7 @@ impl App {
 
     /// 메모리의 항목을 디스크에 쓰고 `after_write`를 백그라운드로 발화한다.
     /// `fire_hooks = false`는 훅 안에서 생긴 쓰기(재발화 방지)에만 쓴다.
-    fn persist(&mut self, reason: crate::hooks::WriteReason, affected: Vec<Entry>, fire_hooks: bool) -> Result<()> {
+    fn persist(&mut self, reason: crate::events::WriteReason, affected: Vec<Entry>, fire_hooks: bool) -> Result<()> {
         let db_path = crate::config::resolve_db_path(&self.config);
         let mut db = load_db(&db_path)?;
         db.entries = self.entries.clone();
@@ -1234,52 +1266,128 @@ impl App {
         Ok(())
     }
 
-    fn fire_after_write(&mut self, reason: crate::hooks::WriteReason, affected: Vec<Entry>) {
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.hooks.after_write_background(reason, affected, tx);
-        self.bg_hooks.push(rx);
-    }
-
-    fn fire_after_note_save(&mut self, entry: Entry, note_path: std::path::PathBuf) {
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.hooks.after_note_save_background(entry, note_path, tx);
-        self.bg_hooks.push(rx);
-    }
-
-    /// 백그라운드 훅 결과. 성공은 조용하고 message/error/apply/refresh만 다룬다.
-    /// 사용자가 팝업을 열어 둔 동안에는 메시지로 덮지 않고 조용히 버린다.
-    fn handle_hook_outcome(&mut self, o: crate::hooks::HookOutcome) {
-        let idle = matches!(self.mode, Mode::Normal);
-        match o.result {
-            Err(e) => {
-                if idle { self.mode = Mode::Message(format!("{}: {}", o.source, e)); }
-            }
-            Ok(f) => {
-                if let Some(e) = f.error {
-                    if idle { self.mode = Mode::Message(format!("{}: {}", o.source, e)); }
-                    return;
-                }
-                if let Some(apply) = f.apply {
-                    if let Err(e) = self.apply_plugin_entries(apply, false) {
-                        if idle { self.mode = Mode::Message(format!("{}: apply rejected: {}", o.source, e)); }
-                        return;
-                    }
-                }
-                if f.refresh {
-                    let _ = self.refresh_from_disk();
-                }
-                if let Some(m) = f.message {
-                    if idle { self.mode = Mode::Message(format!("{}: {}", o.source, m)); }
-                }
+    /// `library/written`. 알림이라 바로 돌아온다(안 뜬 lazy 플러그인은 여기서 뜬다). 바뀐 키는 다시 묻는다.
+    fn fire_after_write(&mut self, reason: crate::events::WriteReason, affected: Vec<Entry>) {
+        let keys: Vec<String> = affected.iter().map(|e| e.bibtex_key.clone()).collect();
+        self.fields.forget(&keys);
+        for o in self.events.written(reason, affected) {
+            if let Err(e) = o.result {
+                self.show_message(format!("{}: {}", o.plugin, e));
             }
         }
     }
+
+    fn fire_after_note_save(&mut self, entry: Entry, note_path: std::path::PathBuf) {
+        for o in self.events.note_saved(entry, note_path) {
+            if let Err(e) = o.result {
+                self.show_message(format!("{}: {}", o.plugin, e));
+            }
+        }
+    }
+
+    /// 상태 줄 메시지. 팝업이나 로딩 중이면 미뤄 두었다가 Normal로 돌아올 때 보인다.
+    fn show_message(&mut self, text: String) {
+        match self.mode {
+            Mode::Normal | Mode::Message(_) => self.mode = Mode::Message(text),
+            _ => self.pending_messages.push_back(text),
+        }
+    }
+
+    // ── 플러그인 이벤트 ──────────────────────────────────────────────────────
+
+    /// 팝업 요청 하나. 열려 있으면 줄 세우고, 즉시 답할 수 있으면(빈 pick) 바로 답한다.
+    fn offer_window_request(&mut self, plugin: String, id: Id, req: UiRequest) {
+        if let Err(answer) = PluginUiKind::from_request(&plugin, req.clone()) {
+            self.host.respond(&plugin, id, Ok(answer.to_result()));
+            return;
+        }
+        let mut open = match std::mem::replace(&mut self.mode, Mode::Normal) {
+            Mode::PluginUi(s) => Some(s),
+            other => {
+                self.mode = other;
+                None
+            }
+        };
+        open_or_queue(&mut open, &mut self.ui_queue, &plugin, id, req);
+        if let Some(s) = open {
+            self.mode = Mode::PluginUi(s);
+        }
+    }
+
+    /// 팝업 답. host에 보내고 줄 선 다음 요청을 연다.
+    fn reply_plugin_ui(&mut self, answer: UiAnswer) {
+        let Mode::PluginUi(state) = std::mem::replace(&mut self.mode, Mode::Normal) else { return };
+        self.host.respond(&state.plugin, state.id, Ok(answer.to_result()));
+        self.mode = if self.plugin_run.is_some() { Mode::Loading(format!("{}: running", state.plugin)) } else { Mode::Normal };
+        if let Some((plugin, id, req)) = self.ui_queue.pop_front() {
+            self.offer_window_request(plugin, id, req);
+        }
+    }
+
+    /// 플러그인이 보낸 것 하나. 요청은 답하고, 알림은 반영하고, 종료는 알린다.
+    fn handle_host_event(&mut self, ev: HostEvent) {
+        match ev {
+            HostEvent::Incoming { plugin, msg: Incoming::Request { id, method, params } } => {
+                if let Some(req) = UiRequest::from_method(&method, &params) {
+                    self.offer_window_request(plugin, id, req);
+                    return;
+                }
+                let result = match method.as_str() {
+                    "library/apply" => {
+                        let entries = params.get("entries").and_then(Value::as_array).cloned().unwrap_or_default();
+                        let n = entries.len();
+                        self.apply_plugin_entries(entries, true).map(|_| serde_json::json!({"applied": n})).map_err(RpcError::invalid_params)
+                    }
+                    "commands/execute" => {
+                        let name = params.get("command").and_then(Value::as_str).unwrap_or("");
+                        match action_by_name(name) {
+                            Some(action) => {
+                                self.queued_actions.push_back(action);
+                                Ok(serde_json::json!({}))
+                            }
+                            None => Err(RpcError::invalid_params(format!("unknown command {}", name))),
+                        }
+                    }
+                    other => Err(RpcError::method_not_found(other)),
+                };
+                self.host.respond(&plugin, id, result);
+            }
+            HostEvent::Incoming { plugin, msg: Incoming::Notification { method, params } } => match method.as_str() {
+                "window/progress" => {
+                    if self.plugin_run.as_ref().map(|r| r.plugin == plugin).unwrap_or(false) && matches!(self.mode, Mode::Loading(_)) {
+                        self.mode = Mode::Loading(format!("{}: {}", plugin, params.get("text").and_then(Value::as_str).unwrap_or("")));
+                    }
+                }
+                "window/message" => self.show_message(format!("{}: {}", plugin, params.get("text").and_then(Value::as_str).unwrap_or(""))),
+                "library/refresh" => {
+                    if let Err(e) = self.refresh_from_disk() {
+                        self.show_message(format!("{}: refresh failed: {}", plugin, e));
+                    }
+                }
+                "status/set" | "fields/set" => self.handle_field_notification(&plugin, &method, params),
+                "bibox/bad-line" => self.show_message(format!("{}: {}", plugin, params.get("error").and_then(Value::as_str).unwrap_or("bad line"))),
+                _ => {}
+            },
+            HostEvent::Exited { plugin, status } => {
+                self.on_plugin_exited(&plugin);
+                self.show_message(match status {
+                    Some(c) => format!("{}: exited with code {}", plugin, c),
+                    None => format!("{}: exited", plugin),
+                });
+            }
+        }
+    }
+
+    // Task 10이 채운다
+    fn handle_field_notification(&mut self, _plugin: &str, _method: &str, _params: Value) {}
+
+    fn on_plugin_exited(&mut self, _plugin: &str) {}
 
     // ── 미리보기 탭 ──────────────────────────────────────────────────────────
 
     fn preview_modes(&self) -> Vec<PreviewMode> {
         let mut v = vec![PreviewMode::Info, PreviewMode::Note];
-        v.extend((0..self.host.tabs().len()).map(PreviewMode::Plugin));
+        v.extend((0..self.host.views().len()).map(PreviewMode::Plugin));
         v
     }
 
@@ -1287,7 +1395,7 @@ impl App {
         match m {
             PreviewMode::Info => "Info".to_string(),
             PreviewMode::Note => "Note".to_string(),
-            PreviewMode::Plugin(i) => self.host.tabs().get(i).map(|t| t.title.clone()).unwrap_or_default(),
+            PreviewMode::Plugin(i) => self.host.views().get(i).map(|t| t.title.clone()).unwrap_or_default(),
         }
     }
 
@@ -1320,23 +1428,23 @@ impl App {
 
     /// (항목, 쪽, 폭)을 플러그인에 묻는다. 훅처럼 스레드에서, 팝업은 열 수 없다.
     fn request_tab(&mut self, tab_index: usize, key: crate::preview_tabs::CacheKey, images: bool) {
-        let Some(t) = self.host.tabs().get(tab_index).cloned() else { return };
-        let context = self.plugin_context(&t.plugin);
+        let Some(t) = self.host.views().get(tab_index).cloned() else { return };
+        let params = serde_json::to_value(ViewParams { view: t.run.clone(), entry: self.selected_entry().cloned(), page: key.page, width_px: key.width_px, images }).unwrap_or(Value::Null);
         let host = Arc::clone(&self.host);
-        let req = crate::plugin::TabRequest { page: key.page, width_px: key.width_px, images };
         let kitty = self.images.as_ref().map(|p| p.protocol_type() == ratatui_image::picker::ProtocolType::Kitty).unwrap_or(false);
         let (tx, rx) = std::sync::mpsc::channel();
         let k = key.clone();
         crate::trace::log(|| format!("tab.req {} p{} w{}", k.entry_key, k.page, k.width_px));
         std::thread::spawn(move || {
             let t0 = std::time::Instant::now();
-            let result = host.invoke_with(t.cmd, "tab", context, Some(req), &mut crate::plugin::NoUiSink);
+            let result = host.call(&t.plugin, "views/render", params, Some(std::time::Duration::from_secs(60)));
             crate::trace::log(|| format!("tab.plugin {:.0}ms p{} ok={}", t0.elapsed().as_secs_f64() * 1000.0, k.page, result.is_ok()));
             // 그림 읽기와 폭 맞춤도 여기서. 메인 스레드는 캐시에 넣기만 한다
             let decoded = match result {
                 Err(e) => Err(format!("{}: {}", t.plugin, e)),
-                Ok(Final { error: Some(e), .. }) => Err(format!("{}: {}", t.plugin, e)),
-                Ok(f) => crate::preview_tabs::decode(f.tab, k.width_px).map_err(|e| format!("{}: {}", t.plugin, e)),
+                Ok(v) => serde_json::from_value::<ViewResult>(v)
+                    .map_err(|e| format!("{}: bad views/render result: {}", t.plugin, e))
+                    .and_then(|r| crate::preview_tabs::decode(r, k.width_px).map_err(|e| format!("{}: {}", t.plugin, e))),
             };
             // kitty면 압축·인코딩까지 여기서. 원본은 버린다
             let decoded = decoded.map(|(content, pages)| match content {
@@ -1430,7 +1538,7 @@ impl App {
     fn tab_max_zoom(&self) -> u32 {
         let PreviewMode::Plugin(i) = self.preview_mode else { return 400 };
         self.host
-            .tabs()
+            .views()
             .get(i)
             .and_then(|t| self.config.plugins.get(&t.plugin))
             .and_then(|t| t.get("max_zoom"))
@@ -1439,8 +1547,8 @@ impl App {
             .unwrap_or(400)
     }
 
-    /// 명령 요청의 컨텍스트. 다중 선택이 있으면 그것, 없으면 커서 항목 하나.
-    fn plugin_context(&self, plugin: &str) -> crate::plugin::protocol::Context {
+    /// 명령 요청의 params. 다중 선택이 있으면 그것, 없으면 커서 항목 하나.
+    fn command_params(&self, command: &str, trigger: &str) -> CommandParams {
         let focus = match self.focus {
             Panel::Collections => "collections",
             Panel::Entries => "entries",
@@ -1452,61 +1560,42 @@ impl App {
         } else {
             self.entries.iter().filter(|e| self.selected_keys.contains(&e.bibtex_key)).cloned().collect()
         };
-        self.host.context(
-            plugin,
-            Some(focus.to_string()),
-            self.current_collection().map(|s| s.to_string()),
+        CommandParams {
+            command: command.to_string(),
+            trigger: trigger.to_string(),
             entry,
             entries,
-            None,
-        )
+            focus: Some(focus.to_string()),
+            collection: self.current_collection().map(|s| s.to_string()),
+        }
     }
 
     fn start_plugin_command(&mut self, id: PluginCmdId, trigger: &str) {
         let Some(cmd) = self.host.commands().get(id).cloned() else { return };
         let plugin = cmd.plugin.clone();
-        let context = self.plugin_context(&plugin);
+        let params = serde_json::to_value(self.command_params(&cmd.id, trigger)).unwrap_or(Value::Null);
         let host = Arc::clone(&self.host);
-        let trigger = trigger.to_string();
         let (tx, rx) = std::sync::mpsc::channel();
+        let p = plugin.clone();
         std::thread::spawn(move || {
-            let mut sink = TuiSink { tx: tx.clone() };
-            let result = host.invoke(id, &trigger, context, &mut sink);
-            let _ = tx.send(PluginEvent::Done(result));
+            let _ = tx.send(host.call(&p, "commands/run", params, None));
         });
         self.plugin_run = Some(PluginRun { plugin: plugin.clone(), rx });
         self.spinner_tick = 0;
         self.mode = Mode::Loading(format!("{}: running", plugin));
     }
 
-    /// 최종 응답 처리. `error`가 있으면 나머지는 무시. `apply` 뒤 `refresh`, 마지막에 `message`.
-    fn finish_plugin(&mut self, plugin: &str, result: Result<Final, PluginError>) {
-        let f = match result {
-            Ok(f) => f,
-            Err(e) => {
-                self.mode = Mode::Message(format!("{}: {}", plugin, e));
-                return;
-            }
-        };
-        if let Some(err) = f.error {
-            self.mode = Mode::Message(format!("{}: {}", plugin, err));
-            return;
-        }
+    /// 명령 응답. 오류면 그 문구, 아니면 `message`가 상태 줄에. apply/refresh는 이제 플러그인이 따로 요청한다.
+    fn finish_plugin(&mut self, plugin: &str, result: Result<Value, PluginError>) {
         self.mode = Mode::Normal;
-        if let Some(apply) = f.apply {
-            if let Err(e) = self.apply_plugin_entries(apply, true) {
-                self.mode = Mode::Message(format!("{}: apply rejected: {}", plugin, e));
-                return;
+        match result {
+            Err(e) => self.show_message(format!("{}: {}", plugin, e)),
+            Ok(v) => {
+                let r: CommandResult = serde_json::from_value(v).unwrap_or_default();
+                if let Some(m) = r.message {
+                    self.show_message(m);
+                }
             }
-        }
-        if f.refresh {
-            if let Err(e) = self.refresh_from_disk() {
-                self.mode = Mode::Message(format!("{}: refresh failed: {}", plugin, e));
-                return;
-            }
-        }
-        if let Some(m) = f.message {
-            self.mode = Mode::Message(m);
         }
     }
 
@@ -1520,7 +1609,7 @@ impl App {
                 *slot = u.clone();
             }
         }
-        self.persist(crate::hooks::WriteReason::Edit, updated, fire_hooks).map_err(|e| e.to_string())?;
+        self.persist(crate::events::WriteReason::Edit, updated, fire_hooks).map_err(|e| e.to_string())?;
         self.rebuild_collections();
         self.apply_filters();
         Ok(())
@@ -1589,10 +1678,7 @@ fn handle_plugin_ui(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bo
         _ => None,
     };
     if let Some(answer) = answer {
-        if let Mode::PluginUi(state) = std::mem::replace(&mut app.mode, Mode::Normal) {
-            let _ = state.reply.send(answer);
-            app.mode = Mode::Loading(format!("{}: running", state.plugin));
-        }
+        app.reply_plugin_ui(answer);
     }
     Ok(false)
 }
@@ -2443,14 +2529,14 @@ fn shortcut_hint(layer: &crate::keymap::Layer, action: Action) -> String {
         .unwrap_or_default()
 }
 
-/// 내장 10개 뒤에 `menu = true`인 플러그인 명령. 라벨은 매니페스트의 `desc`.
+/// 내장 10개 뒤에 `menus`에 "context"가 있는 플러그인 명령. 라벨은 매니페스트의 `desc`.
 fn context_menu_items(commands: &crate::plugin::PluginCommands) -> Vec<(String, Action)> {
     let mut items: Vec<(String, Action)> = ContextMenuState::ITEMS
         .iter()
         .map(|(l, a)| (l.to_string(), *a))
         .collect();
     for (id, c) in commands.iter() {
-        if c.menu {
+        if c.menus.iter().any(|m| m == "context") {
             items.push((c.desc.clone(), Action::Plugin(id)));
         }
     }
@@ -4212,7 +4298,7 @@ fn handle_file_picker(app: &mut App, key: crossterm::event::KeyEvent) -> Result<
                                     e.file_path = Some(format!("{}.pdf", key));
                                 }
                                 if let Some(e) = app.entries.iter().find(|e| e.bibtex_key == key).cloned() {
-                                    app.fire_after_write(crate::hooks::WriteReason::Edit, vec![e]);
+                                    app.fire_after_write(crate::events::WriteReason::Edit, vec![e]);
                                 }
                                 app.mode = Mode::Message(format!("PDF attached: {}", dest));
                             }
@@ -4666,7 +4752,7 @@ fn handle_fetch_preview(app: &mut App, key: crossterm::event::KeyEvent) -> Resul
                 app.rebuild_collections();
                 app.apply_filters();
                 if let Some(e) = app.entries.iter().find(|e| e.bibtex_key == key_after).cloned() {
-                    app.fire_after_write(crate::hooks::WriteReason::Edit, vec![e]);
+                    app.fire_after_write(crate::events::WriteReason::Edit, vec![e]);
                 }
 
                 let applied = preview.selected.iter().filter(|s| **s).count();
@@ -4757,23 +4843,28 @@ fn run_loop(
             app.note_citekey.clear();
         }
 
-        // Poll background hooks. 성공은 조용하고, message/error/apply/refresh만 다룬다.
-        let mut finished: Vec<usize> = Vec::new();
-        let mut hook_events: Vec<crate::hooks::HookOutcome> = Vec::new();
-        for (i, rx) in app.bg_hooks.iter().enumerate() {
-            loop {
-                match rx.try_recv() {
-                    Ok(o) => hook_events.push(o),
-                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => { finished.push(i); break; }
-                }
+        // 플러그인이 보낸 요청·알림·종료
+        while let Some(ev) = app.host.try_recv_event() {
+            app.handle_host_event(ev);
+        }
+        if matches!(app.mode, Mode::Normal) {
+            if let Some(m) = app.pending_messages.pop_front() {
+                app.mode = Mode::Message(m);
             }
         }
-        for i in finished.into_iter().rev() {
-            app.bg_hooks.remove(i);
+        while let Some(a) = app.queued_actions.pop_front() {
+            if execute(app, a)? == Flow::Quit {
+                return Ok(());
+            }
         }
-        for o in hook_events {
-            app.handle_hook_outcome(o);
+        if !app.started {
+            app.started = true;
+            let host = Arc::clone(&app.host);
+            std::thread::spawn(move || {
+                for p in host.startup_plugins() {
+                    let _ = host.notify(&p, "lifecycle/started", serde_json::json!({}));
+                }
+            });
         }
 
         // Poll plugin command
@@ -4783,12 +4874,7 @@ fn run_loop(
                 (run.plugin.clone(), run.rx.try_recv())
             };
             match ev {
-                Ok(PluginEvent::Ui(req, reply)) => match PluginUiKind::from_request(&plugin, req) {
-                    Ok(kind) => app.mode = Mode::PluginUi(PluginUiState { plugin: plugin.clone(), kind, reply }),
-                    Err(answer) => { let _ = reply.send(answer); }
-                },
-                Ok(PluginEvent::Progress(text)) => { app.mode = Mode::Loading(format!("{}: {}", plugin, text)); }
-                Ok(PluginEvent::Done(result)) => {
+                Ok(result) => {
                     app.plugin_run = None;
                     app.finish_plugin(&plugin, result);
                 }
@@ -4817,7 +4903,7 @@ fn run_loop(
                     app.bg_result = None;
                     app.bg_fetch_key = None;
                     if let Some(e) = app.entries.iter().find(|e| e.bibtex_key == result.key).cloned() {
-                        app.fire_after_write(crate::hooks::WriteReason::Edit, vec![e]);
+                        app.fire_after_write(crate::events::WriteReason::Edit, vec![e]);
                     }
                     app.mode = Mode::Message(format!("PDF saved: {}", result.full_path));
                 }
@@ -5553,12 +5639,12 @@ mod tests {
         let m = Manifest {
             name: "tidy".into(), version: None, description: None, run: vec!["sh".into()],
             commands: vec![
-                Command { id: "run".into(), desc: "Normalize the entry".into(), key: Some(vec![parse_key("=").unwrap()]), layers: vec![LayerId::Entries], menu: true },
-                Command { id: "quiet".into(), desc: "No menu".into(), key: None, layers: vec![LayerId::Entries], menu: false },
+                Command { id: "run".into(), desc: "Normalize the entry".into(), key: Some(vec![parse_key("=").unwrap()]), layers: vec![LayerId::Entries], menus: vec!["context".into()] },
+                Command { id: "quiet".into(), desc: "No menu".into(), key: None, layers: vec![LayerId::Entries], menus: vec![] },
             ],
-            hooks: vec![], cli: None, settings: vec![], tabs: vec![], builtin: None, dir: "/tmp".into(), guide: None,
+            activation: crate::plugin::manifest::Activation::Lazy, fields: vec![], views: vec![], events: vec![], cli: None, settings: vec![], builtin: None, dir: "/tmp".into(), guide: None,
         };
-        let env = crate::plugin::PluginEnv { bin: "/bin/true".into(), config_dir: "/tmp".into(), db: "/tmp/db.json".into(), notes: "/tmp/n".into(), pdfs: "/tmp/p".into(), home: None };
+        let env = crate::plugin::PluginEnv { bin: "/bin/true".into(), config_dir: "/tmp".into(), db: "/tmp/db.json".into(), notes: "/tmp/n".into(), pdfs: "/tmp/p".into(), home: None, extra: Default::default() };
         crate::plugin::PluginHost::new(vec![m], Default::default(), env).commands().clone()
     }
 
@@ -5592,5 +5678,33 @@ mod tests {
         let (label, action) = items.last().unwrap();
         assert_eq!(label, "Normalize the entry");
         assert_eq!(*action, Action::Plugin(commands.find("tidy.run").unwrap()));
+    }
+
+    /// 팝업이 열려 있으면 뒤에 온 요청은 줄을 선다. 답이 가면 다음 것이 열린다.
+    #[test]
+    fn a_second_window_request_waits_until_the_first_is_answered() {
+        use super::{open_or_queue, PluginUiState};
+        use crate::plugin::protocol::UiRequest;
+        use crate::plugin::rpc::Id;
+        use std::collections::VecDeque;
+        let mut q: VecDeque<(String, Id, UiRequest)> = Default::default();
+        let mut open: Option<PluginUiState> = None;
+        let pick = UiRequest::Pick { title: None, items: vec!["a".into()] };
+        open_or_queue(&mut open, &mut q, "p1", 7, pick.clone());
+        open_or_queue(&mut open, &mut q, "p2", 9, pick.clone());
+        assert_eq!(open.as_ref().map(|s| (s.plugin.as_str(), s.id)), Some(("p1", 7)));
+        assert_eq!(q.len(), 1);
+        drop(open);
+        let next = q.pop_front().unwrap();
+        assert_eq!((next.0.as_str(), next.1), ("p2", 9));
+    }
+
+    /// commands/execute의 이름은 keymap.toml의 액션 이름과 같다.
+    #[test]
+    fn commands_execute_names_are_keymap_action_names() {
+        use super::action_by_name;
+        assert_eq!(action_by_name("export_menu"), Some(Action::ExportMenu));
+        assert_eq!(action_by_name("nope"), None);
+        assert_eq!(action_by_name("plugin"), None, "plugin commands are not addressable this way");
     }
 }

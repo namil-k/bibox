@@ -279,7 +279,9 @@ mod tests {
 
     #[test]
     fn fit_right_pads_truncates_and_drops_from_the_end() {
-        assert_eq!(fit_right(20, &[("★ 12".into(), 8), ("✓".into(), 3)]), "          ★ 12  ✓");
+        let s = fit_right(20, &[("★ 12".into(), 8), ("✓".into(), 3)]);
+        assert_eq!(s, "             ★ 12  ✓");
+        assert_eq!(s.chars().count(), 20, "fills the whole width");
         assert_eq!(fit_right(6, &[("verylongtext".into(), 5)]), " very…");
         assert_eq!(fit_right(5, &[("abcde".into(), 8), ("xy".into(), 3)]), "abcde", "the second cell does not fit and is dropped");
         assert_eq!(fit_right(0, &[("a".into(), 1)]), "");

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""commands/run을 받으면 답 없이 코드 3으로 죽는다. shutdown은 무시한다(kill 경로 테스트)."""
+"""initialize 뒤의 첫 요청(commands/run, library/adding 등)에 답 없이 코드 3으로 죽는다. shutdown은 무시한다(kill 경로 테스트)."""
 import json, sys, time
 
 def send(obj):
@@ -10,7 +10,7 @@ for line in sys.stdin:
     method, rid = m.get("method"), m.get("id")
     if method == "initialize":
         send({"jsonrpc": "2.0", "id": rid, "result": {"name": "die", "protocol": 2}})
-    elif method == "commands/run":
-        sys.exit(3)
     elif method == "shutdown":
         time.sleep(30)
+    elif rid is not None:
+        sys.exit(3)

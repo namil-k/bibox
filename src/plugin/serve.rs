@@ -16,6 +16,8 @@ pub struct Ui<'a> {
     next_id: &'a mut u64,
 }
 
+/// 내장 플러그인이 쓰는 API. 지금 내장 둘이 안 쓰는 메서드도 있다.
+#[allow(dead_code)]
 impl<'a> Ui<'a> {
     fn send(&mut self, msg: &Message) -> bool {
         let line = rpc::to_line(msg);

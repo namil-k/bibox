@@ -150,28 +150,6 @@ pub struct FieldsSetParams {
     pub fields: FieldsMap,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct MessageParams {
-    pub text: String,
-    #[serde(default)]
-    pub level: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ProgressParams {
-    pub text: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ApplyParams {
-    pub entries: Vec<Value>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ExecuteParams {
-    pub command: String,
-}
-
 /// `window/pick` `window/prompt` `window/confirm` `window/progress`. 셋은 요청, progress는 알림.
 #[derive(Debug, Clone, PartialEq)]
 pub enum UiRequest {
@@ -196,23 +174,6 @@ impl UiRequest {
         }
     }
 
-    pub fn method(&self) -> &'static str {
-        match self {
-            UiRequest::Pick { .. } => "window/pick",
-            UiRequest::Prompt { .. } => "window/prompt",
-            UiRequest::Confirm { .. } => "window/confirm",
-            UiRequest::Progress { .. } => "window/progress",
-        }
-    }
-
-    pub fn params(&self) -> Value {
-        match self {
-            UiRequest::Pick { title, items } => serde_json::json!({"title": title, "items": items}),
-            UiRequest::Prompt { title, default } => serde_json::json!({"title": title, "default": default}),
-            UiRequest::Confirm { title } => serde_json::json!({"title": title}),
-            UiRequest::Progress { text } => serde_json::json!({"text": text}),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -242,15 +203,6 @@ impl UiAnswer {
         }
     }
 
-    /// 플러그인이 보낸 result를 답으로. 모양이 안 맞으면 취소로 친다.
-    pub fn from_result(req: &UiRequest, v: &Value) -> UiAnswer {
-        match req {
-            UiRequest::Pick { .. } => UiAnswer::Index { index: v.get("index").and_then(Value::as_u64).map(|n| n as usize) },
-            UiRequest::Prompt { .. } => UiAnswer::Text { text: v.get("text").and_then(Value::as_str).map(str::to_string) },
-            UiRequest::Confirm { .. } => UiAnswer::Yes { yes: v.get("yes").and_then(Value::as_bool).unwrap_or(false) },
-            UiRequest::Progress { .. } => UiAnswer::Ack {},
-        }
-    }
 }
 
 /// 전부 아니면 전무. `db`는 현재 항목들, `pending_new`는 `before_add`에서 추가 중인 항목

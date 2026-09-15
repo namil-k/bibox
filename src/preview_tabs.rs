@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::plugin::TabResponse;
+use crate::plugin::protocol::ViewResult;
 
 /// 스크롤이 "이전 쪽의 바닥"을 뜻하는 자리. 이미지 높이를 알게 되면 `clamp`가 실제 값으로 바꾼다.
 pub const BOTTOM: u32 = u32::MAX;
@@ -121,8 +121,7 @@ pub enum Source {
     Lines(Vec<String>),
 }
 
-pub fn parse_response(tab: Option<TabResponse>) -> Result<(Source, u32), String> {
-    let Some(t) = tab else { return Err("empty tab response".to_string()) };
+pub fn parse_response(t: ViewResult) -> Result<(Source, u32), String> {
     let pages = t.pages.unwrap_or(1).max(1);
     if let Some(p) = t.image {
         return Ok((Source::Image(p), pages));
@@ -130,12 +129,12 @@ pub fn parse_response(tab: Option<TabResponse>) -> Result<(Source, u32), String>
     if let Some(l) = t.lines {
         return Ok((Source::Lines(l), pages));
     }
-    Err("empty tab response".to_string())
+    Err("empty view result (neither image nor lines)".to_string())
 }
 
 /// 응답을 캐시에 넣을 내용으로. 그림은 여기서 읽고 요청 폭에 맞춘다. 워커 스레드에서 부른다(메인은 넣기만).
-pub fn decode(tab: Option<TabResponse>, width_px: u32) -> Result<(Content, u32), String> {
-    let (source, pages) = parse_response(tab)?;
+pub fn decode(view: ViewResult, width_px: u32) -> Result<(Content, u32), String> {
+    let (source, pages) = parse_response(view)?;
     let content = match source {
         Source::Lines(l) => Content::Lines(l),
         Source::Image(p) => match image::open(&p) {
@@ -403,36 +402,34 @@ mod tests {
     /// 스레드에서 다 끝내고 메인은 넣기만 한다. 그림은 읽어서 요청 폭에 맞춘 채로 온다.
     #[test]
     fn decode_reads_the_image_off_the_main_thread_and_fits_the_width() {
-        use crate::plugin::TabResponse;
+        use crate::plugin::protocol::ViewResult;
         let dir = std::env::temp_dir().join(format!("bibox-decode-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let png = dir.join("p.png");
         image::DynamicImage::new_rgb8(10, 20).save(&png).unwrap();
-        let (content, pages) = decode(Some(TabResponse { image: Some(png.clone()), lines: None, pages: Some(3) }), 20).unwrap();
+        let (content, pages) = decode(ViewResult { image: Some(png.clone()), lines: None, pages: Some(3) }, 20).unwrap();
         assert_eq!(pages, 3);
         assert!(matches!(content, Content::Image(ref i) if i.width() == 20 && i.height() == 40), "fitted to the wanted width");
-        let (content, _) = decode(Some(TabResponse { image: None, lines: Some(vec!["a".into()]), pages: None }), 20).unwrap();
+        let (content, _) = decode(ViewResult { image: None, lines: Some(vec!["a".into()]), pages: None }, 20).unwrap();
         assert!(matches!(content, Content::Lines(ref l) if l == &vec!["a".to_string()]));
-        let e = match decode(Some(TabResponse { image: Some(dir.join("missing.png")), lines: None, pages: None }), 20) {
+        let e = match decode(ViewResult { image: Some(dir.join("missing.png")), lines: None, pages: None }, 20) {
             Err(e) => e,
             Ok(_) => panic!("a missing file is an error"),
         };
         assert!(e.contains("missing.png"), "{}", e);
-        assert!(decode(None, 20).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn responses_prefer_image_and_reject_empty_ones() {
-        use crate::plugin::TabResponse;
-        let (src, pages) = parse_response(Some(TabResponse { image: Some("/tmp/a.png".into()), lines: Some(vec!["x".into()]), pages: Some(4) })).unwrap();
-        assert!(matches!(src, Source::Image(p) if p == PathBuf::from("/tmp/a.png")));
+        use crate::plugin::protocol::ViewResult;
+        let (src, pages) = parse_response(ViewResult { image: Some("/tmp/a.png".into()), lines: Some(vec!["x".into()]), pages: Some(4) }).unwrap();
+        assert!(matches!(src, Source::Image(p) if p == std::path::Path::new("/tmp/a.png")));
         assert_eq!(pages, 4);
-        let (src, pages) = parse_response(Some(TabResponse { image: None, lines: Some(vec!["x".into()]), pages: None })).unwrap();
+        let (src, pages) = parse_response(ViewResult { image: None, lines: Some(vec!["x".into()]), pages: None }).unwrap();
         assert!(matches!(src, Source::Lines(l) if l == vec!["x".to_string()]));
         assert_eq!(pages, 1);
-        assert!(parse_response(Some(TabResponse::default())).is_err());
-        assert!(parse_response(None).is_err());
+        assert!(parse_response(ViewResult::default()).is_err());
     }
 
     #[test]

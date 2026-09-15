@@ -42,7 +42,6 @@ pub struct Outcome {
 
 pub struct Events {
     pub host: Arc<PluginHost>,
-    pub db_path: PathBuf,
 }
 
 impl Events {
@@ -51,7 +50,7 @@ impl Events {
         // 플러그인 안에서 불린 bibox는 외부 플러그인에게 다시 이벤트를 보내지 않는다(프로세스 경계를 넘는 무한 루프 방지). 내장은 그대로.
         let in_hook = std::env::var_os("BIBOX_IN_HOOK").is_some();
         let (host, _) = PluginHost::discover_with(config, in_hook);
-        Events { host: Arc::new(host), db_path: crate::config::resolve_db_path(config) }
+        Events { host: Arc::new(host) }
     }
 
     pub fn adding(&self, mut entry: Entry, ui: &mut dyn UiSink) -> (Entry, Vec<Outcome>) {
@@ -91,7 +90,8 @@ impl Events {
 mod tests {
     use super::*;
     use crate::plugin::manifest::parse_manifest;
-    use crate::plugin::{NoUiSink, PluginEnv};
+    use crate::plugin::host::NoUiSink;
+    use crate::plugin::PluginEnv;
     use std::collections::BTreeMap;
 
     fn fixtures() -> PathBuf {
@@ -107,7 +107,7 @@ mod tests {
         let mut problems = vec![];
         let m = parse_manifest(&dir, &text, &mut problems).unwrap();
         let env = PluginEnv { bin: "/bin/true".into(), config_dir: "/tmp".into(), db: "/tmp/db.json".into(), notes: "/tmp/n".into(), pdfs: "/tmp/p".into(), home: None, extra: BTreeMap::new() };
-        Events { host: Arc::new(PluginHost::new(vec![m], BTreeMap::new(), env)), db_path: "/tmp/db.json".into() }
+        Events { host: Arc::new(PluginHost::new(vec![m], BTreeMap::new(), env)) }
     }
 
     fn entry(key: &str) -> Entry {

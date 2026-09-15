@@ -720,7 +720,7 @@ mod tests {
         assert_eq!(c.msgs.no_entries(), "항목이 없습니다.");
     }
     fn manifest_with_settings() -> crate::plugin::Manifest {
-        let text = "api = 1\nname = \"demo\"\nrun = \"sh\"\n\n[[settings]]\nkey = \"push\"\ntype = \"bool\"\ndefault = false\ndesc = \"push after commit\"\n\n[[settings]]\nkey = \"n\"\ntype = \"int\"\ndefault = 4\n\n[[settings]]\nkey = \"model\"\ntype = \"choice\"\nchoices = [\"a\", \"b\"]\ndefault = \"a\"\n\n[[settings]]\nkey = \"label\"\ntype = \"string\"\ndefault = \"x\"\n";
+        let text = "api = 2\nname = \"demo\"\nrun = \"sh\"\n\n[[settings]]\nkey = \"push\"\ntype = \"bool\"\ndefault = false\ndesc = \"push after commit\"\n\n[[settings]]\nkey = \"n\"\ntype = \"int\"\ndefault = 4\n\n[[settings]]\nkey = \"model\"\ntype = \"choice\"\nchoices = [\"a\", \"b\"]\ndefault = \"a\"\n\n[[settings]]\nkey = \"label\"\ntype = \"string\"\ndefault = \"x\"\n";
         let mut problems = vec![];
         crate::plugin::manifest::parse_manifest(std::path::Path::new("/tmp/plugins/demo"), text, &mut problems).expect("manifest")
     }

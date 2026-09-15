@@ -336,7 +336,7 @@ pub fn scaffold(dest: &Path, name: &str) -> Result<()> {
     std::fs::write(
         dest.join("plugin.toml"),
         format!(
-            "api = 1\nname = \"{name}\"\nversion = \"0.1.0\"\ndescription = \"Describe what {name} does\"\nrun = \"python3 main.py\"\nguide = \"AGENT.md\"          # usage notes for AI agents, shown by `bibox agent-guide`\n\n[[commands]]\nid = \"hello\"\ndesc = \"Say hello from {name}\"\n# key = \"<C-h>\"          # default key; users can rebind in keymap.toml\n# menu = true            # show in the right-click menu\n\n# [[hooks]]\n# on = \"after_write\"     # before_add | after_write | after_note_save\n# run = \"hello\"\n",
+            "api = 2\nname = \"{name}\"\nversion = \"0.1.0\"\ndescription = \"Describe what {name} does\"\nrun = \"python3 main.py\"\nguide = \"AGENT.md\"          # usage notes for AI agents, shown by `bibox agent-guide`\n# activation = \"startup\"     # start with the TUI (default: on first use)\n\n[[commands]]\nid = \"hello\"\ndesc = \"Say hello from {name}\"\n# key = \"<C-h>\"              # default key; users can rebind in keymap.toml\n# menus = [\"context\"]        # right-click menu\n\n# [[fields]]                 # a cell in every entry row, filled by your fields provider\n# id = \"count\"\n# place = \"row.1\"            # row.1 | row.2 | row.3 | status\n# align = \"right\"            # right | left | after:key | after:pdf | after:year\n# width = 8\n\n# [[views]]                  # a preview tab, rendered by your view provider\n# title = \"Cited by\"\n# run = \"cited_by\"\n\n# [events]\n# subscribe = [\"library/written\", \"entry/selected\"]\n",
             name = name
         ),
     )?;
@@ -588,18 +588,18 @@ mod tests {
         crate::plugin::write_stub(&dir, "git-sync").unwrap();
         // plain dir
         std::fs::create_dir_all(dir.join("plain")).unwrap();
-        std::fs::write(dir.join("plain/plugin.toml"), "api = 1\nname = \"plain\"\nrun = \"sh\"\nversion = \"0.2.0\"\n").unwrap();
+        std::fs::write(dir.join("plain/plugin.toml"), "api = 2\nname = \"plain\"\nrun = \"sh\"\nversion = \"0.2.0\"\n").unwrap();
         // git clone
         std::fs::create_dir_all(dir.join("cloned/.git")).unwrap();
-        std::fs::write(dir.join("cloned/plugin.toml"), "api = 1\nname = \"cloned\"\nrun = \"sh\"\n").unwrap();
+        std::fs::write(dir.join("cloned/plugin.toml"), "api = 2\nname = \"cloned\"\nrun = \"sh\"\n").unwrap();
         // symlink
         let src = dir.join("src-of-local");
         std::fs::create_dir_all(&src).unwrap();
-        std::fs::write(src.join("plugin.toml"), "api = 1\nname = \"local\"\nrun = \"sh\"\n").unwrap();
+        std::fs::write(src.join("plugin.toml"), "api = 2\nname = \"local\"\nrun = \"sh\"\n").unwrap();
         std::os::unix::fs::symlink(&src, dir.join("local")).unwrap();
         // broken
         std::fs::create_dir_all(dir.join("broken")).unwrap();
-        std::fs::write(dir.join("broken/plugin.toml"), "api = 1\nname = \"broken\"\n").unwrap();
+        std::fs::write(dir.join("broken/plugin.toml"), "api = 2\nname = \"broken\"\n").unwrap();
 
         let rows = list_rows(&dir);
         let get = |n: &str| rows.iter().find(|r| r.name == n).unwrap_or_else(|| panic!("row {}", n));
@@ -658,7 +658,7 @@ mod tests {
 
     #[test]
     fn staging_clones_and_reads_the_name_then_discard_removes_the_temp_dir() {
-        let (repo, plugins) = git_fixture("discard", "api = 1\nname = \"remote-demo\"\nrun = \"sh\"\n");
+        let (repo, plugins) = git_fixture("discard", "api = 2\nname = \"remote-demo\"\nrun = \"sh\"\n");
         let url = format!("file://{}", repo.display());
         let staged = stage_from_git(&plugins, &url, None, "someone/remote-demo").unwrap();
         assert_eq!(staged.name, "remote-demo");
@@ -674,7 +674,7 @@ mod tests {
 
     #[test]
     fn commit_moves_the_clone_into_place_and_validates_it() {
-        let (repo, plugins) = git_fixture("commit", "api = 1\nname = \"remote-demo\"\nrun = \"sh\"\n");
+        let (repo, plugins) = git_fixture("commit", "api = 2\nname = \"remote-demo\"\nrun = \"sh\"\n");
         let url = format!("file://{}", repo.display());
         let staged = stage_from_git(&plugins, &url, None, "x").unwrap();
         let (name, dest) = commit_staged(staged, &crate::i18n::Msgs::default()).unwrap();
@@ -694,7 +694,7 @@ mod tests {
     #[test]
     fn commit_rejects_a_clone_whose_manifest_does_not_validate() {
         // 이름이 디렉토리 이름과 달라질 수 없으므로 run이 없는 매니페스트로 검증 실패를 만든다
-        let (repo, plugins) = git_fixture("bad", "api = 1\nname = \"remote-bad\"\n");
+        let (repo, plugins) = git_fixture("bad", "api = 2\nname = \"remote-bad\"\n");
         let url = format!("file://{}", repo.display());
         let staged = stage_from_git(&plugins, &url, None, "x").unwrap();
         let err = commit_staged(staged, &crate::i18n::Msgs::default()).unwrap_err().to_string();
@@ -711,7 +711,7 @@ mod tests {
         let plugins = root.join("plugins");
         std::fs::create_dir_all(&src).unwrap();
         std::fs::create_dir_all(&plugins).unwrap();
-        std::fs::write(src.join("plugin.toml"), "api = 1\nname = \"src\"\nrun = \"sh\"\n").unwrap();
+        std::fs::write(src.join("plugin.toml"), "api = 2\nname = \"src\"\nrun = \"sh\"\n").unwrap();
         let (name, dest) = install_local(&plugins, &src, &crate::i18n::Msgs::default()).unwrap();
         assert_eq!(name, "src");
         assert!(std::fs::symlink_metadata(&dest).unwrap().file_type().is_symlink());
@@ -719,7 +719,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
     fn declared() -> Vec<Manifest> {
-        let text = "api = 1\nname = \"demo\"\nrun = \"sh\"\n\n[[settings]]\nkey = \"push_on_write\"\ntype = \"bool\"\ndefault = false\n\n[[settings]]\nkey = \"model\"\ntype = \"choice\"\nchoices = [\"a\", \"b\"]\ndefault = \"a\"\n";
+        let text = "api = 2\nname = \"demo\"\nrun = \"sh\"\n\n[[settings]]\nkey = \"push_on_write\"\ntype = \"bool\"\ndefault = false\n\n[[settings]]\nkey = \"model\"\ntype = \"choice\"\nchoices = [\"a\", \"b\"]\ndefault = \"a\"\n";
         let mut problems = vec![];
         vec![parse_manifest(Path::new("/tmp/plugins/demo"), text, &mut problems).unwrap()]
     }
@@ -751,7 +751,7 @@ mod tests {
 
     #[test]
     fn a_plugin_without_declarations_is_not_checked() {
-        let text = "api = 1\nname = \"free\"\nrun = \"sh\"\n";
+        let text = "api = 2\nname = \"free\"\nrun = \"sh\"\n";
         let mut problems = vec![];
         let m = parse_manifest(Path::new("/tmp/plugins/free"), text, &mut problems).unwrap();
         let p = setting_problems(&[m], &config_with("[plugins.free]\nanything = 1\n"));
@@ -768,14 +768,14 @@ mod tests {
 
     #[test]
     fn doctor_names_missing_poppler_tools_only_when_pdf_view_is_installed() {
-        let m = crate::plugin::manifest::parse_manifest(&std::path::PathBuf::from("/x/pdf-view"), "api = 1\nname = \"pdf-view\"\nbuiltin = \"pdf-view\"\n", &mut vec![]).unwrap();
-        let env = crate::plugin::PluginEnv { bin: "/bin/true".into(), config_dir: "/tmp".into(), db: "/tmp/db.json".into(), notes: "/tmp/n".into(), pdfs: "/tmp/p".into(), home: None };
+        let m = crate::plugin::manifest::parse_manifest(&std::path::PathBuf::from("/x/pdf-view"), "api = 2\nname = \"pdf-view\"\nbuiltin = \"pdf-view\"\n", &mut vec![]).unwrap();
+        let env = crate::plugin::PluginEnv { bin: "/bin/true".into(), config_dir: "/tmp".into(), db: "/tmp/db.json".into(), notes: "/tmp/n".into(), pdfs: "/tmp/p".into(), home: None, extra: Default::default() };
         let host = PluginHost::new(vec![m], Default::default(), env);
         let missing = tool_problems(&host, |t| t == "pdftoppm");
         assert_eq!(missing.len(), 2, "{:?}", missing);
         assert!(missing.iter().all(|p| matches!(p, PluginProblem::ToolMissing { plugin, hint, .. } if plugin == "pdf-view" && hint.contains("brew install poppler"))));
         assert!(missing.iter().any(|p| matches!(p, PluginProblem::ToolMissing { program, .. } if program == "pdfinfo")));
-        let env = crate::plugin::PluginEnv { bin: "/bin/true".into(), config_dir: "/tmp".into(), db: "/tmp/db.json".into(), notes: "/tmp/n".into(), pdfs: "/tmp/p".into(), home: None };
+        let env = crate::plugin::PluginEnv { bin: "/bin/true".into(), config_dir: "/tmp".into(), db: "/tmp/db.json".into(), notes: "/tmp/n".into(), pdfs: "/tmp/p".into(), home: None, extra: Default::default() };
         let host = PluginHost::new(vec![], Default::default(), env);
         assert!(tool_problems(&host, |_| false).is_empty(), "no pdf-view, no complaint");
     }
