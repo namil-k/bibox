@@ -1,10 +1,14 @@
+//! 플러그인 프로토콜 v2의 params와 result. 메서드 이름과 짝은 스펙 부록 A.
+//! 파싱은 rpc.rs가 하고 여기는 모양만 정한다.
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::models::Entry;
 
-// ── bibox -> 플러그인 ────────────────────────────────────────────────────────
+pub const PROTOCOL: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Paths {
@@ -15,67 +19,203 @@ pub struct Paths {
     pub home: Option<PathBuf>,
 }
 
+// ── bibox → 플러그인 ────────────────────────────────────────────────────────
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Context {
-    pub focus: Option<String>,
-    pub collection: Option<String>,
-    pub entry: Option<Entry>,
-    pub entries: Vec<Entry>,
-    pub config: Value,
+pub struct Capabilities {
+    pub images: bool,
+    pub status_bar: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InitializeParams {
+    pub protocol: u32,
+    pub bibox: String,
     pub paths: Paths,
-    pub hook: Option<Value>,
+    pub config: Value,
+    pub capabilities: Capabilities,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct InitializeResult {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub protocol: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Request {
-    pub r#type: String,
-    pub id: String,
+pub struct CommandParams {
+    pub command: String,
+    /// key | menu | cli
     pub trigger: String,
-    pub context: Context,
-    /// `trigger = "tab"`일 때만 실린다.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tab: Option<TabRequest>,
+    pub entry: Option<Entry>,
+    #[serde(default)]
+    pub entries: Vec<Entry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection: Option<String>,
 }
 
-/// 미리보기 탭 요청. 호스트가 "n쪽을 W픽셀 폭으로"라고 묻는다.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CommandResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FieldsGetParams {
+    pub keys: Vec<String>,
+    pub entries: Vec<Entry>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct TabRequest {
-    /// 1부터
+pub struct FieldValue {
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
+/// 항목 키 → 필드 id → 값
+pub type FieldsMap = BTreeMap<String, BTreeMap<String, FieldValue>>;
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FieldsResult {
+    #[serde(default)]
+    pub fields: FieldsMap,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ViewParams {
+    pub view: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<Entry>,
     pub page: u32,
-    /// 원하는 이미지 폭. 텍스트 모드면 0
     pub width_px: u32,
-    /// 호스트가 이미지를 그릴 수 있는가. false면 플러그인은 lines로 답한다
     pub images: bool,
 }
 
-// ── 플러그인 -> bibox ────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "ui", rename_all = "lowercase")]
-pub enum UiRequest {
-    Pick {
-        #[serde(default)]
-        title: Option<String>,
-        items: Vec<String>,
-    },
-    Prompt {
-        #[serde(default)]
-        title: Option<String>,
-        #[serde(default)]
-        default: Option<String>,
-    },
-    Confirm {
-        #[serde(default)]
-        title: Option<String>,
-    },
-    Progress {
-        text: String,
-    },
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ViewResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pages: Option<u32>,
 }
 
-/// bibox -> 플러그인 답. `untagged`라 각 변형이 `{"index":..}` 같은 평범한 객체로 나간다.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(untagged)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddingParams {
+    pub entry: Entry,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AddingResult {
+    #[serde(default)]
+    pub entry: Option<Entry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WrittenParams {
+    pub reason: String,
+    pub entries: Vec<Entry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoteSavedParams {
+    pub entry: Entry,
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SelectedParams {
+    pub entry: Entry,
+}
+
+// ── 플러그인 → bibox ────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StatusSetParams {
+    pub field: String,
+    pub text: String,
+    #[serde(default)]
+    pub color: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FieldsSetParams {
+    pub fields: FieldsMap,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MessageParams {
+    pub text: String,
+    #[serde(default)]
+    pub level: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProgressParams {
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApplyParams {
+    pub entries: Vec<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExecuteParams {
+    pub command: String,
+}
+
+/// `window/pick` `window/prompt` `window/confirm` `window/progress`. 셋은 요청, progress는 알림.
+#[derive(Debug, Clone, PartialEq)]
+pub enum UiRequest {
+    Pick { title: Option<String>, items: Vec<String> },
+    Prompt { title: Option<String>, default: Option<String> },
+    Confirm { title: Option<String> },
+    Progress { text: String },
+}
+
+impl UiRequest {
+    pub fn from_method(method: &str, params: &Value) -> Option<UiRequest> {
+        let title = params.get("title").and_then(Value::as_str).map(str::to_string);
+        match method {
+            "window/pick" => {
+                let items = params.get("items")?.as_array()?.iter().map(|v| v.as_str().map(str::to_string)).collect::<Option<Vec<_>>>()?;
+                Some(UiRequest::Pick { title, items })
+            }
+            "window/prompt" => Some(UiRequest::Prompt { title, default: params.get("default").and_then(Value::as_str).map(str::to_string) }),
+            "window/confirm" => Some(UiRequest::Confirm { title }),
+            "window/progress" => Some(UiRequest::Progress { text: params.get("text")?.as_str()?.to_string() }),
+            _ => None,
+        }
+    }
+
+    pub fn method(&self) -> &'static str {
+        match self {
+            UiRequest::Pick { .. } => "window/pick",
+            UiRequest::Prompt { .. } => "window/prompt",
+            UiRequest::Confirm { .. } => "window/confirm",
+            UiRequest::Progress { .. } => "window/progress",
+        }
+    }
+
+    pub fn params(&self) -> Value {
+        match self {
+            UiRequest::Pick { title, items } => serde_json::json!({"title": title, "items": items}),
+            UiRequest::Prompt { title, default } => serde_json::json!({"title": title, "default": default}),
+            UiRequest::Confirm { title } => serde_json::json!({"title": title}),
+            UiRequest::Progress { text } => serde_json::json!({"text": text}),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum UiAnswer {
     Index { index: Option<usize> },
     Text { text: Option<String> },
@@ -84,7 +224,6 @@ pub enum UiAnswer {
 }
 
 impl UiAnswer {
-    /// UI를 못 띄우는 상황(백그라운드 훅, 비대화형 stdin, 사용자 취소)의 답.
     pub fn cancel_for(req: &UiRequest) -> UiAnswer {
         match req {
             UiRequest::Pick { .. } => UiAnswer::Index { index: None },
@@ -93,69 +232,26 @@ impl UiAnswer {
             UiRequest::Progress { .. } => UiAnswer::Ack {},
         }
     }
-}
 
-/// 최종 응답. 모든 필드가 선택이고 `{}`도 유효하다. 모르는 필드는 무시한다
-/// (api 2 플러그인이 보내는 필드가 api 1 bibox를 깨지 않도록).
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct Final {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub message: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub apply: Option<Vec<Value>>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub refresh: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    /// 탭 요청에 대한 답. image와 lines 중 하나.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tab: Option<TabResponse>,
-}
+    pub fn to_result(&self) -> Value {
+        match self {
+            UiAnswer::Index { index } => serde_json::json!({"index": index}),
+            UiAnswer::Text { text } => serde_json::json!({"text": text}),
+            UiAnswer::Yes { yes } => serde_json::json!({"yes": yes}),
+            UiAnswer::Ack {} => serde_json::json!({}),
+        }
+    }
 
-/// 탭 응답. `image`가 있으면 그 PNG, 없으면 `lines`. `pages`는 전체 쪽수.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct TabResponse {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lines: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pages: Option<u32>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum PluginMsg {
-    Ui(UiRequest),
-    Final(Final),
-}
-
-/// 한 줄을 읽는다. 오류 문자열은 그대로 사용자에게 보이므로 원인을 담는다.
-pub fn parse_plugin_line(line: &str) -> Result<PluginMsg, String> {
-    let v: Value = serde_json::from_str(line).map_err(|e| format!("not json ({}): {}", e, head(line)))?;
-    let Some(obj) = v.as_object() else {
-        return Err(format!("expected a JSON object, got: {}", head(line)));
-    };
-    if obj.contains_key("ui") {
-        let req: UiRequest = serde_json::from_value(v.clone())
-            .map_err(|e| format!("bad ui request ({}): {}", e, head(line)))?;
-        Ok(PluginMsg::Ui(req))
-    } else {
-        let f: Final = serde_json::from_value(v).map_err(|e| format!("bad final response ({}): {}", e, head(line)))?;
-        Ok(PluginMsg::Final(f))
+    /// 플러그인이 보낸 result를 답으로. 모양이 안 맞으면 취소로 친다.
+    pub fn from_result(req: &UiRequest, v: &Value) -> UiAnswer {
+        match req {
+            UiRequest::Pick { .. } => UiAnswer::Index { index: v.get("index").and_then(Value::as_u64).map(|n| n as usize) },
+            UiRequest::Prompt { .. } => UiAnswer::Text { text: v.get("text").and_then(Value::as_str).map(str::to_string) },
+            UiRequest::Confirm { .. } => UiAnswer::Yes { yes: v.get("yes").and_then(Value::as_bool).unwrap_or(false) },
+            UiRequest::Progress { .. } => UiAnswer::Ack {},
+        }
     }
 }
-
-/// 진단에 넣을 앞 80자. 트레이스백이 통째로 화면에 뜨지 않게 한다.
-pub fn head(s: &str) -> String {
-    let s = s.trim_end();
-    if s.chars().count() <= 80 {
-        s.to_string()
-    } else {
-        format!("{}...", s.chars().take(80).collect::<String>())
-    }
-}
-
-// ── apply 검증 ───────────────────────────────────────────────────────────────
 
 /// 전부 아니면 전무. `db`는 현재 항목들, `pending_new`는 `before_add`에서 추가 중인 항목
 /// (아직 `db`에 없다). 통과하면 `updated_at`이 찍힌 항목들을 돌려준다.
@@ -219,6 +315,54 @@ fn locate_bad_field(existing: &Entry, incoming: &serde_json::Map<String, Value>)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    /// 요청 params는 그대로 직렬화되어야 플러그인이 문서대로 읽는다. 선택 필드는 빠진다.
+    #[test]
+    fn command_params_serialize_with_the_documented_names() {
+        let p = CommandParams { command: "copy".into(), trigger: "key".into(), entry: None, entries: vec![], focus: Some("entries".into()), collection: None };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["command"], "copy");
+        assert_eq!(v["trigger"], "key");
+        assert_eq!(v["focus"], "entries");
+        assert!(v.get("collection").is_none() || v["collection"].is_null());
+        let r: CommandResult = serde_json::from_value(json!({"message": "done"})).unwrap();
+        assert_eq!(r.message.as_deref(), Some("done"));
+        let r: CommandResult = serde_json::from_value(json!({})).unwrap();
+        assert!(r.message.is_none());
+    }
+
+    #[test]
+    fn fields_maps_nest_entry_key_then_field_id() {
+        let r: FieldsResult = serde_json::from_value(json!({"fields": {"kim2025": {"count": {"text": "★ 312", "color": "yellow"}, "read": {"text": "✓"}}}})).unwrap();
+        let k = &r.fields["kim2025"];
+        assert_eq!(k["count"].text, "★ 312");
+        assert_eq!(k["count"].color.as_deref(), Some("yellow"));
+        assert!(k["read"].color.is_none());
+        let empty: FieldsResult = serde_json::from_value(json!({})).unwrap();
+        assert!(empty.fields.is_empty());
+    }
+
+    #[test]
+    fn window_requests_parse_from_method_and_params_and_answers_become_results() {
+        let r = UiRequest::from_method("window/pick", &json!({"title": "Style", "items": ["a", "b"]})).unwrap();
+        assert!(matches!(r, UiRequest::Pick { ref items, .. } if items.len() == 2));
+        assert!(UiRequest::from_method("window/nope", &json!({})).is_none());
+        assert!(UiRequest::from_method("window/pick", &json!({"items": "not a list"})).is_none());
+        assert_eq!(UiAnswer::Index { index: Some(1) }.to_result(), json!({"index": 1}));
+        assert_eq!(UiAnswer::Text { text: None }.to_result(), json!({"text": null}));
+        assert_eq!(UiAnswer::cancel_for(&r).to_result(), json!({"index": null}));
+    }
+
+    #[test]
+    fn view_results_accept_lines_or_an_image() {
+        let v: ViewResult = serde_json::from_value(json!({"lines": ["a"], "pages": 3})).unwrap();
+        assert_eq!(v.lines.as_deref(), Some(&["a".to_string()][..]));
+        assert_eq!(v.pages, Some(3));
+        let v: ViewResult = serde_json::from_value(json!({"image": "/tmp/p.jpg"})).unwrap();
+        assert_eq!(v.image.as_deref(), Some(std::path::Path::new("/tmp/p.jpg")));
+    }
+
     use crate::models::EntryType;
 
     fn entry(id: &str, key: &str) -> Entry {
@@ -233,93 +377,6 @@ mod tests {
     }
 
     #[test]
-    fn a_request_serializes_with_type_id_trigger_and_context() {
-        let req = Request {
-            r#type: "command".into(),
-            id: "tidy".into(),
-            trigger: "key".into(),
-            context: Context {
-                focus: Some("entries".into()), collection: None, entry: Some(entry("1", "a")),
-                entries: vec![entry("1", "a")], config: serde_json::json!({"model": "x"}),
-                paths: Paths { config_dir: "/c".into(), db: "/c/db.json".into(), notes: "/n".into(), pdfs: "/p".into(), home: None },
-                hook: None,
-            },
-            tab: None,
-        };
-        let v: serde_json::Value = serde_json::to_value(&req).unwrap();
-        assert_eq!(v["type"], "command");
-        assert_eq!(v["id"], "tidy");
-        assert_eq!(v["trigger"], "key");
-        assert_eq!(v["context"]["focus"], "entries");
-        assert_eq!(v["context"]["entry"]["bibtex_key"], "a");
-        assert_eq!(v["context"]["entries"].as_array().unwrap().len(), 1);
-        assert_eq!(v["context"]["config"]["model"], "x");
-        assert_eq!(v["context"]["paths"]["db"], "/c/db.json");
-        assert!(v["context"]["paths"]["home"].is_null());
-        assert!(v["context"]["hook"].is_null());
-        assert!(!serde_json::to_string(&req).unwrap().contains('\n'));
-    }
-
-    #[test]
-    fn ui_lines_parse_into_the_four_requests() {
-        assert_eq!(
-            parse_plugin_line(r#"{"ui":"pick","title":"Style","items":["APA","IEEE"]}"#).unwrap(),
-            PluginMsg::Ui(UiRequest::Pick { title: Some("Style".into()), items: vec!["APA".into(), "IEEE".into()] })
-        );
-        assert_eq!(
-            parse_plugin_line(r#"{"ui":"prompt","default":"x"}"#).unwrap(),
-            PluginMsg::Ui(UiRequest::Prompt { title: None, default: Some("x".into()) })
-        );
-        assert_eq!(
-            parse_plugin_line(r#"{"ui":"confirm","title":"Sure?"}"#).unwrap(),
-            PluginMsg::Ui(UiRequest::Confirm { title: Some("Sure?".into()) })
-        );
-        assert_eq!(
-            parse_plugin_line(r#"{"ui":"progress","text":"3/12"}"#).unwrap(),
-            PluginMsg::Ui(UiRequest::Progress { text: "3/12".into() })
-        );
-    }
-
-    #[test]
-    fn a_line_without_ui_is_a_final_and_empty_object_is_valid() {
-        assert_eq!(parse_plugin_line("{}").unwrap(), PluginMsg::Final(Final::default()));
-        let f = parse_plugin_line(r#"{"message":"done","refresh":true,"apply":[{"id":"1"}]}"#).unwrap();
-        match f {
-            PluginMsg::Final(f) => {
-                assert_eq!(f.message.as_deref(), Some("done"));
-                assert!(f.refresh);
-                assert_eq!(f.apply.unwrap().len(), 1);
-                assert!(f.error.is_none());
-            }
-            _ => panic!("expected final"),
-        }
-    }
-
-    #[test]
-    fn garbage_and_unknown_ui_kinds_are_protocol_errors() {
-        assert!(parse_plugin_line("not json").unwrap_err().contains("not json"));
-        assert!(parse_plugin_line("[1,2]").unwrap_err().contains("object"));
-        assert!(parse_plugin_line(r#"{"ui":"table","rows":[]}"#).unwrap_err().contains("table"));
-    }
-
-    #[test]
-    fn answers_serialize_to_the_documented_shapes() {
-        assert_eq!(serde_json::to_string(&UiAnswer::Index { index: Some(2) }).unwrap(), r#"{"index":2}"#);
-        assert_eq!(serde_json::to_string(&UiAnswer::Index { index: None }).unwrap(), r#"{"index":null}"#);
-        assert_eq!(serde_json::to_string(&UiAnswer::Text { text: None }).unwrap(), r#"{"text":null}"#);
-        assert_eq!(serde_json::to_string(&UiAnswer::Yes { yes: true }).unwrap(), r#"{"yes":true}"#);
-        assert_eq!(serde_json::to_string(&UiAnswer::Ack {}).unwrap(), "{}");
-    }
-
-    #[test]
-    fn cancel_for_matches_the_request_kind() {
-        assert_eq!(UiAnswer::cancel_for(&UiRequest::Pick { title: None, items: vec![] }), UiAnswer::Index { index: None });
-        assert_eq!(UiAnswer::cancel_for(&UiRequest::Prompt { title: None, default: None }), UiAnswer::Text { text: None });
-        assert_eq!(UiAnswer::cancel_for(&UiRequest::Confirm { title: None }), UiAnswer::Yes { yes: false });
-        assert_eq!(UiAnswer::cancel_for(&UiRequest::Progress { text: String::new() }), UiAnswer::Ack {});
-    }
-
-    #[test]
     fn apply_accepts_a_changed_entry_and_stamps_updated_at() {
         let db = vec![entry("1", "a"), entry("2", "b")];
         let mut v = serde_json::to_value(entry("1", "a")).unwrap();
@@ -329,7 +386,6 @@ mod tests {
         assert_eq!(out[0].title.as_deref(), Some("New title"));
         assert!(out[0].updated_at.is_some());
     }
-
     #[test]
     fn apply_rejects_bad_types_with_the_index_and_field() {
         let db = vec![entry("1", "a")];
@@ -339,7 +395,6 @@ mod tests {
         assert!(e.starts_with("entries[0]"), "{}", e);
         assert!(e.contains("year"), "{}", e);
     }
-
     #[test]
     fn apply_rejects_unknown_ids_and_changed_created_at() {
         let db = vec![entry("1", "a")];
@@ -351,7 +406,6 @@ mod tests {
         let e = validate_apply(&db, None, &[v]).unwrap_err();
         assert!(e.contains("created_at"), "{}", e);
     }
-
     #[test]
     fn apply_rejects_a_citekey_that_collides_with_another_entry_or_within_the_batch() {
         let db = vec![entry("1", "a"), entry("2", "b")];
@@ -367,7 +421,6 @@ mod tests {
         let e = validate_apply(&db, None, &[v1, v2]).unwrap_err();
         assert!(e.contains("entries[1]"), "{}", e);
     }
-
     #[test]
     fn apply_is_all_or_nothing() {
         let db = vec![entry("1", "a"), entry("2", "b")];
@@ -375,7 +428,6 @@ mod tests {
         let bad = serde_json::to_value(entry("9", "z")).unwrap();
         assert!(validate_apply(&db, None, &[good, bad]).is_err());
     }
-
     #[test]
     fn before_add_lets_the_pending_entry_through_and_checks_its_key_against_the_db() {
         let db = vec![entry("1", "a")];
@@ -386,81 +438,5 @@ mod tests {
         let mut v = serde_json::to_value(&pending).unwrap();
         v["bibtex_key"] = serde_json::json!("a");
         assert!(validate_apply(&db, Some(&pending), &[v]).unwrap_err().contains("bibtex_key"));
-    }
-    #[test]
-    fn a_request_round_trips_through_json() {
-        let req = Request {
-            r#type: "command".into(),
-            id: "sync".into(),
-            trigger: "hook:after_write".into(),
-            context: Context {
-                focus: None, collection: None, entry: Some(entry("1", "a")), entries: vec![entry("1", "a")],
-                config: serde_json::json!({"include_pdfs": true}),
-                paths: Paths { config_dir: "/c".into(), db: "/h/db.json".into(), notes: "/h/notes".into(), pdfs: "/h/pdfs".into(), home: Some("/h".into()) },
-                hook: Some(serde_json::json!({"reason": "add", "keys": ["a"]})),
-            },
-            tab: None,
-        };
-        let line = serde_json::to_string(&req).unwrap();
-        let back: Request = serde_json::from_str(&line).unwrap();
-        assert_eq!(back.r#type, "command");
-        assert_eq!(back.id, "sync");
-        assert_eq!(back.context.paths.home.as_deref(), Some(std::path::Path::new("/h")));
-        assert_eq!(back.context.hook.unwrap()["reason"], "add");
-        assert_eq!(back.context.entries[0].bibtex_key, "a");
-    }
-
-    #[test]
-    fn a_final_serializes_without_empty_fields() {
-        assert_eq!(serde_json::to_string(&Final::default()).unwrap(), "{}");
-        let f = Final { message: Some("ok".into()), refresh: true, ..Default::default() };
-        assert_eq!(serde_json::to_string(&f).unwrap(), r#"{"message":"ok","refresh":true}"#);
-        let f = Final { error: Some("bad".into()), ..Default::default() };
-        assert_eq!(serde_json::to_string(&f).unwrap(), r#"{"error":"bad"}"#);
-    }
-
-    #[test]
-    fn a_ui_request_serializes_with_the_ui_tag() {
-        let r = UiRequest::Progress { text: "pulling".into() };
-        assert_eq!(serde_json::to_string(&r).unwrap(), r#"{"ui":"progress","text":"pulling"}"#);
-        let r = UiRequest::Pick { title: Some("Style".into()), items: vec!["APA".into()] };
-        assert_eq!(serde_json::to_string(&r).unwrap(), r#"{"ui":"pick","title":"Style","items":["APA"]}"#);
-    }
-
-    #[test]
-    fn a_tab_request_is_serialized_only_when_present() {
-        let mut req = Request {
-            r#type: "command".into(), id: "render".into(), trigger: "tab".into(),
-            context: Context { focus: None, collection: None, entry: None, entries: vec![], config: serde_json::json!({}), paths: Paths { config_dir: "/c".into(), db: "/d".into(), notes: "/n".into(), pdfs: "/p".into(), home: None }, hook: None },
-            tab: None,
-        };
-        let s = serde_json::to_string(&req).unwrap();
-        assert!(!s.contains("\"tab\":"), "{}", s);
-        req.tab = Some(TabRequest { page: 3, width_px: 840, images: true });
-        let s = serde_json::to_string(&req).unwrap();
-        assert!(s.contains("\"tab\":{\"page\":3,\"width_px\":840,\"images\":true}"), "{}", s);
-        let back: Request = serde_json::from_str(&s).unwrap();
-        assert_eq!(back.tab, Some(TabRequest { page: 3, width_px: 840, images: true }));
-    }
-
-    #[test]
-    fn a_final_with_a_tab_response_parses_image_or_lines() {
-        let f = match parse_plugin_line(r#"{"tab":{"image":"/tmp/p3.png","pages":14}}"#).unwrap() {
-            PluginMsg::Final(f) => f,
-            other => panic!("{:?}", other),
-        };
-        let t = f.tab.unwrap();
-        assert_eq!(t.image, Some(PathBuf::from("/tmp/p3.png")));
-        assert_eq!(t.pages, Some(14));
-        assert_eq!(t.lines, None);
-        let f = match parse_plugin_line(r#"{"tab":{"lines":["a","b"]}}"#).unwrap() {
-            PluginMsg::Final(f) => f,
-            other => panic!("{:?}", other),
-        };
-        assert_eq!(f.tab.unwrap().lines, Some(vec!["a".to_string(), "b".to_string()]));
-        // 보통 최종 응답에는 tab이 없다
-        let f = match parse_plugin_line(r#"{"message":"hi"}"#).unwrap() { PluginMsg::Final(f) => f, other => panic!("{:?}", other) };
-        assert_eq!(f.tab, None);
-        assert!(!serde_json::to_string(&f).unwrap().contains("tab"));
     }
 }
