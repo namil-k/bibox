@@ -288,7 +288,7 @@ mod tests {
         let text = "api = 2\nname = \"cit\"\nrun = \"sh x\"\n[[fields]]\nid = \"count\"\nplace = \"row.1\"\ndesc = \"Times cited\"\n[[fields]]\nid = \"count\"\nplace = \"info\"\ndesc = \"Cited by\"\n[[fields]]\nid = \"venue\"\nplace = \"info\"\n";
         let mut problems = vec![];
         let m = crate::plugin::manifest::parse_manifest(std::path::Path::new("/tmp/plugins/cit"), text, &mut problems).unwrap();
-        let d = decls(&[m.clone()], &BTreeMap::new());
+        let d = decls(std::slice::from_ref(&m), &BTreeMap::new());
         assert_eq!(d.len(), 3);
         assert_eq!(parse_place("info"), Some(Place::Info));
         let mut s = FieldStore::default();
