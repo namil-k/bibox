@@ -1,14 +1,17 @@
-//! git-sync 내장 플러그인. 저장할 때마다 커밋(`after_write`), `g s` 동기화, `g t` 상태.
-//! 포터블 홈이 git 저장소의 루트일 때만 동작한다. 그 밖에서는 훅은 조용하고 명령은 이유를 말한다.
+//! git-sync 내장 플러그인. 저장할 때마다 커밋(`library/written`, `note/saved`), `g s` 동기화, `g t` 상태.
+//! 포터블 홈이 git 저장소의 루트일 때만 동작한다. 그 밖에서는 이벤트는 조용하고 명령은 이유를 말한다.
+//! 안 올린 커밋 수는 상태 바 조각 `ahead`로 민다.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use serde_json::Value;
+
 use crate::plugin::builtin::Builtin;
-use crate::plugin::protocol::{Final, Request};
+use crate::plugin::rpc::RpcError;
 use crate::plugin::serve::{serve, Ui};
 
-pub const MANIFEST: &str = r#"api = 1
+pub const MANIFEST: &str = r#"api = 2
 name = "git-sync"
 description = "Commit the library on every write; fetch, pull and push on demand"
 
@@ -26,6 +29,13 @@ id = "status"
 desc = "Show the git status of the library"
 key = ["g", "t"]
 
+[[fields]]
+id = "ahead"
+place = "status"
+align = "right"
+width = 12
+desc = "Commits not yet pushed"
+
 [[settings]]
 key = "include_pdfs"
 type = "bool"
@@ -36,48 +46,108 @@ desc = "Also commit pdfs/"
 key = "push_on_write"
 type = "bool"
 default = false
-desc = "git push after every hook commit"
+desc = "git push after every write"
 
-[[hooks]]
-on = "after_write"
-run = "commit"
+[events]
+subscribe = ["library/written", "note/saved"]
 "#;
 
-pub const GUIDE: &str = "No CLI. When the bibox home (`bibox config --json` -> `home`) is a git repository, every write through the CLI or the TUI is committed right away (`db.json` and notes; PDFs only if `include_pdfs = true`). To publish, run `git push` in the home directory, or set `push_on_write = true` under `[plugins.git-sync]` in config.toml. In the TUI, `g s` fetches, pulls with rebase and pushes; `g t` shows status. Nothing is committed when the home is not a git repository.";
+pub const GUIDE: &str = "No CLI. When the bibox home (`bibox config --json` -> `home`) is a git repository, every write through the CLI or the TUI is committed right away (`db.json` and notes; PDFs only if `include_pdfs = true`). To publish, run `git push` in the home directory, or set `push_on_write = true` under `[plugins.git-sync]` in config.toml. In the TUI, `g s` fetches, pulls with rebase and pushes; `g t` shows status; the status bar shows how many commits are not pushed yet. Nothing is committed when the home is not a git repository.";
 
 pub const BUILTIN: Builtin = Builtin { name: "git-sync", manifest: MANIFEST, run, seeded: true, guide: GUIDE };
 
 fn run() {
-    let mut handler = |req: &Request, ui: &mut Ui| handle(req, ui);
-    serve(&mut handler);
+    let mut st = State::default();
+    let mut handler = |method: &str, params: Value, ui: &mut Ui| -> Result<Value, RpcError> {
+        if method == "initialize" {
+            st.on_initialize(&params);
+            return Ok(Value::Null);
+        }
+        st.handle(method, params, ui)
+    };
+    serve("git-sync", &mut handler);
 }
 
 const NEEDS_REPO: &str = "git-sync needs a portable home that is a git repository (bibox init <path>, then git init inside it)";
 
-struct Cfg {
+/// initialize에서 받은 paths.home과 config. `config/changed`가 config만 바꾼다.
+#[derive(Default)]
+struct State {
+    home: Option<PathBuf>,
     include_pdfs: bool,
     push_on_write: bool,
 }
 
-fn cfg(req: &Request) -> Cfg {
-    let c = &req.context.config;
-    let flag = |k: &str| c.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
-    Cfg { include_pdfs: flag("include_pdfs"), push_on_write: flag("push_on_write") }
-}
+impl State {
+    fn on_initialize(&mut self, params: &Value) {
+        self.home = params.pointer("/paths/home").and_then(Value::as_str).map(PathBuf::from);
+        self.set_config(params.get("config").unwrap_or(&Value::Null));
+    }
 
-fn is_hook(req: &Request) -> bool {
-    req.trigger.starts_with("hook:")
-}
+    fn set_config(&mut self, c: &Value) {
+        let flag = |k: &str| c.get(k).and_then(Value::as_bool).unwrap_or(false);
+        self.include_pdfs = flag("include_pdfs");
+        self.push_on_write = flag("push_on_write");
+    }
 
-fn err(s: impl Into<String>) -> Final {
-    Final { error: Some(s.into()), ..Default::default() }
-}
-
-fn msg(s: impl Into<String>) -> Final {
-    Final { message: Some(s.into()), ..Default::default() }
+    fn handle(&mut self, method: &str, params: Value, ui: &mut Ui) -> Result<Value, RpcError> {
+        match method {
+            "config/changed" => {
+                self.set_config(params.get("config").unwrap_or(&Value::Null));
+                Ok(Value::Null)
+            }
+            "library/written" | "note/saved" => {
+                // 저장소가 아니면 조용히. 실패는 메시지로만 알리고 응답은 없다(알림이라).
+                let Ok(g) = repo(self.home.as_deref()) else { return Ok(Value::Null) };
+                let message = written_message(method, &params);
+                match stage_and_commit(&g, self.include_pdfs, &message) {
+                    Ok(true) if self.push_on_write => {
+                        if let Err(e) = g.ok(&["push", "-q"]) {
+                            ui.message(&format!("git-sync: git push failed: {}", e));
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => ui.message(&format!("git-sync: git commit failed: {}", e)),
+                }
+                push_ahead(&g, ui);
+                Ok(Value::Null)
+            }
+            "commands/run" => {
+                let command = params.get("command").and_then(Value::as_str).unwrap_or("");
+                let g = repo(self.home.as_deref()).map_err(RpcError::plugin)?;
+                let message = match command {
+                    "commit" => {
+                        let committed = stage_and_commit(&g, self.include_pdfs, "bibox: update").map_err(|e| RpcError::plugin(format!("git commit failed: {}", e)))?;
+                        if committed { "committed" } else { "nothing to commit" }.to_string()
+                    }
+                    "sync" => cmd_sync(&g, self.include_pdfs, ui).map_err(RpcError::plugin)?,
+                    "status" => status_text(&g).map_err(RpcError::plugin)?,
+                    other => return Err(RpcError::method_not_found(&format!("commands/run {}", other))),
+                };
+                push_ahead(&g, ui);
+                Ok(serde_json::json!({"message": message}))
+            }
+            other => Err(RpcError::method_not_found(other)),
+        }
+    }
 }
 
 // ── 순수 함수 ────────────────────────────────────────────────────────────────
+
+/// 이벤트 params에서 커밋 문장. `library/written`은 reason과 항목 키로, `note/saved`는 항목 키로.
+fn written_message(method: &str, params: &Value) -> String {
+    if method == "note/saved" {
+        let key = params.pointer("/entry/bibtex_key").and_then(Value::as_str).unwrap_or("");
+        return if key.is_empty() { "bibox: update".to_string() } else { format!("bibox: note {}", key) };
+    }
+    let reason = params.get("reason").and_then(Value::as_str).unwrap_or("other");
+    let keys: Vec<String> = params
+        .get("entries")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(|e| e.get("bibtex_key").and_then(Value::as_str).map(str::to_string)).collect())
+        .unwrap_or_default();
+    commit_message(reason, &keys)
+}
 
 /// 기존 auto-commit과 같은 문장. "bibox: add kim2025rust", "bibox: import 12 entries".
 pub fn commit_message(reason: &str, keys: &[String]) -> String {
@@ -114,17 +184,6 @@ pub fn format_status(remote: &str, branch: &str, dirty: bool, behind: usize) -> 
     }
 }
 
-fn hook_commit_message(req: &Request) -> String {
-    let h = req.context.hook.as_ref();
-    let reason = h.and_then(|h| h.get("reason")).and_then(|v| v.as_str()).unwrap_or("other");
-    let keys: Vec<String> = h
-        .and_then(|h| h.get("keys"))
-        .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|k| k.as_str().map(str::to_string)).collect())
-        .unwrap_or_default();
-    commit_message(reason, &keys)
-}
-
 // ── git ─────────────────────────────────────────────────────────────────────
 
 struct Git {
@@ -152,14 +211,14 @@ impl Git {
     }
 }
 
-/// 범위 검사. `paths.home`이 있고 그것이 저장소 루트여야 한다.
-fn repo(req: &Request) -> Result<Git, String> {
-    let Some(home) = req.context.paths.home.clone() else {
+/// 범위 검사. home이 있고 그것이 저장소 루트여야 한다.
+fn repo(home: Option<&Path>) -> Result<Git, String> {
+    let Some(home) = home else {
         return Err(NEEDS_REPO.to_string());
     };
-    let g = Git { home: home.clone() };
+    let g = Git { home: home.to_path_buf() };
     let top = g.ok(&["rev-parse", "--show-toplevel"]).map_err(|_| NEEDS_REPO.to_string())?;
-    let same = std::fs::canonicalize(&top).ok() == std::fs::canonicalize(&home).ok();
+    let same = std::fs::canonicalize(&top).ok() == std::fs::canonicalize(home).ok();
     if !same {
         return Err(NEEDS_REPO.to_string());
     }
@@ -167,7 +226,7 @@ fn repo(req: &Request) -> Result<Git, String> {
 }
 
 /// db.json, notes/(있으면), include_pdfs면 pdfs/(있으면)를 스테이지하고 변경이 있을 때만 커밋한다.
-fn stage_and_commit(g: &Git, cfg: &Cfg, message: &str) -> Result<bool, String> {
+fn stage_and_commit(g: &Git, include_pdfs: bool, message: &str) -> Result<bool, String> {
     let mut paths: Vec<&str> = Vec::new();
     if g.home.join("db.json").is_file() {
         paths.push("db.json");
@@ -175,7 +234,7 @@ fn stage_and_commit(g: &Git, cfg: &Cfg, message: &str) -> Result<bool, String> {
     if g.home.join("notes").is_dir() {
         paths.push("notes");
     }
-    if cfg.include_pdfs && g.home.join("pdfs").is_dir() {
+    if include_pdfs && g.home.join("pdfs").is_dir() {
         paths.push("pdfs");
     }
     if paths.is_empty() {
@@ -192,82 +251,42 @@ fn stage_and_commit(g: &Git, cfg: &Cfg, message: &str) -> Result<bool, String> {
     Ok(true)
 }
 
+/// upstream보다 앞선 커밋 수. 원격이 없으면 None.
+fn ahead(g: &Git) -> Option<usize> {
+    g.ok(&["rev-list", "--count", "@{upstream}..HEAD"]).ok().and_then(|s| s.parse().ok())
+}
+
+/// 상태 바 조각 `ahead`. 0이거나 원격이 없으면 빈칸(조각이 사라진다).
+fn push_ahead(g: &Git, ui: &mut Ui) {
+    let text = match ahead(g) {
+        Some(n) if n > 0 => format!("↑{} unpushed", n),
+        _ => String::new(),
+    };
+    ui.status("ahead", &text, None);
+}
+
 // ── 명령 ────────────────────────────────────────────────────────────────────
 
-fn handle(req: &Request, ui: &mut Ui) -> Final {
-    let c = cfg(req);
-    match req.id.as_str() {
-        "commit" => cmd_commit(req, &c),
-        "sync" => cmd_sync(req, &c, ui),
-        "status" => cmd_status(req),
-        other => err(format!("unknown command {}", other)),
-    }
-}
-
-fn cmd_commit(req: &Request, cfg: &Cfg) -> Final {
-    let hook = is_hook(req);
-    let g = match repo(req) {
-        Ok(g) => g,
-        Err(e) => return if hook { Final::default() } else { err(e) },
-    };
-    let message = if hook { hook_commit_message(req) } else { "bibox: update".to_string() };
-    let committed = match stage_and_commit(&g, cfg, &message) {
-        Ok(c) => c,
-        Err(e) => return err(format!("git commit failed: {}", e)),
-    };
-    if hook && committed && cfg.push_on_write {
-        if let Err(e) = g.ok(&["push", "-q"]) {
-            return err(format!("git push failed: {}", e));
-        }
-    }
-    if hook {
-        Final::default()
-    } else {
-        msg(if committed { "committed" } else { "nothing to commit" })
-    }
-}
-
-fn cmd_sync(req: &Request, cfg: &Cfg, ui: &mut Ui) -> Final {
-    let g = match repo(req) {
-        Ok(g) => g,
-        Err(e) => return err(e),
-    };
+fn cmd_sync(g: &Git, include_pdfs: bool, ui: &mut Ui) -> Result<String, String> {
     ui.progress("committing");
-    if let Err(e) = stage_and_commit(&g, cfg, "bibox: sync") {
-        return err(format!("git commit failed: {}", e));
-    }
+    stage_and_commit(g, include_pdfs, "bibox: sync").map_err(|e| format!("git commit failed: {}", e))?;
     ui.progress("pulling");
     // upstream이 없으면 pull도 push도 안 되므로 여기서 한 번에 말한다.
     if g.ok(&["rev-parse", "--abbrev-ref", "@{upstream}"]).is_err() {
         let branch = g.ok(&["branch", "--show-current"]).unwrap_or_else(|_| "master".to_string());
-        return err(format!("no upstream branch; run `git push -u origin {}` once", branch));
+        return Err(format!("no upstream branch; run `git push -u origin {}` once", branch));
     }
     // autostash: include_pdfs = false인 채 pdfs/를 지운 트리처럼 unstaged 변경이 남아 있어도 rebase가 거부하지 않는다
-    if let Err(e) = g.ok(&["pull", "--rebase", "--autostash", "-q"]) {
-        return err(format!("git pull failed: {}", e));
-    }
+    g.ok(&["pull", "--rebase", "--autostash", "-q"]).map_err(|e| format!("git pull failed: {}", e))?;
     ui.progress("pushing");
-    let ahead: usize = g.ok(&["rev-list", "--count", "@{upstream}..HEAD"]).ok().and_then(|s| s.parse().ok()).unwrap_or(0);
-    if let Err(e) = g.ok(&["push", "-q"]) {
-        return err(format!("git push failed: {}", e));
-    }
-    let text = match ahead {
+    let n = ahead(g).unwrap_or(0);
+    g.ok(&["push", "-q"]).map_err(|e| format!("git push failed: {}", e))?;
+    ui.refresh();
+    Ok(match n {
         0 => "up to date".to_string(),
         1 => "pushed 1 commit".to_string(),
         n => format!("pushed {} commits", n),
-    };
-    Final { message: Some(text), refresh: true, ..Default::default() }
-}
-
-fn cmd_status(req: &Request) -> Final {
-    let g = match repo(req) {
-        Ok(g) => g,
-        Err(e) => return err(e),
-    };
-    match status_text(&g) {
-        Ok(s) => msg(s),
-        Err(e) => err(e),
-    }
+    })
 }
 
 fn status_text(g: &Git) -> Result<String, String> {
@@ -286,7 +305,8 @@ fn status_text(g: &Git) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin::protocol::{Context, Paths};
+    use std::collections::VecDeque;
+    use std::io::Cursor;
 
     fn k(keys: &[&str]) -> Vec<String> {
         keys.iter().map(|s| s.to_string()).collect()
@@ -323,71 +343,103 @@ mod tests {
         assert_eq!(format_status("origin", "main", false, 0), "origin/main ✓ up to date");
     }
 
-    fn request(id: &str, trigger: &str, home: Option<&str>, config: serde_json::Value, hook: Option<serde_json::Value>) -> Request {
-        Request {
-            r#type: "command".into(),
-            id: id.into(),
-            trigger: trigger.into(),
-            context: Context {
-                focus: None,
-                collection: None,
-                entry: None,
-                entries: vec![],
-                config,
-                paths: Paths {
-                    config_dir: "/c".into(),
-                    db: "/h/db.json".into(),
-                    notes: "/h/notes".into(),
-                    pdfs: "/h/pdfs".into(),
-                    home: home.map(std::path::PathBuf::from),
-                },
-                hook,
-            },
-            tab: None,
+    /// 핸들러를 부르고 (결과, 플러그인이 쓴 줄들)을 돌려준다. 읽을 줄은 없다(팝업을 안 쓰는 경로만).
+    fn call(st: &mut State, method: &str, params: Value) -> (Result<Value, RpcError>, String) {
+        let mut cur = Cursor::new(String::new());
+        let mut out: Vec<u8> = Vec::new();
+        let mut deferred = VecDeque::new();
+        let mut next = 1;
+        let r = {
+            let mut ui = Ui::for_test(&mut cur, &mut out, &mut deferred, &mut next);
+            st.handle(method, params, &mut ui)
+        };
+        (r, String::from_utf8(out).unwrap())
+    }
+
+    fn init(home: Option<&str>, config: Value) -> State {
+        let mut st = State::default();
+        st.on_initialize(&serde_json::json!({"paths": {"config_dir": "/c", "db": "/h/db.json", "notes": "/h/n", "pdfs": "/h/p", "home": home}, "config": config}));
+        st
+    }
+
+    /// 임시 디렉토리에 git 저장소. 커밋할 수 있게 user를 준다.
+    fn repo_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("bibox-git-sync-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for args in [vec!["init", "-q"], vec!["config", "user.email", "t@t"], vec!["config", "user.name", "t"]] {
+            assert!(Command::new("git").arg("-C").arg(&dir).args(&args).status().unwrap().success());
         }
+        dir
     }
 
     #[test]
-    fn config_reads_the_two_flags_and_defaults_to_false() {
-        let r = request("commit", "key", None, serde_json::json!({}), None);
-        let c = cfg(&r);
-        assert!(!c.include_pdfs && !c.push_on_write);
-        let r = request("commit", "key", None, serde_json::json!({"include_pdfs": true, "push_on_write": true, "zzz": 1}), None);
-        let c = cfg(&r);
-        assert!(c.include_pdfs && c.push_on_write);
+    fn initialize_reads_home_and_the_two_flags_and_config_changed_updates_them() {
+        let st = init(Some("/h"), serde_json::json!({}));
+        assert_eq!(st.home.as_deref(), Some(Path::new("/h")));
+        assert!(!st.include_pdfs && !st.push_on_write);
+        let mut st = init(None, serde_json::json!({"include_pdfs": true, "push_on_write": true, "zzz": 1}));
+        assert!(st.home.is_none() && st.include_pdfs && st.push_on_write);
+        let (r, out) = call(&mut st, "config/changed", serde_json::json!({"config": {"include_pdfs": false}}));
+        assert!(r.is_ok() && out.is_empty());
+        assert!(!st.include_pdfs && !st.push_on_write);
     }
 
     #[test]
-    fn a_hook_outside_a_repo_is_silent_and_a_command_explains() {
-        let hook = request("commit", "hook:after_write", None, serde_json::json!({}), Some(serde_json::json!({"reason": "add", "keys": ["a"]})));
-        assert_eq!(cmd_commit(&hook, &cfg(&hook)), Final::default());
-        let manual = request("commit", "key", None, serde_json::json!({}), None);
-        assert!(cmd_commit(&manual, &cfg(&manual)).error.unwrap().contains("portable home"));
-        let status = request("status", "key", None, serde_json::json!({}), None);
-        assert!(cmd_status(&status).error.unwrap().contains("portable home"));
+    fn an_event_outside_a_repo_is_silent_and_a_command_explains() {
+        let mut st = init(None, serde_json::json!({}));
+        let (r, out) = call(&mut st, "library/written", serde_json::json!({"reason": "add", "entries": [{"bibtex_key": "a"}]}));
+        assert_eq!(r.unwrap(), Value::Null);
+        assert!(out.is_empty(), "no message, no status: {}", out);
+        for cmd in ["commit", "status", "sync"] {
+            let (r, _) = call(&mut st, "commands/run", serde_json::json!({"command": cmd, "trigger": "key"}));
+            assert!(r.unwrap_err().message.contains("portable home"), "{}", cmd);
+        }
+        let (r, _) = call(&mut st, "nope/x", serde_json::json!({}));
+        assert_eq!(r.unwrap_err().code, crate::plugin::rpc::METHOD_NOT_FOUND);
     }
 
     #[test]
-    fn hook_message_is_built_from_reason_and_keys() {
-        let hook = serde_json::json!({"reason": "import", "keys": ["a", "b"]});
-        let r = request("commit", "hook:after_write", None, serde_json::json!({}), Some(hook));
-        assert_eq!(hook_commit_message(&r), "bibox: import 2 entries");
-        let r = request("commit", "hook:after_write", None, serde_json::json!({}), None);
-        assert_eq!(hook_commit_message(&r), "bibox: update");
+    fn written_messages_come_from_reason_and_keys_and_notes_name_the_entry() {
+        assert_eq!(written_message("library/written", &serde_json::json!({"reason": "import", "entries": [{"bibtex_key": "a"}, {"bibtex_key": "b"}]})), "bibox: import 2 entries");
+        assert_eq!(written_message("library/written", &serde_json::json!({})), "bibox: update");
+        assert_eq!(written_message("note/saved", &serde_json::json!({"entry": {"bibtex_key": "kim2025"}, "path": "/n/kim2025.md"})), "bibox: note kim2025");
+    }
+
+    /// 실제 저장소: written이 커밋하고, 원격이 없으니 ahead 조각은 빈칸으로 민다. 두 번째 written은 변경이 없어 커밋하지 않는다.
+    #[test]
+    fn a_written_event_commits_the_library_and_pushes_the_ahead_segment() {
+        let dir = repo_dir("written");
+        std::fs::write(dir.join("db.json"), "{}").unwrap();
+        let mut st = init(dir.to_str(), serde_json::json!({}));
+        let (r, out) = call(&mut st, "library/written", serde_json::json!({"reason": "add", "entries": [{"bibtex_key": "kim2025"}]}));
+        assert!(r.is_ok());
+        let g = Git { home: dir.clone() };
+        assert_eq!(g.ok(&["log", "--format=%s"]).unwrap(), "bibox: add kim2025");
+        assert!(out.contains("\"method\":\"status/set\"") && out.contains("\"field\":\"ahead\"") && out.contains("\"text\":\"\""), "{}", out);
+        let (_, _) = call(&mut st, "library/written", serde_json::json!({"reason": "edit", "entries": []}));
+        assert_eq!(g.ok(&["rev-list", "--count", "HEAD"]).unwrap(), "1", "nothing new to commit");
+        let (r, _) = call(&mut st, "commands/run", serde_json::json!({"command": "commit", "trigger": "key"}));
+        assert_eq!(r.unwrap()["message"], "nothing to commit");
+        let (r, _) = call(&mut st, "commands/run", serde_json::json!({"command": "status", "trigger": "key"}));
+        assert_eq!(r.unwrap()["message"], "no remote");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn the_manifest_declares_three_commands_and_one_hook() {
+    fn the_manifest_declares_three_commands_a_status_field_and_two_events() {
         let mut problems = vec![];
         let m = crate::plugin::manifest::parse_manifest_with(
             std::path::Path::new("/tmp/git-sync"),
-            "api = 1\nname = \"git-sync\"\nbuiltin = \"git-sync\"\n",
+            "api = 2\nname = \"git-sync\"\nbuiltin = \"git-sync\"\n",
             &mut problems,
             &[BUILTIN],
         )
         .unwrap();
+        assert!(problems.is_empty(), "{:?}", problems);
         assert_eq!(m.commands.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec!["commit", "sync", "status"]);
-        assert_eq!(m.hooks.len(), 1);
+        assert_eq!(m.events, vec!["library/written", "note/saved"]);
+        assert_eq!((m.fields[0].id.as_str(), m.fields[0].place.as_str()), ("ahead", "status"));
         assert_eq!(m.commands[1].key.as_ref().unwrap().len(), 2, "g s");
         assert_eq!(m.commands[2].key.as_ref().unwrap().len(), 2, "g t");
         assert!(m.commands[0].key.is_none(), "commit has no key");

@@ -1,18 +1,21 @@
-//! pdf-view 내장 플러그인. 미리보기 패널의 PDF 탭. 호스트가 "n쪽을 W픽셀 폭으로"라고 물으면
-//! poppler(`pdfinfo`, `pdftoppm`, `pdftotext`)로 PNG 또는 텍스트를 만든다. 스크롤·배율·캐시는 호스트 일.
+//! pdf-view 내장 플러그인. 미리보기 패널의 PDF 탭. 호스트가 `views/render`로 "n쪽을 W픽셀 폭으로"라고 물으면
+//! poppler(`pdfinfo`, `pdftoppm`, `pdftotext`)로 JPEG 또는 텍스트를 만든다. 스크롤·배율·캐시는 호스트 일.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::plugin::builtin::Builtin;
-use crate::plugin::protocol::{Final, Request, TabResponse};
+use serde_json::Value;
+
+use crate::plugin::protocol::{ViewParams, ViewResult};
+use crate::plugin::rpc::RpcError;
 use crate::plugin::serve::{serve, Ui};
 
-pub const MANIFEST: &str = r#"api = 1
+pub const MANIFEST: &str = r#"api = 2
 name = "pdf-view"
 description = "Show the attached PDF page by page in the preview panel"
 
-[[tabs]]
+[[views]]
 title = "PDF"
 run = "render"
 
@@ -46,8 +49,43 @@ const NO_TEXT: &str = "(no text on this page)";
 fn run() {
     // 지난 세션의 PNG. 호스트 캐시는 항목 하나뿐이라 디스크 것도 오래 둘 이유가 없다
     let _ = std::fs::remove_dir_all(cache_dir());
-    let mut handler = |req: &Request, ui: &mut Ui| handle(req, ui);
-    serve(&mut handler);
+    let mut st = State::default();
+    let mut handler = |method: &str, params: Value, _ui: &mut Ui| -> Result<Value, RpcError> { st.handle(method, params) };
+    serve("pdf-view", &mut handler);
+}
+
+/// initialize에서 받은 pdfs 디렉토리와 dpi_cap. `config/changed`가 dpi_cap만 바꾼다.
+#[derive(Default)]
+struct State {
+    pdfs: PathBuf,
+    dpi_cap: u32,
+}
+
+impl State {
+    fn set_config(&mut self, c: &Value) {
+        self.dpi_cap = c.get("dpi_cap").and_then(Value::as_u64).map(|v| v as u32).unwrap_or(300);
+    }
+
+    /// 뷰 렌더는 팝업을 열 수 없어 `Ui`를 쓰지 않는다.
+    fn handle(&mut self, method: &str, params: Value) -> Result<Value, RpcError> {
+        match method {
+            "initialize" => {
+                self.pdfs = params.pointer("/paths/pdfs").and_then(Value::as_str).map(PathBuf::from).unwrap_or_default();
+                self.set_config(params.get("config").unwrap_or(&Value::Null));
+                Ok(Value::Null)
+            }
+            "config/changed" => {
+                self.set_config(params.get("config").unwrap_or(&Value::Null));
+                Ok(Value::Null)
+            }
+            "views/render" => {
+                let p: ViewParams = serde_json::from_value(params).map_err(|e| RpcError::invalid_params(e.to_string()))?;
+                render(self, &p, &POPPLER).map(|r| serde_json::to_value(r).unwrap_or(Value::Null)).map_err(RpcError::plugin)
+            }
+            "commands/run" => Err(RpcError::plugin(NOT_A_TAB)),
+            other => Err(RpcError::method_not_found(other)),
+        }
+    }
 }
 
 pub(crate) fn cache_dir() -> PathBuf {
@@ -62,10 +100,6 @@ struct Tools {
 }
 
 const POPPLER: Tools = Tools { pdfinfo: "pdfinfo", pdftoppm: "pdftoppm", pdftotext: "pdftotext" };
-
-fn err(s: impl Into<String>) -> Final {
-    Final { error: Some(s.into()), ..Default::default() }
-}
 
 // ── 순수 함수 ────────────────────────────────────────────────────────────────
 
@@ -167,48 +201,28 @@ fn pdftoppm(tools: &Tools, pdf: &Path, page: u32, width_px: u32, prefix: &Path) 
 
 // ── 요청 처리 ────────────────────────────────────────────────────────────────
 
-/// 탭 명령은 팝업을 열 수 없어 `Ui`를 쓰지 않는다.
-pub(crate) fn handle(req: &Request, _ui: &mut Ui) -> Final {
-    render(req, &POPPLER)
-}
-
-fn render(req: &Request, tools: &Tools) -> Final {
-    if req.trigger != "tab" {
-        return Final { message: Some(NOT_A_TAB.to_string()), ..Default::default() };
-    }
-    let Some(tab) = &req.tab else { return err("no tab request") };
-    let Some(entry) = &req.context.entry else { return err("no entry selected") };
-    let Some(fp) = &entry.file_path else { return err("no PDF attached") };
-    let pdf = req.context.paths.pdfs.join(fp);
+fn render(st: &State, p: &ViewParams, tools: &Tools) -> Result<ViewResult, String> {
+    let Some(entry) = &p.entry else { return Err("no entry selected".to_string()) };
+    let Some(fp) = &entry.file_path else { return Err("no PDF attached".to_string()) };
+    let pdf = st.pdfs.join(fp);
     if !pdf.is_file() {
-        return err(format!("PDF not found: {}", pdf.display()));
+        return Err(format!("PDF not found: {}", pdf.display()));
     }
-    let info = match pdfinfo(tools, &pdf) {
-        Ok(i) => i,
-        Err(e) => return err(e),
-    };
-    let page = tab.page.clamp(1, info.pages.max(1));
-    let response = if !tab.images {
-        match pdftotext(tools, &pdf, page) {
-            Ok(lines) => TabResponse { lines: Some(lines), pages: Some(info.pages), ..Default::default() },
-            Err(e) => return err(e),
-        }
-    } else {
-        let cap = req.context.config.get("dpi_cap").and_then(|v| v.as_u64()).map(|v| v as u32).unwrap_or(300);
-        let width = render_width(tab.width_px, info.width_pt, cap);
-        let prefix = image_prefix(&cache_dir(), &entry.bibtex_key, page, tab.width_px);
-        match pdftoppm(tools, &pdf, page, width, &prefix) {
-            Ok(png) => TabResponse { image: Some(png), pages: Some(info.pages), ..Default::default() },
-            Err(e) => return err(e),
-        }
-    };
-    Final { tab: Some(response), ..Default::default() }
+    let info = pdfinfo(tools, &pdf)?;
+    let page = p.page.clamp(1, info.pages.max(1));
+    if !p.images {
+        let lines = pdftotext(tools, &pdf, page)?;
+        return Ok(ViewResult { lines: Some(lines), pages: Some(info.pages), ..Default::default() });
+    }
+    let width = render_width(p.width_px, info.width_pt, st.dpi_cap);
+    let prefix = image_prefix(&cache_dir(), &entry.bibtex_key, page, p.width_px);
+    let jpg = pdftoppm(tools, &pdf, page, width, &prefix)?;
+    Ok(ViewResult { image: Some(jpg), pages: Some(info.pages), ..Default::default() })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin::protocol::{Context, Paths, TabRequest};
 
     const INFO: &str = "Title:          x\nPages:          14\nPage size:      612 x 792 pts (letter)\nFile size:      1 bytes\n";
 
@@ -239,22 +253,12 @@ mod tests {
         assert_eq!(p, Path::new("/t/we_ird_key-1-1"), "keys never make directories");
     }
 
-    fn request(trigger: &str, entry: Option<crate::models::Entry>, tab: Option<TabRequest>, pdfs: &Path) -> Request {
-        Request {
-            r#type: "command".into(),
-            id: "render".into(),
-            trigger: trigger.into(),
-            context: Context {
-                focus: None,
-                collection: None,
-                entry,
-                entries: vec![],
-                config: serde_json::json!({}),
-                paths: Paths { config_dir: "/c".into(), db: "/h/db.json".into(), notes: "/h/notes".into(), pdfs: pdfs.to_path_buf(), home: None },
-                hook: None,
-            },
-            tab,
-        }
+    fn state(pdfs: &Path) -> State {
+        State { pdfs: pdfs.to_path_buf(), dpi_cap: 300 }
+    }
+
+    fn view(entry: Option<crate::models::Entry>, page: u32, width_px: u32, images: bool) -> ViewParams {
+        ViewParams { view: "render".into(), entry, page, width_px, images }
     }
 
     /// protocol.rs 테스트의 `entry()`와 같은 꼴. `Entry`에 생성자가 없다.
@@ -279,16 +283,19 @@ mod tests {
     }
 
     #[test]
-    fn a_key_binding_is_told_to_open_the_preview_and_missing_pdfs_are_errors() {
-        let f = render(&request("key", None, None, Path::new("/p")), &POPPLER);
-        assert_eq!(f.message.as_deref(), Some("pdf-view renders the PDF tab; open the preview panel"));
-        let tab = TabRequest { page: 1, width_px: 0, images: false };
-        let f = render(&request("tab", None, Some(tab.clone()), Path::new("/p")), &POPPLER);
-        assert_eq!(f.error.as_deref(), Some("no entry selected"));
-        let f = render(&request("tab", Some(entry_with(None)), Some(tab.clone()), Path::new("/p")), &POPPLER);
-        assert_eq!(f.error.as_deref(), Some("no PDF attached"));
-        let f = render(&request("tab", Some(entry_with(Some("gone.pdf"))), Some(tab), Path::new("/p")), &POPPLER);
-        assert!(f.error.as_deref().unwrap().starts_with("PDF not found: /p/gone.pdf"), "{:?}", f.error);
+    fn a_command_is_told_to_open_the_preview_and_missing_pdfs_are_errors() {
+        let mut st = state(Path::new("/p"));
+        let r = st.handle("commands/run", serde_json::json!({"command": "render", "trigger": "key"}));
+        assert_eq!(r.unwrap_err().message, "pdf-view renders the PDF tab; open the preview panel");
+        assert_eq!(render(&st, &view(None, 1, 0, false), &POPPLER).unwrap_err(), "no entry selected");
+        assert_eq!(render(&st, &view(Some(entry_with(None)), 1, 0, false), &POPPLER).unwrap_err(), "no PDF attached");
+        let e = render(&st, &view(Some(entry_with(Some("gone.pdf"))), 1, 0, false), &POPPLER).unwrap_err();
+        assert!(e.starts_with("PDF not found: /p/gone.pdf"), "{:?}", e);
+        let r = st.handle("initialize", serde_json::json!({"paths": {"pdfs": "/q"}, "config": {"dpi_cap": 72}}));
+        assert!(r.is_ok());
+        assert_eq!((st.pdfs.as_path(), st.dpi_cap), (Path::new("/q"), 72));
+        st.handle("config/changed", serde_json::json!({"config": {}})).unwrap();
+        assert_eq!(st.dpi_cap, 300, "missing dpi_cap falls back to the default");
     }
 
     /// 쪽마다 빈 MediaBox만 있는 PDF. xref 오프셋을 계산해 두어 poppler가 경고 없이 읽는다.
@@ -320,7 +327,7 @@ mod tests {
     }
 
     #[test]
-    fn with_poppler_a_tab_request_yields_text_or_a_jpeg_of_about_the_wanted_width() {
+    fn with_poppler_a_view_request_yields_text_or_a_jpeg_of_the_wanted_width() {
         if !poppler_present() {
             eprintln!("poppler not on PATH; skipping");
             return;
@@ -328,14 +335,13 @@ mod tests {
         let dir = scratch("poppler");
         write_pdf(&dir.join("two.pdf"), 2);
         let entry = entry_with(Some("two.pdf"));
-        let f = render(&request("tab", Some(entry.clone()), Some(TabRequest { page: 2, width_px: 0, images: false }), &dir), &POPPLER);
-        let t = f.tab.expect("tab response");
+        let st = state(&dir);
+        let t = render(&st, &view(Some(entry.clone()), 2, 0, false), &POPPLER).unwrap();
         assert_eq!(t.pages, Some(2));
         assert!(t.image.is_none());
         assert_eq!(t.lines.as_deref(), Some(&["(no text on this page)".to_string()][..]));
 
-        let f = render(&request("tab", Some(entry.clone()), Some(TabRequest { page: 9, width_px: 300, images: true }), &dir), &POPPLER);
-        let t = f.tab.expect("tab response");
+        let t = render(&st, &view(Some(entry.clone()), 9, 300, true), &POPPLER).unwrap();
         assert_eq!(t.pages, Some(2));
         let jpg = t.image.expect("jpeg path");
         assert!(jpg.starts_with(cache_dir()), "{}", jpg.display());
@@ -345,8 +351,8 @@ mod tests {
         assert_eq!(w, 300, "poppler scales to the exact width, so the host has nothing to resize");
         assert!(h > w, "portrait");
         let before = std::fs::metadata(&jpg).unwrap().modified().unwrap();
-        let f = render(&request("tab", Some(entry), Some(TabRequest { page: 2, width_px: 300, images: true }), &dir), &POPPLER);
-        assert_eq!(f.tab.unwrap().image.as_deref(), Some(jpg.as_path()));
+        let t = render(&st, &view(Some(entry), 2, 300, true), &POPPLER).unwrap();
+        assert_eq!(t.image.as_deref(), Some(jpg.as_path()));
         assert_eq!(std::fs::metadata(&jpg).unwrap().modified().unwrap(), before, "an existing jpeg is reused");
         let _ = std::fs::remove_file(&jpg);
     }
@@ -357,7 +363,7 @@ mod tests {
         write_pdf(&dir.join("one.pdf"), 1);
         // PATH를 바꾸면 병렬로 도는 다른 테스트의 `which`가 깨진다. 없는 프로그램 이름을 끼운다
         let tools = Tools { pdfinfo: "bibox-test-no-pdfinfo", pdftoppm: "bibox-test-no-pdftoppm", pdftotext: "bibox-test-no-pdftotext" };
-        let f = render(&request("tab", Some(entry_with(Some("one.pdf"))), Some(TabRequest { page: 1, width_px: 0, images: false }), &dir), &tools);
-        assert_eq!(f.error.as_deref(), Some(NEEDS_POPPLER));
+        let e = render(&state(&dir), &view(Some(entry_with(Some("one.pdf"))), 1, 0, false), &tools).unwrap_err();
+        assert_eq!(e, NEEDS_POPPLER);
     }
 }
