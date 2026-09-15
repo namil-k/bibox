@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::bibtex::{entries_to_bibtex, entry_to_filename};
 use crate::config::Config;
 use crate::crossref;
-use crate::hooks::WriteReason;
+use crate::events::WriteReason;
 use crate::interactive::{interactive_select, SelectItem};
 use crate::models::{Entry, EntryType};
 use crate::pdf;
@@ -25,68 +25,49 @@ fn db_path_from_config(config: &Config) -> PathBuf {
     crate::config::resolve_db_path(config)
 }
 
-/// CLI 저장 뒤 훅. 동기로 돌고 message/error는 stderr로, after 훅의 apply는 반영한다.
-/// git 커밋은 git-sync 내장 플러그인의 after_write 훅이 한다.
+/// CLI 저장 뒤 이벤트. 구독한 플러그인에게 알리고, 그들이 처리를 마치고 나갈 때까지 기다린다.
+/// git 커밋은 git-sync 내장 플러그인이 `library/written`을 받아서 한다.
 fn after_write(config: &Config, reason: WriteReason, affected: Vec<Entry>) {
-    let runner = crate::hooks::HookRunner::from_config(config);
-    for o in runner.after_write(reason, affected) {
-        report_hook_outcome(&runner, &o);
+    let events = crate::events::Events::from_config(config);
+    for o in events.written(reason, affected) {
+        report_outcome(&o);
     }
-    runner.host.shutdown();
+    events.finish_cli(&mut crate::plugin::CliSink);
 }
 
 fn after_note_save(config: &Config, entry: Entry, note_path: PathBuf) {
-    let runner = crate::hooks::HookRunner::from_config(config);
-    for o in runner.after_note_save(entry, note_path) {
-        report_hook_outcome(&runner, &o);
+    let events = crate::events::Events::from_config(config);
+    for o in events.note_saved(entry, note_path) {
+        report_outcome(&o);
     }
-    runner.host.shutdown();
+    events.finish_cli(&mut crate::plugin::CliSink);
 }
 
-/// `before_add`. 실패하면 경고를 내고 원래 항목으로 계속한다. 러너를 만들고 닫는다.
+/// `library/adding`. 실패하면 경고를 내고 원래 항목으로 계속한다. 호스트를 만들고 닫는다.
 fn run_before_add(config: &Config, entry: Entry) -> Entry {
-    let runner = crate::hooks::HookRunner::from_config(config);
-    let entry = run_before_add_with(&runner, entry);
-    runner.host.shutdown();
+    let events = crate::events::Events::from_config(config);
+    let entry = run_before_add_with(&events, entry);
+    events.host.shutdown();
     entry
 }
 
-/// `cmd_import`처럼 항목이 많을 때 러너 하나를 재사용한다.
-fn run_before_add_with(runner: &crate::hooks::HookRunner, entry: Entry) -> Entry {
-    if runner.host.hooks(crate::plugin::HookKind::BeforeAdd).is_empty() {
+/// `cmd_import`처럼 항목이 많을 때 호스트 하나를 재사용한다.
+fn run_before_add_with(events: &crate::events::Events, entry: Entry) -> Entry {
+    if events.host.subscribers("library/adding").is_empty() {
         return entry;
     }
-    let (entry, outcomes) = runner.before_add(entry, &mut crate::plugin::CliSink);
+    let (entry, outcomes) = events.adding(entry, &mut crate::plugin::CliSink);
     for o in &outcomes {
-        let failure = match &o.result {
-            Err(e) => Some(e.clone()),
-            Ok(f) => f.error.clone(),
-        };
-        if let Some(e) = failure {
-            eprintln!("bibox: warning: {} failed ({}); adding the entry unchanged", o.source, e);
+        if let Err(e) = &o.result {
+            eprintln!("bibox: warning: plugin {} failed ({}); adding the entry unchanged", o.plugin, e);
         }
     }
     entry
 }
 
-fn report_hook_outcome(runner: &crate::hooks::HookRunner, o: &crate::hooks::HookOutcome) {
-    match &o.result {
-        Err(e) => eprintln!("bibox: {}: {}", o.source, e),
-        Ok(f) => {
-            if let Some(e) = &f.error {
-                eprintln!("bibox: {}: {}", o.source, e);
-                return;
-            }
-            if let Some(apply) = &f.apply {
-                match crate::hooks::apply_from_hook(&runner.db_path, apply) {
-                    Ok(n) => eprintln!("bibox: {}: applied {} entries", o.source, n),
-                    Err(e) => eprintln!("bibox: {}: apply rejected: {}", o.source, e),
-                }
-            }
-            if let Some(m) = &f.message {
-                eprintln!("bibox: {}: {}", o.source, m);
-            }
-        }
+fn report_outcome(o: &crate::events::Outcome) {
+    if let Err(e) = &o.result {
+        eprintln!("bibox: plugin {}: {}", o.plugin, e);
     }
 }
 
@@ -1235,7 +1216,7 @@ pub fn cmd_import(file: PathBuf, to: Option<String>, config: &Config) -> Result<
 
     let mut added = 0;
     let mut pushed: Vec<Entry> = Vec::new();
-    let before_add_runner = crate::hooks::HookRunner::from_config(config);
+    let before_add_events = crate::events::Events::from_config(config);
     let mut merged: Vec<String> = vec![];
     let mut skipped: Vec<String> = vec![];
 
@@ -1357,12 +1338,12 @@ pub fn cmd_import(file: PathBuf, to: Option<String>, config: &Config) -> Result<
             updated_at: None,
         };
 
-        let entry = run_before_add_with(&before_add_runner, entry);
+        let entry = run_before_add_with(&before_add_events, entry);
         pushed.push(entry.clone());
         db.entries.push(entry);
         added += 1;
     }
-    before_add_runner.host.shutdown();
+    before_add_events.host.shutdown();
 
     save_db(&db, &db_path)?;
     after_write(config, WriteReason::Import, pushed);

@@ -9,7 +9,7 @@ mod citation;
 mod commands;
 mod config;
 mod crossref;
-mod hooks;
+mod events;
 mod i18n;
 mod interactive;
 mod keymap;
