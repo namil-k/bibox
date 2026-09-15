@@ -74,7 +74,7 @@ fn seeded_names(marker: &Path) -> HashSet<String> {
 /// `.seeded`에 없는 내장 이름마다 스텁을 만들고 이름을 적는다. 사용자가 지운 스텁은
 /// 이름이 남아 있어 다시 만들지 않는다. 쓰기에 실패하면 조용히 넘어간다.
 pub fn seed_builtins(plugins_dir: &Path) -> Vec<String> {
-    let names: Vec<&str> = builtin::BUILTINS.iter().map(|b| b.name).collect();
+    let names: Vec<&str> = builtin::BUILTINS.iter().filter(|b| b.seeded).map(|b| b.name).collect();
     seed_builtins_from(plugins_dir, &names)
 }
 
@@ -189,6 +189,16 @@ mod tests {
         assert_eq!(seed_builtins_from(&dir, &["demo", "other"]), vec!["other"]);
         assert!(dir.join("other/plugin.toml").exists());
         assert!(!dir.join("demo").exists());
+    }
+
+    /// pdf-view는 poppler가 필요해 기본으로 깔지 않는다. 원하는 사람이 Settings나 `plugin install pdf-view`로 켠다.
+    #[test]
+    fn only_builtins_marked_seeded_are_installed_by_default() {
+        let dir = temp("default-set");
+        let created = seed_builtins(&dir);
+        assert_eq!(created, vec!["git-sync"]);
+        assert!(!dir.join("pdf-view").exists());
+        assert!(builtin::find("pdf-view").is_some(), "still a built-in, just opt-in");
     }
 
     #[test]

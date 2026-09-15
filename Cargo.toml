@@ -24,7 +24,9 @@ default = ["tui"]
 tui = ["dep:ratatui", "dep:pulldown-cmark", "dep:ratatree", "dep:ratatui-image"]
 
 [dependencies]
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+flate2 = "1.1"
+base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

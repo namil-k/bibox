@@ -770,6 +770,7 @@ run = "python3 cli.py"
         name: "demo",
         manifest: "api = 1\nname = \"demo\"\ndescription = \"Demo plugin\"\n[[commands]]\nid = \"hello\"\ndesc = \"Say hello\"\nkey = \"<C-g>\"\n[[hooks]]\non = \"after_write\"\nrun = \"hello\"\n",
         run: noop,
+        seeded: true,
     }];
 
     const STUB: &str = "api = 1\nname = \"demo\"\nbuiltin = \"demo\"\n";

@@ -188,6 +188,7 @@ dependencies = [
  "anydoc",
  "anyhow",
  "arboard",
+ "base64",
  "chrono",
  "clap",
  "crossterm",
@@ -1478,6 +1479,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]

@@ -11,6 +11,8 @@ pub struct Builtin {
     pub manifest: &'static str,
     /// `serve()`를 부르는 진입점. 돌아오면 프로세스가 끝난다.
     pub run: fn(),
+    /// 첫 실행 때 스텁을 만들어 켤 것인가. 외부 도구가 필요한 것(pdf-view의 poppler)은 옵트인.
+    pub seeded: bool,
 }
 
 pub const BUILTINS: &[Builtin] = &[git_sync::BUILTIN, pdf_view::BUILTIN];

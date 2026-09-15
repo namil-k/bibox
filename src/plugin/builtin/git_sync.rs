@@ -43,7 +43,7 @@ on = "after_write"
 run = "commit"
 "#;
 
-pub const BUILTIN: Builtin = Builtin { name: "git-sync", manifest: MANIFEST, run };
+pub const BUILTIN: Builtin = Builtin { name: "git-sync", manifest: MANIFEST, run, seeded: true };
 
 fn run() {
     let mut handler = |req: &Request, ui: &mut Ui| handle(req, ui);

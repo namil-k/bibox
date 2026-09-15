@@ -33,7 +33,7 @@ default = 300
 desc = "Never rasterize above this dpi"
 "#;
 
-pub const BUILTIN: Builtin = Builtin { name: "pdf-view", manifest: MANIFEST, run };
+pub const BUILTIN: Builtin = Builtin { name: "pdf-view", manifest: MANIFEST, run, seeded: false };
 
 /// doctor가 PATH에서 찾는 도구들
 pub const TOOLS: [&str; 3] = ["pdfinfo", "pdftoppm", "pdftotext"];
@@ -91,17 +91,19 @@ pub(crate) fn parse_pdfinfo(out: &str) -> Option<Info> {
     pages.map(|pages| Info { pages, width_pt })
 }
 
-/// 원하는 픽셀 폭을 dpi로. 쪽 폭 pt를 72로 나눈 것이 인치. 1..=cap.
-pub(crate) fn dpi_for(width_px: u32, width_pt: f64, cap: u32) -> u32 {
-    if width_px == 0 || width_pt <= 0.0 {
-        return 72.min(cap.max(1));
+/// poppler에 시킬 픽셀 폭. 원하는 폭 그대로, 다만 `dpi_cap`을 넘는 폭은 잘라 낸다(쪽 폭 pt / 72 = 인치).
+/// 정확한 폭으로 받아야 호스트가 리사이즈할 일이 없다(2240px 쪽 하나에 80ms였다).
+pub(crate) fn render_width(width_px: u32, width_pt: f64, cap: u32) -> u32 {
+    let wanted = width_px.max(1);
+    if width_pt <= 0.0 {
+        return wanted;
     }
-    let dpi = (width_px as f64 * 72.0 / width_pt).round() as u32;
-    dpi.clamp(1, cap.max(1))
+    let max = (width_pt * cap.max(1) as f64 / 72.0).round().max(1.0) as u32;
+    wanted.min(max)
 }
 
-/// `<dir>/<key>-<page>-<width>`. `pdftoppm -singlefile`이 `.png`를 붙인다.
-pub(crate) fn png_prefix(dir: &Path, key: &str, page: u32, width_px: u32) -> PathBuf {
+/// `<dir>/<key>-<page>-<width>`. `pdftoppm -singlefile`이 `.jpg`를 붙인다.
+pub(crate) fn image_prefix(dir: &Path, key: &str, page: u32, width_px: u32) -> PathBuf {
     let safe: String = key.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' }).collect();
     dir.join(format!("{}-{}-{}", safe, page, width_px))
 }
@@ -142,22 +144,23 @@ fn pdftotext(tools: &Tools, pdf: &Path, page: u32) -> Result<Vec<String>, String
     Ok(lines)
 }
 
-/// 이미 있으면 다시 만들지 않는다.
-fn pdftoppm(tools: &Tools, pdf: &Path, page: u32, dpi: u32, prefix: &Path) -> Result<PathBuf, String> {
-    let png = prefix.with_extension("png");
-    if png.is_file() {
-        return Ok(png);
+/// 이미 있으면 다시 만들지 않는다. JPEG인 이유: poppler의 PNG 인코딩이 래스터화(0.02s)의 열 배(0.19s)였다.
+/// 품질 90은 글자 테두리를 확대해야 차이가 보이는 수준이고 쪽당 200KB 안팎.
+fn pdftoppm(tools: &Tools, pdf: &Path, page: u32, width_px: u32, prefix: &Path) -> Result<PathBuf, String> {
+    let jpg = prefix.with_extension("jpg");
+    if jpg.is_file() {
+        return Ok(jpg);
     }
     if let Some(dir) = prefix.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {}", dir.display(), e))?;
     }
     let p = page.to_string();
-    let r = dpi.to_string();
-    run_tool(tools.pdftoppm, &["-f", &p, "-l", &p, "-r", &r, "-png", "-singlefile", &pdf.to_string_lossy(), &prefix.to_string_lossy()])?;
-    if !png.is_file() {
-        return Err(format!("{} wrote nothing at {}", tools.pdftoppm, png.display()));
+    let w = width_px.to_string();
+    run_tool(tools.pdftoppm, &["-f", &p, "-l", &p, "-scale-to-x", &w, "-scale-to-y", "-1", "-jpeg", "-jpegopt", "quality=90", "-singlefile", &pdf.to_string_lossy(), &prefix.to_string_lossy()])?;
+    if !jpg.is_file() {
+        return Err(format!("{} wrote nothing at {}", tools.pdftoppm, jpg.display()));
     }
-    Ok(png)
+    Ok(jpg)
 }
 
 // ── 요청 처리 ────────────────────────────────────────────────────────────────
@@ -190,9 +193,9 @@ fn render(req: &Request, tools: &Tools) -> Final {
         }
     } else {
         let cap = req.context.config.get("dpi_cap").and_then(|v| v.as_u64()).map(|v| v as u32).unwrap_or(300);
-        let dpi = dpi_for(tab.width_px, info.width_pt, cap);
-        let prefix = png_prefix(&cache_dir(), &entry.bibtex_key, page, tab.width_px);
-        match pdftoppm(tools, &pdf, page, dpi, &prefix) {
+        let width = render_width(tab.width_px, info.width_pt, cap);
+        let prefix = image_prefix(&cache_dir(), &entry.bibtex_key, page, tab.width_px);
+        match pdftoppm(tools, &pdf, page, width, &prefix) {
             Ok(png) => TabResponse { image: Some(png), pages: Some(info.pages), ..Default::default() },
             Err(e) => return err(e),
         }
@@ -218,20 +221,19 @@ mod tests {
     }
 
     #[test]
-    fn dpi_follows_the_wanted_width_and_stops_at_the_cap() {
-        // 612pt = 8.5in. 850px wide -> 100dpi
-        assert_eq!(dpi_for(850, 612.0, 300), 100);
-        assert_eq!(dpi_for(8500, 612.0, 300), 300);
-        assert_eq!(dpi_for(0, 612.0, 300), 72, "zero width is not a division by zero");
-        assert_eq!(dpi_for(850, 0.0, 300), 72, "zero page width either");
-        assert!(dpi_for(10, 612.0, 300) >= 1);
+    fn render_width_is_the_wanted_width_until_the_dpi_cap() {
+        // 612pt = 8.5in. 300dpi면 2550px
+        assert_eq!(render_width(850, 612.0, 300), 850);
+        assert_eq!(render_width(8500, 612.0, 300), 2550, "capped at 300dpi");
+        assert_eq!(render_width(0, 612.0, 300), 1, "zero width is never asked of poppler");
+        assert_eq!(render_width(850, 0.0, 300), 850, "unknown page width means no cap");
     }
 
     #[test]
-    fn png_prefix_is_per_entry_page_and_width() {
-        let p = png_prefix(Path::new("/t"), "kim2025", 3, 840);
+    fn image_prefix_is_per_entry_page_and_width() {
+        let p = image_prefix(Path::new("/t"), "kim2025", 3, 840);
         assert_eq!(p, Path::new("/t/kim2025-3-840"));
-        let p = png_prefix(Path::new("/t"), "we/ird key", 1, 1);
+        let p = image_prefix(Path::new("/t"), "we/ird key", 1, 1);
         assert_eq!(p, Path::new("/t/we_ird_key-1-1"), "keys never make directories");
     }
 
@@ -316,7 +318,7 @@ mod tests {
     }
 
     #[test]
-    fn with_poppler_a_tab_request_yields_text_or_a_png_of_about_the_wanted_width() {
+    fn with_poppler_a_tab_request_yields_text_or_a_jpeg_of_about_the_wanted_width() {
         if !poppler_present() {
             eprintln!("poppler not on PATH; skipping");
             return;
@@ -333,17 +335,18 @@ mod tests {
         let f = render(&request("tab", Some(entry.clone()), Some(TabRequest { page: 9, width_px: 300, images: true }), &dir), &POPPLER);
         let t = f.tab.expect("tab response");
         assert_eq!(t.pages, Some(2));
-        let png = t.image.expect("png path");
-        assert!(png.starts_with(cache_dir()), "{}", png.display());
-        assert!(png.to_string_lossy().ends_with("kim2025-2-300.png"), "page past the end is clamped: {}", png.display());
-        let (w, h) = image::image_dimensions(&png).unwrap();
-        assert!((295..=305).contains(&w), "width {}", w);
+        let jpg = t.image.expect("jpeg path");
+        assert!(jpg.starts_with(cache_dir()), "{}", jpg.display());
+        // JPEG: poppler's PNG encoder alone took 0.19s of a 0.21s render (2026-09-15)
+        assert!(jpg.to_string_lossy().ends_with("kim2025-2-300.jpg"), "page past the end is clamped: {}", jpg.display());
+        let (w, h) = image::image_dimensions(&jpg).unwrap();
+        assert_eq!(w, 300, "poppler scales to the exact width, so the host has nothing to resize");
         assert!(h > w, "portrait");
-        let before = std::fs::metadata(&png).unwrap().modified().unwrap();
+        let before = std::fs::metadata(&jpg).unwrap().modified().unwrap();
         let f = render(&request("tab", Some(entry), Some(TabRequest { page: 2, width_px: 300, images: true }), &dir), &POPPLER);
-        assert_eq!(f.tab.unwrap().image.as_deref(), Some(png.as_path()));
-        assert_eq!(std::fs::metadata(&png).unwrap().modified().unwrap(), before, "an existing png is reused");
-        let _ = std::fs::remove_file(&png);
+        assert_eq!(f.tab.unwrap().image.as_deref(), Some(jpg.as_path()));
+        assert_eq!(std::fs::metadata(&jpg).unwrap().modified().unwrap(), before, "an existing jpeg is reused");
+        let _ = std::fs::remove_file(&jpg);
     }
 
     #[test]
