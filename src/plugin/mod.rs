@@ -1,5 +1,6 @@
 pub mod builtin;
 pub mod cli;
+pub mod fields;
 pub mod guide;
 pub mod host;
 pub mod manifest;
