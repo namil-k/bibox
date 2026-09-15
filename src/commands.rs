@@ -1203,7 +1203,8 @@ fn warnable_unmapped(
         .collect()
 }
 
-pub fn cmd_import(file: PathBuf, to: Option<String>, config: &Config) -> Result<()> {
+/// `--json`이면 stdout에는 결과 배열만(플러그인이 파싱한다), 경고는 stderr. `--dry-run`은 DB·PDF·이벤트를 안 건드린다.
+pub fn cmd_import(file: PathBuf, to: Option<String>, json: bool, dry_run: bool, config: &Config) -> Result<()> {
     let db_path = db_path_from_config(config);
     let mut db = load_db(&db_path)?;
 
@@ -1211,36 +1212,52 @@ pub fn cmd_import(file: PathBuf, to: Option<String>, config: &Config) -> Result<
         .with_context(|| config.msgs.file_read_failed(&file.to_string_lossy()))?;
 
     let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
-    let parsed = match ext.as_str() {
-        "ris" => parse_ris(&content),
-        _ => parse_bibtex(&content),
+    let (records, parsed_unmapped): (Vec<ImportRecord>, std::collections::BTreeMap<String, usize>) = match ext.as_str() {
+        "json" => (parse_json_import(&content)?, Default::default()),
+        "ris" => {
+            let p = parse_ris(&content);
+            (p.entries.into_iter().map(ImportRecord::from).collect(), p.unmapped)
+        }
+        _ => {
+            let p = parse_bibtex(&content);
+            (p.entries.into_iter().map(ImportRecord::from).collect(), p.unmapped)
+        }
     };
 
-    let before_add_events = crate::events::Events::from_config(config);
-    let mut ctx = ImportCtx { config, to, dry_run: false, events: Some(&before_add_events), pushed: Vec::new() };
-    let outcomes: Vec<ImportOutcome> = parsed
-        .entries
+    // dry-run은 플러그인을 안 띄운다(library/adding도 안 감)
+    let before_add_events = if dry_run { None } else { Some(crate::events::Events::from_config(config)) };
+    let mut ctx = ImportCtx { config, to, dry_run, events: before_add_events.as_ref(), pushed: Vec::new() };
+    let outcomes: Vec<ImportOutcome> = records
         .into_iter()
         .enumerate()
-        .map(|(i, raw)| import_record(&mut db, i, raw.into(), &mut ctx))
+        .map(|(i, rec)| import_record(&mut db, i, rec, &mut ctx))
         .collect();
     let pushed = std::mem::take(&mut ctx.pushed);
-    before_add_events.host.shutdown();
+    if let Some(ev) = &before_add_events {
+        ev.host.shutdown();
+    }
 
-    save_db(&db, &db_path)?;
-    after_write(config, WriteReason::Import, pushed);
+    if !dry_run {
+        save_db(&db, &db_path)?;
+        after_write(config, WriteReason::Import, pushed);
+    }
 
-    print_import_summary(config, &outcomes);
-
+    if json {
+        println!("{}", serde_json::to_string_pretty(&outcomes)?);
+    } else {
+        print_import_summary(config, &outcomes);
+        if dry_run {
+            println!("{}", config.msgs.dry_run_notice());
+        }
+    }
     // Warn about fields the parser saw but could not map (e.g. address, eprint),
     // filtering out known reference-manager cruft to avoid noise.
     let ignored: &[&str] = if ext == "ris" { RIS_IGNORED } else { BIBTEX_IGNORED };
-    let unmapped_names = warnable_unmapped(&parsed.unmapped, ignored);
+    let unmapped_names = warnable_unmapped(&parsed_unmapped, ignored);
     if !unmapped_names.is_empty() {
-        println!(
-            "{}",
-            config.msgs.unmapped_fields_warning(unmapped_names.len(), &unmapped_names.join(", "))
-        );
+        // --json이면 stdout은 결과 배열뿐이어야 한다
+        let msg = config.msgs.unmapped_fields_warning(unmapped_names.len(), &unmapped_names.join(", "));
+        if json { eprintln!("{}", msg) } else { println!("{}", msg) }
     }
 
     Ok(())
@@ -3916,7 +3933,14 @@ bibox import library.ris
 # Import into a collection
 bibox import refs.bib --to ml
 bibox import library.ris --to papers
+
+# Import from JSON (an array in the `bibox show --json` shape; `file` = absolute path of a PDF to copy,
+# `collections` may be nested "A/B"). --json prints [{"input", "key", "status": "added|merged|skipped", "reason"}]
+bibox import entries.json --json
+bibox import entries.json --dry-run --json   # same output, nothing written
 ```
+
+Duplicates: an entry with the same DOI, or the same title and year when it has no DOI, is merged (empty fields, tags, collections and a missing PDF are filled in) and reported as `merged` or `skipped`, never added twice. Re-running an import is safe.
 
 ## Export
 

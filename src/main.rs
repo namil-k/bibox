@@ -316,15 +316,23 @@ Examples:
         collection: String,
     },
 
-    /// Import entries from a BibTeX (.bib) or RIS (.ris) file
-    #[command(after_long_help = "Examples:\n  bibox import refs.bib\n  bibox import refs.bib --to ml\n  bibox import library.ris --to papers")]
+    /// Import entries from a BibTeX (.bib), RIS (.ris) or JSON (.json) file
+    #[command(after_long_help = "Examples:\n  bibox import refs.bib\n  bibox import refs.bib --to ml\n  bibox import library.ris --to papers\n  bibox import entries.json --json     # entries in the `bibox show --json` shape; `file` names a PDF to copy\n  bibox import entries.json --dry-run  # report what would happen, write nothing")]
     Import {
-        /// Path to .bib or .ris file
+        /// Path to .bib, .ris or .json file
         file: PathBuf,
 
         /// Assign all imported entries to a collection
         #[arg(long)]
         to: Option<String>,
+
+        /// Print one result per entry as JSON (key, status added|merged|skipped, reason)
+        #[arg(long)]
+        json: bool,
+
+        /// Report without writing the database or copying PDFs
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// Export entries as BibTeX, YAML, RIS, or CSV. Optionally include PDF files
@@ -772,8 +780,8 @@ async fn main() -> Result<()> {
             commands::cmd_uncollect(key, collection, &config)?;
         }
 
-        Some(Commands::Import { file, to }) => {
-            commands::cmd_import(file, to, &config)?;
+        Some(Commands::Import { file, to, json, dry_run }) => {
+            commands::cmd_import(file, to, json, dry_run, &config)?;
         }
 
         Some(Commands::Export {

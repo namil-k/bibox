@@ -296,17 +296,20 @@ Export your library as `.bib` or `.ris` from any reference manager, then:
 bibox import library.bib                     # Import from BibTeX
 bibox import library.ris                     # Import from RIS
 bibox import ml-papers.bib --to ml           # Import into a collection
+bibox import entries.json --json             # Import from JSON, one result line per entry
+bibox import entries.json --dry-run          # Say what would happen, write nothing
 ```
 
-Migrating from Zotero? Export each collection as a separate `.bib` or `.ris` and import with `--to`:
+An entry that is already in the library (same DOI, or same title and year when there is no DOI) is not added again: its empty fields, tags and collections are filled from the import instead. `--json` prints an array of `{"input", "key", "status": "added|merged|skipped", "reason"}`, which is what scripts and plugins read.
 
-```bash
-bibox import zotero-ml.bib --to ml
-bibox import zotero-cv.ris --to cv
-bibox import zotero-acl2025.bib --to digest/acl2025
+The `.json` form is the same shape as `bibox show --json`, with two extras: `collections` may hold nested paths (`"ML/NLP"`) and `file` names a PDF on disk that bibox copies into its pdf directory (`file_path` in a `show` dump is ignored). This is the door for any importer: the `zotero` plugin in this repository reads a Zotero database and feeds it one such file.
+
+```json
+[{"bibtex_key": "kim2025", "entry_type": "article", "title": "...", "author": ["Kim, Namil"], "year": 2025,
+  "doi": "10.1000/abc", "tags": ["fast"], "collections": ["ML/NLP"], "file": "/Users/me/Zotero/storage/ABCD1234/paper.pdf"}]
 ```
 
-Or just give the file to your agent. It'll handle it.
+Migrating from Zotero? `bibox plugin install namil-k/bibox/plugins/zotero`, then `bibox zotero import` (see the plugin's README). Without the plugin, export each collection as `.bib` or `.ris` and import with `--to`.
 
 **Export:**
 

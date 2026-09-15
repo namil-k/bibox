@@ -538,6 +538,13 @@ impl Msgs {
         }
     }
 
+    pub fn dry_run_notice(&self) -> &'static str {
+        match self.lang {
+            Lang::En => "Dry run: nothing was written.",
+            Lang::Ko => "미리 보기: 아무것도 쓰지 않았습니다.",
+        }
+    }
+
     pub fn import_complete(&self, n: usize) -> String {
         match self.lang {
             Lang::En => format!("Import complete: {} added", n),
