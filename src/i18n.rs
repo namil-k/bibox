@@ -999,6 +999,43 @@ impl Msgs {
         }
     }
 
+    // ── Settings > Keymap ──
+
+    pub fn press_new_key_for(&self, desc: &str) -> String {
+        match self.lang {
+            Lang::En => format!("Press the new key for \"{}\" (Enter to save, Backspace to undo one, Esc to cancel)", desc),
+            Lang::Ko => format!("\"{}\"의 새 키를 누르세요 (Enter 저장, Backspace 하나 지움, Esc 취소)", desc),
+        }
+    }
+
+    pub fn key_in_use(&self, key: &str, other: &str, layer: &str) -> String {
+        match self.lang {
+            Lang::En => format!("{} is \"{}\" in {}; pick another key", key, other, layer),
+            Lang::Ko => format!("{}는 {}에서 \"{}\"가 쓰고 있습니다. 다른 키를 고르세요", key, layer, other),
+        }
+    }
+
+    pub fn key_bound(&self, key: &str, desc: &str) -> String {
+        match self.lang {
+            Lang::En => format!("{} now runs \"{}\"", key, desc),
+            Lang::Ko => format!("{}가 \"{}\"를 실행합니다", key, desc),
+        }
+    }
+
+    pub fn key_unbound(&self, desc: &str) -> String {
+        match self.lang {
+            Lang::En => format!("\"{}\" has no key now", desc),
+            Lang::Ko => format!("\"{}\"에 키가 없습니다", desc),
+        }
+    }
+
+    pub fn key_back_to_default(&self, desc: &str, keys: &str) -> String {
+        match self.lang {
+            Lang::En => format!("\"{}\" is back to its default {}", desc, if keys.is_empty() { "(no key)" } else { keys }),
+            Lang::Ko => format!("\"{}\"를 기본 키 {}로 되돌렸습니다", desc, if keys.is_empty() { "(없음)" } else { keys }),
+        }
+    }
+
     pub fn takes_effect_next_start(&self) -> &'static str {
         match self.lang {
             Lang::En => "Saved. Takes effect on next start",

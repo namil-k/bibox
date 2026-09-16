@@ -11,17 +11,19 @@ pub enum Section {
     General,
     Appearance,
     Export,
+    Keymap,
     Plugins,
 }
 
 impl Section {
-    pub const ALL: [Section; 4] = [Section::General, Section::Appearance, Section::Export, Section::Plugins];
+    pub const ALL: [Section; 5] = [Section::General, Section::Appearance, Section::Export, Section::Keymap, Section::Plugins];
 
     pub fn label(self) -> &'static str {
         match self {
             Section::General => "General",
             Section::Appearance => "Appearance",
             Section::Export => "Export",
+            Section::Keymap => "Keymap",
             Section::Plugins => "Plugins",
         }
     }
@@ -587,10 +589,15 @@ pub enum Row {
     Header(String),
     Item(usize),
     Plugin(String),
+    /// Keymap 절의 행(`keymap::key_rows` 인덱스)
+    Key(usize),
 }
 
-/// 절 순서로, 소속이 바뀔 때마다 머리 줄. Plugins 절은 플러그인 행 묶음 뒤에 플러그인별 설정 묶음.
-pub fn search(items: &[Item], plugins: &[(String, String)], query: &str) -> Vec<Row> {
+/// Keymap 절 행의 검색 재료: (설명, run 이름, 키 문자열, 묶음).
+pub type KeyText = (String, String, String, String);
+
+/// 절 순서로, 소속이 바뀔 때마다 머리 줄. Keymap 절은 묶음(Navigation…)마다, Plugins 절은 플러그인 행 묶음 뒤에 플러그인별 설정 묶음.
+pub fn search(items: &[Item], plugins: &[(String, String)], keys: &[KeyText], query: &str) -> Vec<Row> {
     let toks = tokens(query);
     let mut out = Vec::new();
     for section in [Section::General, Section::Appearance, Section::Export] {
@@ -598,6 +605,16 @@ pub fn search(items: &[Item], plugins: &[(String, String)], query: &str) -> Vec<
         if !hits.is_empty() {
             out.push(Row::Header(section.label().to_string()));
             out.extend(hits.into_iter().map(Row::Item));
+        }
+    }
+    let mut last_group: Option<&str> = None;
+    for (i, (desc, name, keys_text, group)) in keys.iter().enumerate() {
+        if matches(&format!("keymap {} {} {} {}", group, desc, name, keys_text), &toks) {
+            if last_group != Some(group.as_str()) {
+                out.push(Row::Header(format!("{} > {}", Section::Keymap.label(), group)));
+                last_group = Some(group.as_str());
+            }
+            out.push(Row::Key(i));
         }
     }
     let plugin_hits: Vec<&(String, String)> = plugins.iter().filter(|(n, d)| matches(&format!("plugins {} {}", n, d), &toks)).collect();
@@ -841,8 +858,28 @@ mod tests {
                 Row::Header(h) => format!("# {}", h),
                 Row::Item(i) => items[*i].id.clone(),
                 Row::Plugin(p) => format!("@{}", p),
+                Row::Key(k) => format!("key{}", k),
             })
             .collect()
+    }
+
+    fn key_list() -> Vec<KeyText> {
+        vec![
+            ("Move focus to the Collections panel".into(), "focus_collections".into(), "h <Left>".into(), "Navigation".into()),
+            ("Open paper web page in browser".into(), "open_web".into(), "w".into(), "Entry actions".into()),
+            ("Open through your library (link1)".into(), "library-proxy.open".into(), "u".into(), "Plugins".into()),
+        ]
+    }
+
+    #[test]
+    fn search_finds_key_rows_by_desc_name_or_key_grouped_like_help() {
+        let items = items(&[manifest_with_settings()]);
+        assert_eq!(ids_of(&search(&items, &plugin_list(), &key_list(), "open_web"), &items), vec!["# Keymap > Entry actions", "key1"]);
+        assert_eq!(ids_of(&search(&items, &plugin_list(), &key_list(), "library-proxy"), &items), vec!["# Keymap > Plugins", "key2"]);
+        let rows = ids_of(&search(&items, &plugin_list(), &key_list(), "open"), &items);
+        assert_eq!(rows, vec!["# Keymap > Entry actions", "key1", "# Keymap > Plugins", "key2"]);
+        let rows = ids_of(&search(&items, &plugin_list(), &key_list(), "keymap focus"), &items);
+        assert_eq!(rows, vec!["# Keymap > Navigation", "key0"]);
     }
 
     #[test]
@@ -857,11 +894,11 @@ mod tests {
     #[test]
     fn search_groups_matches_by_section_and_plugin_in_order() {
         let items = items(&[manifest_with_settings()]);
-        let rows = search(&items, &plugin_list(), "push");
+        let rows = search(&items, &plugin_list(), &[], "push");
         assert_eq!(ids_of(&rows, &items), vec!["# Plugins > demo", "plugins.demo.push"]);
-        let rows = search(&items, &plugin_list(), "line");
+        let rows = search(&items, &plugin_list(), &[], "line");
         assert_eq!(ids_of(&rows, &items), vec!["# Appearance", "appearance.line_numbers"]);
-        let rows = search(&items, &plugin_list(), "demo/push");
+        let rows = search(&items, &plugin_list(), &[], "demo/push");
         assert_eq!(ids_of(&rows, &items), vec!["# Plugins > demo", "plugins.demo.push"]);
     }
 
@@ -869,14 +906,14 @@ mod tests {
     fn search_matches_descriptions_and_plugin_rows() {
         let items = items(&[manifest_with_settings()]);
         // "commit"은 demo 플러그인 설명과 push 설정의 desc("push after commit")에 있다
-        let rows = search(&items, &plugin_list(), "commit");
+        let rows = search(&items, &plugin_list(), &[], "commit");
         assert_eq!(ids_of(&rows, &items), vec!["# Plugins", "@demo", "# Plugins > demo", "plugins.demo.push"]);
     }
 
     #[test]
     fn an_empty_query_lists_everything_with_headers() {
         let items = items(&[manifest_with_settings()]);
-        let rows = search(&items, &plugin_list(), "");
+        let rows = search(&items, &plugin_list(), &[], "");
         let ids = ids_of(&rows, &items);
         assert_eq!(ids[0], "# General");
         assert!(ids.contains(&"# Appearance".to_string()) && ids.contains(&"# Export".to_string()));

@@ -23,13 +23,13 @@ menus = ["context"]
 id = "find"
 desc = "Find your library by name"
 help = "Searches a directory of 2,000 library proxies and link resolvers by name or country and saves the match as link1."
-menus = ["context"]
+menus = ["context", "settings"]
 
 [[commands]]
 id = "links"
 desc = "Manage links: order, add, remove"
 help = "Lists link1 to link5; pick one to make it the default, move it up or down, or remove it. Add by hand or from the directory."
-menus = ["context"]
+menus = ["context", "settings"]
 
 [[settings]]
 key = "link1"

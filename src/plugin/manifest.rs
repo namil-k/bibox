@@ -142,7 +142,7 @@ pub struct View {
 pub const EVENTS: [&str; 5] = ["lifecycle/started", "entry/selected", "library/adding", "library/written", "note/saved"];
 pub const PLACES: [&str; 5] = ["row.1", "row.2", "row.3", "status", "info"];
 pub const ALIGNS: [&str; 5] = ["right", "left", "after:key", "after:pdf", "after:year"];
-pub const MENUS: [&str; 1] = ["context"];
+pub const MENUS: [&str; 2] = ["context", "settings"];
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Command {
@@ -730,6 +730,18 @@ run = "python3 cli.py"
         assert_eq!(m.activation, Activation::Lazy);
         assert!(m.commands[0].menus.is_empty());
         assert!(m.fields.is_empty() && m.views.is_empty() && m.events.is_empty());
+    }
+
+    /// `settings`는 플러그인 페이지에 명령 행을 올린다. 다른 이름은 여전히 오류.
+    #[test]
+    fn menus_accept_settings_and_still_reject_unknown() {
+        let mut problems = vec![];
+        let m = parse_manifest(&dir("m"), "api = 2\nname = \"m\"\nrun = \"sh x\"\n[[commands]]\nid = \"go\"\ndesc = \"Go\"\nmenus = [\"context\", \"settings\"]\n", &mut problems).unwrap();
+        assert!(problems.is_empty(), "{:?}", problems);
+        assert_eq!(m.commands[0].menus, vec!["context", "settings"]);
+        let mut problems = vec![];
+        assert!(parse_manifest(&dir("m"), "api = 2\nname = \"m\"\nrun = \"sh x\"\n[[commands]]\nid = \"go\"\ndesc = \"Go\"\nmenus = [\"toolbar\"]\n", &mut problems).is_none());
+        assert!(format!("{:?}", problems).contains("context, settings"), "{:?}", problems);
     }
 
     /// 옛 이름은 새 이름을 알려주는 오류다. 우리 셋뿐이므로 이식하지 호환하지 않는다.

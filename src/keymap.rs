@@ -116,7 +116,7 @@ pub fn render_key(k: KeyPress) -> String {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Action {
     // ── 전역 (세 레이어 모두) ──
@@ -902,6 +902,231 @@ pub fn load_keymap(commands: &crate::plugin::PluginCommands) -> LoadReport {
     }
 }
 
+// ── Settings의 Keymap 절 ─────────────────────────────────────────────────────
+
+/// 도움말과 Keymap 절이 같은 순서로 묶는다.
+pub const SECTION_ORDER: &[&str] = &["Navigation", "Selection", "Entry actions", "Editing", "Search and sort", "Application", "Plugins"];
+
+/// keymap.toml의 `run`에 쓰는 이름. 내장은 snake_case, 플러그인은 `plugin.cmd`.
+pub fn action_name(a: Action, commands: &crate::plugin::PluginCommands) -> String {
+    match a {
+        Action::Plugin(id) => commands.get(id).map(|c| c.full_name()).unwrap_or_else(|| format!("{:?}", a)),
+        other => serde_json::to_value(other).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_else(|| format!("{:?}", other)),
+    }
+}
+
+/// Keymap 절의 한 줄: 동작 하나와 그것이 사는 패널, 기본 키, 지금 키.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KeyRow {
+    pub actions: Vec<Action>,
+    /// `run`에 쓰는 이름. 여러 동작이면 `, `로 잇는다.
+    pub name: String,
+    pub desc: String,
+    pub section: &'static str,
+    pub layers: Vec<LayerId>,
+    pub default_keys: Vec<Vec<KeyPress>>,
+    pub keys: Vec<Vec<KeyPress>>,
+}
+
+impl KeyRow {
+    pub fn keys_text(&self) -> String {
+        self.keys.iter().map(|ks| render_keys(ks)).collect::<Vec<_>>().join(" ")
+    }
+}
+
+pub fn render_keys(keys: &[KeyPress]) -> String {
+    keys.iter().map(|k| render_key(*k)).collect::<Vec<_>>().join("")
+}
+
+fn push_unique(v: &mut Vec<Vec<KeyPress>>, keys: &[KeyPress]) {
+    if !v.iter().any(|k| k == keys) {
+        v.push(keys.to_vec());
+    }
+}
+
+/// 기본 키맵의 동작마다 한 줄(Noop 제외), 그 뒤 플러그인 명령 전부(키가 없어도).
+/// `keys`는 `current`에서 그 동작이 사는 패널들의 키 합집합이라 사용자 리맵이 보인다.
+pub fn key_rows(current: &Keymap, commands: &crate::plugin::PluginCommands) -> Vec<KeyRow> {
+    let defaults = default_keymap();
+    let mut rows: Vec<KeyRow> = Vec::new();
+    for layer in [LayerId::Collections, LayerId::Entries, LayerId::Preview] {
+        for b in &defaults.layer(layer).bindings {
+            if b.actions.is_empty() || b.actions == vec![Action::Noop] || matches!(b.actions[0], Action::Plugin(_)) {
+                continue;
+            }
+            match rows.iter_mut().find(|r| r.actions == b.actions) {
+                Some(r) => {
+                    if !r.layers.contains(&layer) {
+                        r.layers.push(layer);
+                    }
+                    push_unique(&mut r.default_keys, &b.keys);
+                }
+                None => rows.push(KeyRow {
+                    actions: b.actions.clone(),
+                    name: b.actions.iter().map(|a| action_name(*a, commands)).collect::<Vec<_>>().join(", "),
+                    desc: b.desc.clone().unwrap_or_else(|| b.actions[0].desc().to_string()),
+                    section: b.actions[0].section(),
+                    layers: vec![layer],
+                    default_keys: vec![b.keys.clone()],
+                    keys: vec![],
+                }),
+            }
+        }
+    }
+    for (id, c) in commands.iter() {
+        rows.push(KeyRow {
+            actions: vec![Action::Plugin(id)],
+            name: c.full_name(),
+            desc: c.desc.clone(),
+            section: "Plugins",
+            layers: c.layers.clone(),
+            default_keys: c.key.iter().cloned().collect(),
+            keys: vec![],
+        });
+    }
+    for r in rows.iter_mut() {
+        for layer in &r.layers {
+            let bindings = &current.layer(*layer).bindings;
+            for b in bindings {
+                // 같은 키의 앞선 바인딩(prepend의 noop 등)에 가려진 것은 살아 있는 키가 아니다
+                let first = bindings.iter().find(|x| x.keys == b.keys);
+                if b.actions == r.actions && first.is_some_and(|f| f.actions == b.actions) {
+                    push_unique(&mut r.keys, &b.keys);
+                }
+            }
+        }
+    }
+    rows.sort_by_key(|r| SECTION_ORDER.iter().position(|s| *s == r.section).unwrap_or(usize::MAX));
+    rows
+}
+
+/// 바인딩의 사람용 이름: 파일의 `desc`, 없으면 플러그인 명령의 desc, 없으면 내장 설명.
+fn binding_desc(b: &Binding, commands: &crate::plugin::PluginCommands) -> String {
+    if let Some(d) = &b.desc {
+        return d.clone();
+    }
+    match b.actions.first() {
+        Some(Action::Plugin(id)) => commands.get(*id).map(|c| c.desc.clone()).unwrap_or_else(|| Action::Plugin(*id).desc().to_string()),
+        Some(a) => a.desc().to_string(),
+        None => String::new(),
+    }
+}
+
+/// `keys`를 `row`에 주면 그 동작이 사는 패널 중 어디서 누구와 부딪히는가. 같은 키, 또는 서로 접두사.
+pub fn conflict(current: &Keymap, row: &KeyRow, keys: &[KeyPress], commands: &crate::plugin::PluginCommands) -> Option<(LayerId, String)> {
+    if keys.is_empty() {
+        return None;
+    }
+    for layer in &row.layers {
+        let bindings = &current.layer(*layer).bindings;
+        for b in bindings {
+            if b.actions == row.actions || b.actions.is_empty() || b.actions == vec![Action::Noop] {
+                continue;
+            }
+            // 같은 키의 앞선 바인딩에 가려진 것(noop으로 죽인 기본 키)은 부딪히지 않는다
+            if bindings.iter().find(|x| x.keys == b.keys).is_some_and(|f| f.actions != b.actions) {
+                continue;
+            }
+            if b.keys == keys || b.keys.starts_with(keys) || keys.starts_with(&b.keys) {
+                return Some((*layer, binding_desc(b, commands)));
+            }
+        }
+    }
+    None
+}
+
+fn layer_key(layer: LayerId) -> &'static str {
+    match layer {
+        LayerId::Collections => "collections",
+        LayerId::Entries => "entries",
+        LayerId::Preview => "preview",
+    }
+}
+
+fn on_value(keys: &[KeyPress]) -> toml::Value {
+    if keys.len() == 1 {
+        toml::Value::String(render_key(keys[0]))
+    } else {
+        toml::Value::Array(keys.iter().map(|k| toml::Value::String(render_key(*k))).collect())
+    }
+}
+
+fn on_matches(v: Option<&toml::Value>, keys: &[KeyPress]) -> bool {
+    match v {
+        Some(toml::Value::String(s)) => keys.len() == 1 && s == &render_key(keys[0]),
+        Some(toml::Value::Array(a)) => a.len() == keys.len() && a.iter().zip(keys).all(|(x, k)| x.as_str() == Some(render_key(*k).as_str())),
+        _ => false,
+    }
+}
+
+fn run_is(v: Option<&toml::Value>, name: &str) -> bool {
+    match v {
+        Some(toml::Value::String(s)) => s == name,
+        Some(toml::Value::Array(a)) => a.iter().map(|x| x.as_str().unwrap_or("")).collect::<Vec<_>>().join(", ") == name,
+        _ => false,
+    }
+}
+
+/// `row`의 키를 keymap.toml에 쓴다. 그 동작이 사는 패널마다 `prepend_keymap`에서 이 동작을 묶는
+/// 항목과 기본 키를 죽이는 `noop` 항목을 걷어낸 뒤, `Some(keys)`면 새 키(빈 목록이면 안 묶음)와
+/// 남은 기본 키의 `noop`을 앞에 넣는다. `None`은 걷어내기만 해서 기본으로 돌아간다.
+/// 사용자가 손으로 적은 다른 항목과 표는 그대로 둔다(주석은 남지 않는다).
+pub fn write_keys(path: &std::path::Path, row: &KeyRow, keys: Option<&[KeyPress]>) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let mut root: toml::Table = match std::fs::read_to_string(path) {
+        Ok(text) => text.parse().with_context(|| format!("{} is not valid TOML; fix it by hand first", path.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
+        Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
+    };
+    for layer in &row.layers {
+        let normal = root.entry("normal").or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        let normal = normal.as_table_mut().ok_or_else(|| anyhow::anyhow!("[normal] is not a table"))?;
+        let table = normal.entry(layer_key(*layer)).or_insert_with(|| toml::Value::Table(toml::Table::new()));
+        let table = table.as_table_mut().ok_or_else(|| anyhow::anyhow!("[normal.{}] is not a table", layer_key(*layer)))?;
+        let list = table.entry("prepend_keymap").or_insert_with(|| toml::Value::Array(vec![]));
+        let list = list.as_array_mut().ok_or_else(|| anyhow::anyhow!("prepend_keymap is not a list"))?;
+        list.retain(|entry| {
+            let t = entry.as_table();
+            let ours_bind = t.is_some_and(|t| run_is(t.get("run"), &row.name));
+            let ours_noop = t.is_some_and(|t| run_is(t.get("run"), "noop") && row.default_keys.iter().any(|d| on_matches(t.get("on"), d)));
+            !(ours_bind || ours_noop)
+        });
+        if let Some(keys) = keys {
+            let mut fresh: Vec<toml::Value> = Vec::new();
+            if !keys.is_empty() {
+                let mut t = toml::Table::new();
+                t.insert("on".into(), on_value(keys));
+                t.insert("run".into(), toml::Value::String(row.name.clone()));
+                fresh.push(toml::Value::Table(t));
+            }
+            for d in &row.default_keys {
+                if d.as_slice() != keys {
+                    let mut t = toml::Table::new();
+                    t.insert("on".into(), on_value(d));
+                    t.insert("run".into(), toml::Value::String("noop".into()));
+                    fresh.push(toml::Value::Table(t));
+                }
+            }
+            fresh.append(list);
+            *list = fresh;
+        }
+        if list.is_empty() {
+            table.remove("prepend_keymap");
+        }
+        if table.is_empty() {
+            normal.remove(layer_key(*layer));
+        }
+        if normal.is_empty() {
+            root.remove("normal");
+        }
+    }
+    let text = toml::to_string_pretty(&root).context("serialize keymap.toml")?;
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, text).with_context(|| format!("cannot write {}", tmp.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("cannot replace {}", path.display()))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1515,5 +1740,151 @@ mod tests {
             assert_eq!(resolve(layer, &[], kp("Y")), Resolution::Run(vec![Action::CopyCitation]));
         }
         assert_eq!(Action::CopyCitation.section(), "Entry actions");
+    }
+
+    // ── Settings의 Keymap 절 ──
+
+    fn keys_text(v: &[Vec<KeyPress>]) -> Vec<String> {
+        v.iter().map(|ks| ks.iter().map(|k| render_key(*k)).collect::<Vec<_>>().join("")).collect()
+    }
+
+    #[test]
+    fn render_key_round_trips_through_parse_key() {
+        for t in ["<C-r>", "<Space>", "g", "G", "<F1>", "<Esc>", "<Tab>", "<A-x>", "<S-Tab>", "[", "?"] {
+            let k = parse_key(t).unwrap();
+            assert_eq!(parse_key(&render_key(k)).unwrap(), k, "{}", t);
+        }
+    }
+
+    #[test]
+    fn key_rows_have_one_row_per_default_action_with_layers_and_keys() {
+        let commands = crate::plugin::PluginCommands::default();
+        let current = load_keymap_from_str("", &commands).keymap;
+        let rows = key_rows(&current, &commands);
+        let web = rows.iter().find(|r| r.actions == vec![Action::OpenWeb]).expect("OpenWeb row");
+        assert_eq!(web.name, "open_web");
+        assert_eq!(web.layers, vec![LayerId::Collections, LayerId::Entries, LayerId::Preview], "global keys live in every panel");
+        assert_eq!(keys_text(&web.keys), vec!["w"]);
+        assert_eq!(keys_text(&web.default_keys), vec!["w"]);
+        let down = rows.iter().find(|r| r.actions == vec![Action::EntryDown]).unwrap();
+        assert_eq!(down.layers, vec![LayerId::Entries]);
+        assert_eq!(keys_text(&down.keys), vec!["j", "<Down>"]);
+        assert_eq!(rows.iter().filter(|r| r.actions == vec![Action::EntryDown]).count(), 1, "one row, not one per key");
+        assert!(rows.iter().all(|r| r.actions != vec![Action::Noop]));
+        let sections: Vec<&str> = rows.iter().map(|r| r.section).collect();
+        let mut sorted = sections.clone();
+        sorted.sort_by_key(|s| SECTION_ORDER.iter().position(|x| x == s));
+        assert_eq!(sections, sorted, "grouped like the help screen");
+    }
+
+    #[test]
+    fn key_rows_list_plugin_commands_even_without_a_key_and_show_a_user_remap() {
+        let commands = cmds(&[("lp", "open", Some("u"), &[LayerId::Entries, LayerId::Preview]), ("lp", "find", None, &[LayerId::Entries])]);
+        let current = load_keymap_from_str("[normal.entries]\nprepend_keymap = [ { on = \"x\", run = \"lp.open\" }, { on = \"u\", run = \"noop\" } ]\n", &commands).keymap;
+        let rows = key_rows(&current, &commands);
+        let open = rows.iter().find(|r| r.name == "lp.open").expect("plugin row");
+        assert_eq!(open.section, "Plugins");
+        assert_eq!(open.desc, "open desc");
+        assert_eq!(open.layers, vec![LayerId::Entries, LayerId::Preview]);
+        assert_eq!(keys_text(&open.default_keys), vec!["u"]);
+        assert_eq!(keys_text(&open.keys), vec!["x", "u"], "x from entries, u still live in preview");
+        let find = rows.iter().find(|r| r.name == "lp.find").expect("keyless plugin row");
+        assert!(find.keys.is_empty() && find.default_keys.is_empty());
+        // 사는 패널 전부에서 옛 키를 죽였으면 새 키만 남는다
+        let commands = cmds(&[("lp", "open", Some("u"), &[LayerId::Entries])]);
+        let current = load_keymap_from_str("[normal.entries]\nprepend_keymap = [ { on = \"x\", run = \"lp.open\" }, { on = \"u\", run = \"noop\" } ]\n", &commands).keymap;
+        let rows = key_rows(&current, &commands);
+        assert_eq!(keys_text(&rows.iter().find(|r| r.name == "lp.open").unwrap().keys), vec!["x"], "the shadowed default is not a live key");
+    }
+
+    #[test]
+    fn conflict_sees_same_key_and_prefix_in_any_layer_the_action_lives_in() {
+        let commands = cmds(&[("lp", "open", Some("u"), &[LayerId::Entries, LayerId::Preview]), ("gs", "sync", Some("g s"), &[LayerId::Entries])]);
+        let current = load_keymap_from_str("", &commands).keymap;
+        let rows = key_rows(&current, &commands);
+        let open = rows.iter().find(|r| r.name == "lp.open").unwrap();
+        assert_eq!(conflict(&current, open, &[kp("w")], &commands), Some((LayerId::Entries, Action::OpenWeb.desc().to_string())));
+        assert_eq!(conflict(&current, open, &[kp("p")], &commands).map(|(l, _)| l), Some(LayerId::Preview), "p is free in entries but pages in preview");
+        assert_eq!(conflict(&current, open, &[kp("g")], &commands), Some((LayerId::Entries, Action::EntryTop.desc().to_string())), "g is the prefix of g g");
+        assert_eq!(conflict(&current, open, &[kp("g"), kp("s")], &commands).map(|(_, d)| d), Some("sync desc".to_string()), "same sequence as another plugin");
+        assert_eq!(conflict(&current, open, &[kp("u")], &commands), None, "its own key is not a conflict");
+        assert_eq!(conflict(&current, open, &[kp("x")], &commands), None);
+        let top = rows.iter().find(|r| r.actions == vec![Action::EntryTop]).unwrap();
+        assert_eq!(conflict(&current, top, &[kp("g"), kp("s")], &commands).map(|(_, d)| d), Some("sync desc".to_string()));
+        // u를 noop으로 죽인 뒤에는 u가 비어 있다
+        let commands = cmds(&[("lp", "open", Some("u"), &[LayerId::Entries]), ("lp", "find", None, &[LayerId::Entries])]);
+        let current = load_keymap_from_str("[normal.entries]\nprepend_keymap = [ { on = \"x\", run = \"lp.open\" }, { on = \"u\", run = \"noop\" } ]\n", &commands).keymap;
+        let rows = key_rows(&current, &commands);
+        let find = rows.iter().find(|r| r.name == "lp.find").unwrap();
+        assert_eq!(conflict(&current, find, &[kp("u")], &commands), None, "a key freed by noop can be given to another action");
+        assert_eq!(conflict(&current, find, &[kp("x")], &commands).map(|(_, d)| d), Some("open desc".to_string()));
+    }
+
+    fn tmp_keymap(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("bibox-keymap-write-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d.join("keymap.toml")
+    }
+
+    #[test]
+    fn write_keys_prepends_the_key_and_noops_the_defaults_in_every_layer() {
+        let commands = cmds(&[("lp", "open", Some("u"), &[LayerId::Entries, LayerId::Preview])]);
+        let current = load_keymap_from_str("", &commands).keymap;
+        let rows = key_rows(&current, &commands);
+        let open = rows.iter().find(|r| r.name == "lp.open").unwrap();
+        let path = tmp_keymap("prepend");
+        std::fs::write(&path, "# mine\n[normal.entries]\nprepend_keymap = [ { on = \"m\", run = \"lp.open\" }, { on = \"d\", run = \"noop\" } ]\n").unwrap();
+        write_keys(&path, open, Some(&[kp("x")])).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let r = load_keymap_from_str(&text, &commands);
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        for layer in [LayerId::Entries, LayerId::Preview] {
+            assert_eq!(resolve(r.keymap.layer(layer), &[], kp("x")), Resolution::Run(vec![Action::Plugin(commands.find("lp.open").unwrap())]), "{:?}", layer);
+            assert_eq!(resolve(r.keymap.layer(layer), &[], kp("u")), Resolution::Run(vec![Action::Noop]), "old default is dead in {:?}", layer);
+        }
+        assert_eq!(resolve(&r.keymap.entries, &[], kp("m")), Resolution::Unbound, "our earlier binding of the same action was replaced");
+        assert_eq!(resolve(&r.keymap.entries, &[], kp("d")), Resolution::Run(vec![Action::Noop]), "a noop the user wrote for another key stays");
+        assert_eq!(text.matches("lp.open").count(), 2, "one entry per layer:\n{}", text);
+    }
+
+    #[test]
+    fn write_keys_none_removes_only_our_entries_and_a_multi_key_sequence_is_written_as_a_list() {
+        let commands = cmds(&[("lp", "open", Some("u"), &[LayerId::Entries])]);
+        let current = load_keymap_from_str("", &commands).keymap;
+        let rows = key_rows(&current, &commands);
+        let open = rows.iter().find(|r| r.name == "lp.open").unwrap();
+        let path = tmp_keymap("reset");
+        write_keys(&path, open, Some(&[kp("g"), kp("x")])).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("on = [") && text.contains("\"g\",") && text.contains("\"x\","), "a sequence is an array:\n{}", text);
+        let r = load_keymap_from_str(&text, &commands);
+        assert_eq!(resolve(&r.keymap.entries, &[kp("g")], kp("x")), Resolution::Run(vec![Action::Plugin(commands.find("lp.open").unwrap())]));
+        // 사용자가 손으로 적은 다른 줄과 함께
+        std::fs::write(&path, format!("{}\n[normal.preview]\nprepend_keymap = [ {{ on = \"z\", run = \"help\" }} ]\n", text)).unwrap();
+        write_keys(&path, open, None).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let r = load_keymap_from_str(&text, &commands);
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert_eq!(resolve(&r.keymap.entries, &[], kp("u")), Resolution::Run(vec![Action::Plugin(commands.find("lp.open").unwrap())]), "default is back");
+        assert_eq!(resolve(&r.keymap.entries, &[kp("g")], kp("x")), Resolution::Unbound);
+        assert_eq!(resolve(&r.keymap.preview, &[], kp("z")), Resolution::Run(vec![Action::Help]), "the user's own line survives:\n{}", text);
+        assert!(!text.contains("lp.open"), "{}", text);
+        assert!(!text.contains("[normal.entries]"), "an emptied layer table is dropped:\n{}", text);
+    }
+
+    #[test]
+    fn write_keys_with_an_empty_list_unbinds_and_refuses_a_broken_file() {
+        let commands = crate::plugin::PluginCommands::default();
+        let current = load_keymap_from_str("", &commands).keymap;
+        let rows = key_rows(&current, &commands);
+        let web = rows.iter().find(|r| r.actions == vec![Action::OpenWeb]).unwrap();
+        let path = tmp_keymap("unbind");
+        write_keys(&path, web, Some(&[])).unwrap();
+        let r = load_keymap_from_str(&std::fs::read_to_string(&path).unwrap(), &commands);
+        assert_eq!(resolve(&r.keymap.entries, &[], kp("w")), Resolution::Run(vec![Action::Noop]));
+        std::fs::write(&path, "[normal.entries\nthis is not toml").unwrap();
+        assert!(write_keys(&path, web, None).is_err(), "never overwrite a file we cannot read");
+        assert!(std::fs::read_to_string(&path).unwrap().starts_with("[normal.entries\n"));
     }
 }

@@ -4075,7 +4075,7 @@ push_on_write = false
 
 ## Plugins
 
-A plugin is a directory under `<config_dir>/bibox/plugins/<name>/` with a `plugin.toml` and a program in any language. bibox starts it once and talks JSON-RPC 2.0 over its stdin/stdout, one message per line (no Content-Length header). A plugin can add commands (keys, right-click menu items), fields in entry rows, the Info tab and the status bar, preview tabs (views), settings, and subscribe to events (`library/adding`, `library/written`, `note/saved`, `entry/selected`, `lifecycle/started`). A plugin with a `[cli]` section is run from the shell as `bibox <name> <args>`, with your stdin and stdout.
+A plugin is a directory under `<config_dir>/bibox/plugins/<name>/` with a `plugin.toml` and a program in any language. bibox starts it once and talks JSON-RPC 2.0 over its stdin/stdout, one message per line (no Content-Length header). A plugin can add commands (keys, right-click menu items with `menus = ["context"]`, rows on its Settings page with `menus = ["settings"]`; `desc` is the label, `help` the longer text there), fields in entry rows, the Info tab and the status bar, preview tabs (views), settings, and subscribe to events (`library/adding`, `library/written`, `note/saved`, `entry/selected`, `lifecycle/started`). A plugin with a `[cli]` section is run from the shell as `bibox <name> <args>`, with your stdin and stdout.
 
 **Installed plugins and how to use them are listed at the end of this guide** (generated from what is installed right now; `bibox agent-guide --json` puts the same list in the `installed` array with each plugin's commands, fields, views, events, settings and the usage notes its author wrote in `guide = "AGENT.md"`). Read that section before calling a plugin's CLI.
 

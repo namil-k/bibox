@@ -19,7 +19,7 @@ use crate::plugin::rpc::{self, Id, Message, RpcError};
 
 /// 로드 시 만들어지는 명령 테이블의 인덱스. `Action::Plugin(PluginCmdId)`가 이걸 들고
 /// 있으므로 `Action`이 `Copy`를 유지한다.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
 pub struct PluginCmdId(pub u16);
 
 #[derive(Debug, Clone, PartialEq)]

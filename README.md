@@ -40,7 +40,7 @@ For humans: browse and edit in the TUI. For agents: manage entries and notes thr
 - **Templates** - Built-in and custom note templates with `{{variable}}` substitution
 - **Doctor** - `bibox doctor` diagnoses and auto-repairs DB issues (bad citekeys, LaTeX escapes, orphaned files) and checks keymap, theme, plugin manifests and settings
 - **Plugins** - Any program becomes a bibox command, a context-menu item, a cell in every entry row or the status bar, an event subscriber, a preview tab or a `bibox <name>` subcommand, with its own settings in the Settings screen. Declared by `plugin.toml`, talks JSON-RPC over stdin/stdout, can open bibox's own popups. Install from any GitHub repository or git URL. Built-in plugins ship inside the binary: git-sync (on by default) and pdf-view (opt-in); the `citations` example plugin puts Crossref counts in every row.
-- **Settings screen** - `,` opens sections, values, descriptions and a search box; changes are saved as you make them
+- **Settings screen** - `,` opens sections, values, descriptions and a search box; changes are saved as you make them. Its Keymap section assigns keys to every built-in action and plugin command by pressing them, refusing a key another action already uses
 - **Themes** - `dark`, `light`, or any VS Code color theme file dropped into `themes/`
 
 ## Install
@@ -212,6 +212,8 @@ prepend_keymap = [
 **Layers.** The Normal mode splits by which panel has focus: `[normal.collections]`, `[normal.entries]` and `[normal.preview]`. The layers are independent, so a key that should work in every panel has to be written in every layer. That is also why the help screen shows only what is live in the panel you are in.
 
 **Merging.** Each layer's effective list is `prepend_keymap` + the defaults + `append_keymap`, and lookup takes the first match. So `prepend_keymap` overrides a default, `append_keymap` adds to it, and `clear_defaults = true` drops the defaults for that layer only.
+
+**From the Settings screen.** `,` then Keymap lists every action grouped as in the help screen, with its live keys. `Enter` on a row asks you to press the new key (press two for a sequence such as `g s`, `Enter` to save, `Backspace` to undo one, an empty answer unbinds), `d` puts the default back. A key that another action already uses in any panel the action lives in is refused with the name of that action. Each change is written to `keymap.toml` as `prepend_keymap` entries (the new key, plus `noop` for the default key it replaces) in every layer the action lives in, so the file stays yours to edit; comments in it are not kept, and a key that should differ per panel is still a file edit. The help screen and status bar follow immediately.
 
 **Fields.** `on` takes one key or a list for a sequence. `run` takes one action or a list to run in order. `desc` is optional and replaces the description shown in help. `noop` disables a key.
 
@@ -450,7 +452,7 @@ pdf_dir = "~/Library/Mobile Documents/com~apple~CloudDocs/bibox-pdfs"  # iCloud
 
 A plugin is a directory with a `plugin.toml` and a program in any language. bibox starts the program once (on first use, or with the TUI if it asks), keeps it running while the TUI is open, and talks to it over JSON-RPC 2.0, one message per line on stdin/stdout, the same shape as an editor talking to a language server. A plugin declares what it contributes:
 
-- **commands**: a key and a right-click menu item that run a function in the plugin (`commands/run`)
+- **commands**: a key, a right-click menu item (`menus = ["context"]`) or a row on the plugin's Settings page (`menus = ["settings"]`) that run a function in the plugin (`commands/run`); `desc` is the label everywhere, `help` the longer text in the Settings page
 - **fields**: a text cell in every entry row (`place = "row.1"`, `align = "right"` or `after:key`), a line in the Info tab (`place = "info"`, labelled by `desc`) or a segment in the status bar (`place = "status"`), filled on demand (`fields/get`) or pushed any time (`fields/set`, `status/set`)
 - **views**: a tab in the preview panel, rendered one page at a time (`views/render`; the PDF tab is one)
 - **events**: `library/adding` (may rewrite the entry before it is saved), `library/written`, `note/saved`, `entry/selected`, `lifecycle/started`
@@ -470,7 +472,7 @@ Anyone can publish one: push the directory to a repository and others install it
 
 **Install.** `bibox plugin install namil-k/bibox/plugins/citations` clones from GitHub, `bibox plugin install ./my-plugin` symlinks a local directory, `bibox plugin list` shows what is installed and where it came from (`built-in`, `local`, `git`, `dir`), `bibox plugin remove <name>` deletes it. Turning a plugin off is removing it; a built-in comes back with `bibox plugin install <name>` and needs no network. Installing from a repository shows where the code comes from and what it runs, then asks. Nobody has reviewed code that is not in a registry.
 
-**In the TUI.** `,` then Plugins lists what is installed and which built-in plugins are not. `Enter` opens a plugin page: description, an `Installed` toggle (`h`/`l`; removing an external plugin asks first), the settings the plugin declares, and its commands (with their keys) which `Enter` runs from right there, coming back to the page when the command is done. `Install from…` at the end of the list takes `owner/repo`, a git URL or a local path and shows the same confirmation as the CLI.
+**In the TUI.** `,` then Plugins lists what is installed and which built-in plugins are not. `Enter` opens a plugin page: description, an `Installed` toggle (`h`/`l`; removing an external plugin asks first), the settings the plugin declares, and the commands the plugin put in `menus = ["settings"]`, which `Enter` runs from right there, coming back to the page when the command is done. What these rows say is the plugin's: `description` at the top, each command's `desc`, its `help` in the box below (bibox falls back to `Enter runs <plugin>.<command>`), each setting's `desc`. `Install from…` at the end of the list takes `owner/repo`, a git URL or a local path and shows the same confirmation as the CLI.
 
 **Write one.** `bibox plugin new my-plugin` creates a working skeleton with a Python helper (`serve`, `window`, `status`, `fields`, `library`, `@on(event)`, `cache`). The contract for other languages is JSON-RPC 2.0 without headers:
 
@@ -499,7 +501,7 @@ id = "refresh"
 desc = "Refetch the citation count of the selected entries"
 help = "Asks Crossref again for the selected entries and updates the row."   # optional: shown in the Settings page
 key = "<C-r>"                        # default key; users override it in keymap.toml as run = "citations.refresh"
-menus = ["context"]                  # right-click menu
+menus = ["context"]                  # right-click menu; add "settings" to list the command on the plugin's Settings page
 
 [[fields]]                           # optional: a value slot bibox draws for you
 id = "count"

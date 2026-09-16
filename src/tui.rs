@@ -64,6 +64,8 @@ enum Mode {
     ExportMenu,
     Settings,
     SettingsInput(SettingsInput),
+    /// Keymap 절에서 키를 눌러 받는 팝업
+    KeyCapture(KeyCapture),
     FilePicker(FilePickerContext),
     FetchPreview,
     SearchResultPicker,
@@ -258,6 +260,8 @@ struct SettingsState {
     saved: Option<(SettingsFocus, usize, usize, Option<String>)>,
     /// 아래 줄에 한 번 보이는 알림. (문구, 오류인가). 다음 키에 사라진다.
     notice: Option<(String, bool)>,
+    /// Keymap 절의 행. 열 때와 키맵을 다시 읽을 때 만든다.
+    key_rows: Vec<crate::keymap::KeyRow>,
 }
 
 impl SettingsState {
@@ -272,6 +276,7 @@ impl SettingsState {
             typing: false,
             saved: None,
             notice: None,
+            key_rows: Vec::new(),
         }
     }
 
@@ -295,6 +300,8 @@ enum PaneRow {
     InstallFrom,
     /// 플러그인 페이지의 명령 한 줄. Enter가 키를 누른 것처럼 실행하고 끝나면 Settings로 돌아온다.
     Command(PluginCmdId),
+    /// Keymap 절의 동작 한 줄(`settings.key_rows` 인덱스). Enter가 키를 받고, d가 기본으로.
+    Key(usize),
 }
 
 /// 플러그인 페이지 머리 줄. 버전이 없는 플러그인(로컬, 오류)은 그 칸을 비우지 않고 건너뛴다.
@@ -303,7 +310,7 @@ fn plugin_page_title(name: &str, version: &str, source: &str) -> String {
 }
 
 fn selectable(row: &PaneRow) -> bool {
-    matches!(row, PaneRow::Item(_) | PaneRow::Plugin(_) | PaneRow::Installed(_) | PaneRow::InstallFrom | PaneRow::Command(_))
+    matches!(row, PaneRow::Item(_) | PaneRow::Plugin(_) | PaneRow::Installed(_) | PaneRow::InstallFrom | PaneRow::Command(_) | PaneRow::Key(_))
 }
 
 fn first_selectable(rows: &[PaneRow]) -> usize {
@@ -336,6 +343,13 @@ struct SettingsInput {
     title: String,
     buf: String,
     target: InputTarget,
+}
+
+/// "Press the new key" 팝업. `pressed`는 이어 누른 키(두 타짜리도 됨).
+struct KeyCapture {
+    /// `settings.key_rows` 인덱스
+    row: usize,
+    pressed: Vec<crate::keymap::KeyPress>,
 }
 
 struct BgTaskResult {
@@ -1198,6 +1212,7 @@ impl App {
     fn open_settings(&mut self, section: crate::settings::Section) {
         self.settings = SettingsState::new();
         self.settings.plugins = plugin_rows();
+        self.settings.key_rows = crate::keymap::key_rows(&self.keymap, self.host.commands());
         self.settings.section = crate::settings::Section::ALL.iter().position(|s| *s == section).unwrap_or(0);
         let items = self.settings_items();
         let rows = settings_pane_rows(self, &items);
@@ -1963,6 +1978,14 @@ fn draw(f: &mut Frame, app: &mut App) {
             draw_settings_popup(f, app, size);
             if let Mode::SettingsInput(input) = &app.mode {
                 draw_settings_input(f, input, size);
+            }
+        }
+        Mode::KeyCapture(_) => {
+            draw_settings_popup(f, app, size);
+            if let Mode::KeyCapture(cap) = &app.mode {
+                let title = app.settings.key_rows.get(cap.row).map(|r| app.config.msgs.press_new_key_for(&r.desc)).unwrap_or_default();
+                let pressed = cap.pressed.iter().map(|k| crate::keymap::render_key(*k)).collect::<Vec<_>>().join(" ");
+                draw_settings_input(f, &SettingsInput { title, buf: pressed, target: InputTarget::InstallSource }, size);
             }
         }
         Mode::ContextMenu => {
@@ -2827,9 +2850,7 @@ fn draw_message_popup(f: &mut Frame, msg: &str, area: Rect) {
 /// One keyboard shortcut as data, so the help screen can be searched and tested
 /// rather than being a block of hardcoded prose that drifts from the handlers.
 /// 화면에 나오는 섹션 순서. `Action::section()`이 돌려주는 값과 같아야 한다.
-const SECTION_ORDER: &[&str] = &[
-    "Navigation", "Selection", "Entry actions", "Editing", "Search and sort", "Application", "Plugins",
-];
+use crate::keymap::SECTION_ORDER;
 
 struct HelpRow {
     keys: String,
@@ -2848,8 +2869,9 @@ fn help_rows(layer: &crate::keymap::Layer, commands: &crate::plugin::PluginComma
     let mut rows: Vec<HelpRow> = layer
         .bindings
         .iter()
-        .filter(|b| b.actions.first().is_some_and(|a| *a != Action::Noop))
-        .map(|b| {
+        .enumerate()
+        .filter(|(i, b)| b.actions.first().is_some_and(|a| *a != Action::Noop) && !layer.bindings[..*i].iter().any(|e| e.keys == b.keys))
+        .map(|(_, b)| {
             let first = b.actions[0];
             let (action, fallback_desc) = match first {
                 Action::Plugin(id) => match commands.get(id) {
@@ -3098,14 +3120,32 @@ fn settings_pane_rows(app: &App, items: &[crate::settings::Item]) -> Vec<PaneRow
     let st = &app.settings;
     if let Some(q) = &st.query {
         let plugins: Vec<(String, String)> = st.plugins.iter().map(|p| (p.name.clone(), p.description.clone())).collect();
-        return crate::settings::search(items, &plugins, q)
+        let keys: Vec<crate::settings::KeyText> = st.key_rows.iter().map(|r| (r.desc.clone(), r.name.clone(), r.keys_text(), r.section.to_string())).collect();
+        return crate::settings::search(items, &plugins, &keys, q)
             .into_iter()
             .map(|r| match r {
                 crate::settings::Row::Header(h) => PaneRow::Header(h),
                 crate::settings::Row::Item(i) => PaneRow::Item(i),
                 crate::settings::Row::Plugin(p) => PaneRow::Plugin(p),
+                crate::settings::Row::Key(k) => PaneRow::Key(k),
             })
             .collect();
+    }
+    if st.section() == Section::Keymap {
+        // 도움말과 같은 묶음 머리 뒤에 동작들
+        let mut rows = Vec::new();
+        let mut last: Option<&str> = None;
+        for (i, r) in st.key_rows.iter().enumerate() {
+            if last != Some(r.section) {
+                if last.is_some() {
+                    rows.push(PaneRow::Blank);
+                }
+                rows.push(PaneRow::Header(r.section.to_string()));
+                last = Some(r.section);
+            }
+            rows.push(PaneRow::Key(i));
+        }
+        return rows;
     }
     if st.section() != Section::Plugins {
         return items.iter().enumerate().filter(|(_, it)| it.section == st.section()).map(|(i, _)| PaneRow::Item(i)).collect();
@@ -3127,7 +3167,7 @@ fn settings_pane_rows(app: &App, items: &[crate::settings::Item]) -> Vec<PaneRow
             rows.push(PaneRow::Installed(p.name.clone()));
             if p.installed && p.source != "error" {
                 rows.extend(items.iter().enumerate().filter(|(_, it)| it.plugin.as_deref() == Some(name)).map(|(i, _)| PaneRow::Item(i)));
-                let cmds: Vec<PaneRow> = app.host.commands().iter().filter(|(_, c)| &c.plugin == name).map(|(id, _)| PaneRow::Command(id)).collect();
+                let cmds: Vec<PaneRow> = app.host.commands().iter().filter(|(_, c)| &c.plugin == name && c.menus.iter().any(|m| m == "settings")).map(|(id, _)| PaneRow::Command(id)).collect();
                 if !cmds.is_empty() {
                     rows.push(PaneRow::Blank);
                     rows.extend(cmds);
@@ -3146,6 +3186,21 @@ fn row_desc(app: &App, items: &[crate::settings::Item], row: &PaneRow) -> String
         PaneRow::Plugin(name) => app.settings.plugins.iter().find(|p| &p.name == name).map(|p| p.description.clone()).unwrap_or_default(),
         PaneRow::InstallFrom => "owner/repo, a git URL or a local path".to_string(),
         PaneRow::Command(id) => app.host.commands().get(*id).map(|c| c.help.clone().unwrap_or_else(|| format!("Enter runs {}", c.full_name()))).unwrap_or_default(),
+        PaneRow::Key(k) => match app.settings.key_rows.get(*k) {
+            Some(r) => {
+                let layers: Vec<&str> = r.layers.iter().map(|l| match l { LayerId::Collections => "Collections", LayerId::Entries => "Entries", LayerId::Preview => "Preview" }).collect();
+                let defaults = r.default_keys.iter().map(|k| crate::keymap::render_keys(k)).collect::<Vec<_>>().join(" ");
+                let mut text = format!("{}  in {}  default {}", r.name, layers.join(", "), if defaults.is_empty() { "none".to_string() } else { defaults });
+                if let Some(Action::Plugin(id)) = r.actions.first() {
+                    if let Some(h) = app.host.commands().get(*id).and_then(|c| c.help.clone()) {
+                        text.push_str("  ");
+                        text.push_str(&h);
+                    }
+                }
+                text
+            }
+            None => String::new(),
+        },
         PaneRow::Header(_) | PaneRow::Text(_) | PaneRow::Blank | PaneRow::Installed(_) => String::new(),
     }
 }
@@ -3242,12 +3297,25 @@ fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
             PaneRow::Command(id) => {
                 let Some(c) = app.host.commands().get(*id) else { continue };
                 let mark = if is_cursor { "> " } else { "  " };
-                let key = c.key.as_ref().map(|ks| ks.iter().map(|k| crate::keymap::render_key(*k)).collect::<Vec<_>>().join("")).unwrap_or_default();
                 let style = if is_cursor { Style::default().fg(theme().accent) } else { Style::default().fg(theme().heading) };
-                let text = if key.is_empty() { c.desc.clone() } else { format!("{}  ({})", c.desc, key) };
-                for (k, l) in wrap_hard(&text, width.saturating_sub(3)).into_iter().enumerate() {
+                for (k, l) in wrap_hard(&c.desc, width.saturating_sub(3)).into_iter().enumerate() {
                     lines.push((if k == 0 { Some(ri) } else { None }, Line::from(Span::styled(format!("{}{}", if k == 0 { mark } else { "  " }, l), style))));
                 }
+            }
+            PaneRow::Key(k) => {
+                // 설명 왼쪽, 키 오른쪽. 키가 없으면 빈 괄호로 "묶을 수 있음"을 보인다.
+                let Some(r) = st.key_rows.get(*k) else { continue };
+                let mark = if is_cursor { "> " } else { "  " };
+                let style = if is_cursor { Style::default().fg(theme().accent) } else { Style::default() };
+                let keys = format!("[{}]", r.keys_text());
+                let room = width.saturating_sub(keys.chars().count() + 4);
+                let desc: String = if r.desc.chars().count() > room { r.desc.chars().take(room.saturating_sub(1)).collect::<String>() + "…" } else { r.desc.clone() };
+                let pad = width.saturating_sub(2 + desc.chars().count() + keys.chars().count() + 1);
+                lines.push((Some(ri), Line::from(vec![
+                    Span::styled(format!("{}{}", mark, desc), style),
+                    Span::raw(" ".repeat(pad)),
+                    Span::styled(keys, if is_cursor { style } else { Style::default().fg(theme().heading) }),
+                ])));
             }
             PaneRow::Item(i) => {
                 // 값이 길면(URL, 경로) 값 열 안에서 접는다. 이어지는 줄은 값 열에 맞춰 들여쓴다.
@@ -3288,7 +3356,13 @@ fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(if st.typing { "   Enter done  Esc clear" } else { "   j/k move  h/l change  Esc clear" }, Style::default().fg(theme().muted)),
         ]),
         (None, None) => {
-            let hint = if st.page.is_some() { "j/k move  h/l change  Esc back to list" } else { "Tab switch  j/k move  h/l change  Enter edit  / search  Esc close" };
+            let hint = if st.page.is_some() {
+                "j/k move  h/l change  Esc back to list"
+            } else if st.section() == Section::Keymap && st.focus == SettingsFocus::Rows {
+                "j/k move  Enter press a key  d default  / search  Esc close"
+            } else {
+                "Tab switch  j/k move  h/l change  Enter edit  / search  Esc close"
+            };
             Line::from(Span::styled(hint, Style::default().fg(theme().muted)))
         }
     };
@@ -3474,6 +3548,7 @@ fn handle_key(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
         Mode::ExportMenu => handle_export_menu(app, key),
         Mode::Settings => handle_settings(app, key),
         Mode::SettingsInput(_) => handle_settings_input(app, key),
+        Mode::KeyCapture(_) => handle_key_capture(app, key),
         Mode::FilePicker(_) => handle_file_picker(app, key),
         Mode::FetchPreview => handle_fetch_preview(app, key),
         Mode::SearchResultPicker => handle_search_result_picker(app, key),
@@ -4332,6 +4407,11 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
         (SettingsFocus::Rows, KeyCode::Down) | (SettingsFocus::Rows, KeyCode::Char('j')) => {
             app.settings.row = move_cursor(&rows, app.settings.row, 1);
         }
+        (SettingsFocus::Rows, KeyCode::Char('d')) if matches!(rows.get(app.settings.row), Some(PaneRow::Key(_))) => {
+            if let Some(PaneRow::Key(k)) = rows.get(app.settings.row).cloned() {
+                apply_key_change(app, k, None);
+            }
+        }
         (SettingsFocus::Rows, KeyCode::Left) | (SettingsFocus::Rows, KeyCode::Char('h')) => settings_step(app, &items, &rows, -1),
         (SettingsFocus::Rows, KeyCode::Right) | (SettingsFocus::Rows, KeyCode::Char('l')) => settings_step(app, &items, &rows, 1),
         (SettingsFocus::Rows, KeyCode::Enter) => match rows.get(app.settings.row).cloned() {
@@ -4350,6 +4430,9 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
                 if let Some(run) = app.plugin_run.as_mut() {
                     run.back_to_settings = true;
                 }
+            }
+            Some(PaneRow::Key(k)) => {
+                app.mode = Mode::KeyCapture(KeyCapture { row: k, pressed: Vec::new() });
             }
             Some(PaneRow::InstallFrom) => {
                 app.mode = Mode::SettingsInput(SettingsInput {
@@ -4444,6 +4527,49 @@ fn settings_step(app: &mut App, items: &[crate::settings::Item], rows: &[PaneRow
         }
         _ => {}
     }
+}
+
+/// "Press the new key": 누른 키를 모으고 Enter로 적용, Backspace로 하나 지우고, Esc로 취소.
+fn handle_key_capture(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
+    let Mode::KeyCapture(cap) = &mut app.mode else { return Ok(false) };
+    match key.code {
+        KeyCode::Esc => app.mode = Mode::Settings,
+        KeyCode::Backspace => { cap.pressed.pop(); }
+        KeyCode::Enter => {
+            let (row, pressed) = (cap.row, cap.pressed.clone());
+            app.mode = Mode::Settings;
+            apply_key_change(app, row, Some(pressed));
+        }
+        _ => cap.pressed.push(crate::keymap::KeyPress::new(key.code, key.modifiers)),
+    }
+    Ok(false)
+}
+
+/// Keymap 절의 한 줄을 바꾼다. `Some(keys)`는 새 키(빈 목록이면 해제), `None`은 기본으로.
+/// 충돌이면 쓰지 않고 알림만. 쓰고 나면 키맵을 다시 읽어 바로 적용되고 도움말도 따라온다.
+fn apply_key_change(app: &mut App, row: usize, keys: Option<Vec<crate::keymap::KeyPress>>) {
+    let Some(r) = app.settings.key_rows.get(row).cloned() else { return };
+    if let Some(keys) = &keys {
+        if let Some((layer, other)) = crate::keymap::conflict(&app.keymap, &r, keys, app.host.commands()) {
+            let layer = match layer { LayerId::Collections => "Collections", LayerId::Entries => "Entries", LayerId::Preview => "Preview" };
+            app.settings.notice = Some((app.config.msgs.key_in_use(&crate::keymap::render_keys(keys), &other, layer), true));
+            return;
+        }
+    }
+    if let Err(e) = crate::keymap::write_keys(&crate::keymap::keymap_path(), &r, keys.as_deref()) {
+        app.settings.notice = Some((e.to_string(), true));
+        return;
+    }
+    let report = crate::keymap::load_keymap(app.host.commands());
+    app.keymap = report.keymap;
+    app.settings.key_rows = crate::keymap::key_rows(&app.keymap, app.host.commands());
+    let now = app.settings.key_rows.get(row).map(|r| r.keys_text()).unwrap_or_default();
+    app.settings.notice = Some(match (&keys, report.warnings.first()) {
+        (_, Some(w)) => (app.config.msgs.keymap_problem(w), true),
+        (None, None) => (app.config.msgs.key_back_to_default(&r.desc, &now), false),
+        (Some(k), None) if k.is_empty() => (app.config.msgs.key_unbound(&r.desc), false),
+        (Some(_), None) => (app.config.msgs.key_bound(&now, &r.desc), false),
+    });
 }
 
 fn handle_settings_input(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
@@ -5659,6 +5785,16 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].keys, "Z");
         assert_eq!(rows[0].desc, Action::Quit.desc());
+    }
+
+    /// prepend가 기본 키를 noop으로 죽이면 도움말에 그 기본 바인딩이 남아 있으면 안 된다(Settings > Keymap에서 발견).
+    #[test]
+    fn help_hides_a_binding_shadowed_by_an_earlier_one_with_the_same_key() {
+        let commands = crate::plugin::PluginCommands::default();
+        let r = crate::keymap::load_keymap_from_str("[normal.entries]\nprepend_keymap = [ { on = \"x\", run = \"open_web\" }, { on = \"w\", run = \"noop\" } ]\n", &commands);
+        let rows = super::help_rows(&r.keymap.entries, &commands);
+        let web: Vec<&str> = rows.iter().filter(|r| r.action == "OpenWeb").map(|r| r.keys.as_str()).collect();
+        assert_eq!(web, vec!["x"], "w is dead, only x is shown");
     }
 
     #[test]
