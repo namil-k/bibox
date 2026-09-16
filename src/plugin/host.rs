@@ -778,7 +778,7 @@ mod tests {
         assert!(r["fields"].get("nodoi").is_none());
     }
 
-    /// proxy 플러그인: 설정 links의 첫 줄을 DOI URL 앞에 붙여 opener에 넘긴다. 브라우저 대신 기록 스크립트.
+    /// library-proxy 플러그인: 설정 link1을 DOI URL 앞에 붙여 opener에 넘긴다. 브라우저 대신 기록 스크립트.
     #[test]
     fn proxy_open_launches_the_configured_opener() {
         let dir = std::env::temp_dir().join(format!("bibox-library-proxy-host-{}", std::process::id()));
@@ -802,8 +802,8 @@ mod tests {
         let mut env = env();
         env.extra.insert("BIBOX_PROXY_OPENER".into(), opener.to_string_lossy().to_string());
         let mut tables = BTreeMap::new();
-        // 두 줄: 첫 줄이 기본. `u`(open)는 두 번째를 건드리지 않는다.
-        tables.insert("library-proxy".to_string(), json!({"links": "https://ezproxy.example.edu/login?url=\nhttps://openlink.khu.ac.kr/link.n2s?url=\n"}));
+        // 칸 둘: link1이 기본. `u`(open)는 link2를 건드리지 않는다.
+        tables.insert("library-proxy".to_string(), json!({"link1": "https://ezproxy.example.edu/login?url=", "link2": "https://openlink.khu.ac.kr/link.n2s?url="}));
         let host = PluginHost::new(manifests, tables, env);
         let mut sink = NoUiSink;
         let entry = json!({"bibtex_key": "x2020", "doi": "10.1/x", "title": "X"});

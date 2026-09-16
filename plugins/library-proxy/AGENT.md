@@ -1,6 +1,6 @@
 # library-proxy
 
-Opens an entry in the browser through the user's library proxy or link resolver, so a paywalled paper opens with the library's subscription. bibox itself downloads nothing: the browser holds the library login, bibox does not. The `links` setting under `[plugins.library-proxy]` holds one link per line, the first is the default (people with more than one institution, or an expired account, keep several). Each link is either a prefix put before the entry's URL (`https://ezproxy.example.edu/login?url=`) or a template with `{url}`, `{url_encoded}` or `{doi}`. The URL is `https://doi.org/<doi>` when the entry has a DOI, otherwise the entry's `url`.
+Opens an entry in the browser through the user's library proxy or link resolver, so a paywalled paper opens with the library's subscription. bibox itself downloads nothing: the browser holds the library login, bibox does not. Settings `link1` to `link5` under `[plugins.library-proxy]` hold the libraries in order of preference; the lowest filled slot is the default (people with more than one institution, or an expired account, keep several). Each link is either a prefix put before the entry's URL (`https://ezproxy.example.edu/login?url=`) or a template with `{url}`, `{url_encoded}` or `{doi}`. The URL is `https://doi.org/<doi>` when the entry has a DOI, otherwise the entry's `url`.
 
 ## From the shell
 
@@ -14,4 +14,4 @@ Opens an entry in the browser through the user's library proxy or link resolver,
 
 ## In the TUI
 
-`u` opens the selected entries through the first link (with no links yet it opens the manager instead); `v` asks which link, with "Manage links" as the last item; `library-proxy.links` is that manager (add by hand, find by name, make default, move, remove; loops until Escape); `library-proxy.find` asks for a library name, shows the matches and saves the pick as the first link. All are in the right-click menu. Links are saved space-separated on one line so the Settings row can edit them. The status popup says `opened 2 via ezproxy.example.edu, skipped 1 (no DOI or URL)`. With no links it says where to set them.
+`u` opens the selected entries through the first link (with no links yet it opens the manager instead); `v` asks which link, with "Manage links" as the last item; `library-proxy.links` is that manager (add by hand, find by name, make default, move, remove; loops until Escape); `library-proxy.find` asks for a library name, shows the matches and saves the pick as the first link. All are in the right-click menu. The five slots are ordinary string settings, so the Settings screen (`,` then Plugins) edits them too. The status popup says `opened 2 via ezproxy.example.edu, skipped 1 (no DOI or URL)`. With no links it says where to set them.

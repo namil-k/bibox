@@ -28,10 +28,34 @@ desc = "Manage library links: add, reorder, remove"
 menus = ["context"]
 
 [[settings]]
-key = "links"
+key = "link1"
 type = "string"
 default = ""
-desc = "Library proxy links, one per line, first is the default: a prefix (https://ezproxy.example.edu/login?url=) or a template with {url}, {url_encoded} or {doi}"
+desc = "Your library (u opens through this one): a prefix such as https://ezproxy.example.edu/login?url= or a template with {url}, {url_encoded} or {doi}"
+
+[[settings]]
+key = "link2"
+type = "string"
+default = ""
+desc = "Another library, in order of preference (v picks): a prefix such as https://ezproxy.example.edu/login?url= or a template with {url}, {url_encoded} or {doi}"
+
+[[settings]]
+key = "link3"
+type = "string"
+default = ""
+desc = "Another library, in order of preference (v picks): a prefix such as https://ezproxy.example.edu/login?url= or a template with {url}, {url_encoded} or {doi}"
+
+[[settings]]
+key = "link4"
+type = "string"
+default = ""
+desc = "Another library, in order of preference (v picks): a prefix such as https://ezproxy.example.edu/login?url= or a template with {url}, {url_encoded} or {doi}"
+
+[[settings]]
+key = "link5"
+type = "string"
+default = ""
+desc = "Another library, in order of preference (v picks): a prefix such as https://ezproxy.example.edu/login?url= or a template with {url}, {url_encoded} or {doi}"
 
 [cli]
 run = "python3 main.py"

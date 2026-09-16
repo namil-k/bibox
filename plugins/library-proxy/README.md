@@ -8,15 +8,13 @@ Install, then find your library by name, the way Google Scholar's "Library links
 
     bibox plugin install namil-k/bibox/plugins/library-proxy
 
-In bibox, press `u` (or `v`) with no library set up yet: a popup offers "Find a library by name" and "Add a link by hand". Type part of the name (`seoul national`, `paris-saclay`, `max planck`) and pick the match; the link is saved as your default. Later, `v` > "Manage links" (or `library-proxy.links` in the right-click menu) lists your libraries, and picking one offers "Make it the default", "Move up", "Move down" and "Remove". `bibox library-proxy find seoul national` prints the same matches from the shell. The directory is a snapshot of two public lists, 1,513 proxies from [libproxy-db.org](https://libproxy-db.org/) (CC BY-SA 4.0) and 507 link resolvers from [Zotero's directory](https://www.zotero.org/support/locate/openurl_resolvers); `bibox library-proxy update` refetches both. A library that is missing can be added to those lists, or written by hand:
+In bibox, press `u` (or `v`) with no library set up yet: a popup offers "Find a library by name" and "Add a link by hand". Type part of the name (`seoul national`, `paris-saclay`, `max planck`) and pick the match; the link is saved as `link1`, your default. The plugin has five slots, `link1` to `link5`, in order of preference: Settings (`,` then Plugins, then library-proxy) shows them as five rows you can edit directly, and `v` > "Manage links" (or `library-proxy.links` in the right-click menu) offers "Make it the default", "Move up", "Move down" and "Remove". `bibox library-proxy find seoul national` prints the same matches from the shell. The directory is a snapshot of two public lists, 1,513 proxies from [libproxy-db.org](https://libproxy-db.org/) (CC BY-SA 4.0) and 507 link resolvers from [Zotero's directory](https://www.zotero.org/support/locate/openurl_resolvers); `bibox library-proxy update` refetches both. A library that is missing can be added to those lists, or written by hand:
 
     [plugins.library-proxy]
-    links = "https://ezproxy.example.edu/login?url="
+    link1 = "https://ezproxy.example.edu/login?url="
+    link2 = "https://openlink.khu.ac.kr/link.n2s?url="
 
-More than one library: separate the links with spaces (or one per line in a `"""` string), the first is the one `u` uses. The Settings screen (`,` then Plugins) shows and edits the same value.
-
-    [plugins.library-proxy]
-    links = "https://ezproxy.example.edu/login?url= https://openlink.khu.ac.kr/link.n2s?url="
+`link1` is the one `u` uses; `link2` to `link5` are the others, in order of preference.
 
 Each link is a prefix that goes before the paper's URL (`https://doi.org/<doi>`, or the entry's URL when it has no DOI), or a template with `{url}`, `{url_encoded}` or `{doi}`:
 

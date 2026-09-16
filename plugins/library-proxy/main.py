@@ -2,8 +2,9 @@
 
 CLI (`bibox library-proxy list|url|open|find|update`, BIBOX_CLI=1) and TUI commands (`library-proxy.open`, `library-proxy.choose`, `library-proxy.find`) share proxied().
 `find` looks a library up by name in registry.json (see registry.py) and saves its link first through settings/set.
-The `links` setting holds links separated by whitespace (one line, or one per line), the first is the default: a prefix (`https://ezproxy.example.edu/login?url=`)
-or a template with {url}, {url_encoded} or {doi}. Nothing is downloaded here: the browser is logged in, bibox is not.
+Settings link1..link5 hold the libraries, the lowest filled slot is the default (bibox's Settings screen shows them as five
+rows, so they can be edited there too). Each is a prefix (`https://ezproxy.example.edu/login?url=`) or a template with
+{url}, {url_encoded} or {doi}. Nothing is downloaded here: the browser is logged in, bibox is not.
 """
 import argparse
 import json
@@ -20,14 +21,19 @@ FIND_ITEM = "+ Find a library by name"
 ADD_ITEM = "+ Add a link by hand"
 
 
-def parse_links(text):
-    """One link per line (or space separated), first is the default. Links never contain whitespace."""
-    return (text or "").split()
+SLOTS = 5
 
 
-def join_links(links):
-    """Saved on one line so the Settings row shows and edits the whole value."""
-    return " ".join(links)
+def slot(i):
+    return "link{}".format(i + 1)
+
+
+def parse_links(table):
+    """The filled slots in order, gaps skipped. `links` (the older single string) is read after them."""
+    table = table or {}
+    links = [str(table.get(slot(i)) or "").strip() for i in range(SLOTS)]
+    links = [l for l in links if l]
+    return links or str(table.get("links") or "").split()
 
 
 def label(link):
@@ -123,12 +129,16 @@ def _open_via(link, params):
 
 def _links():
     from bibox_plugin import config
-    return parse_links(config.get("links"))
+    return parse_links(config)
 
 
 def _save(links):
-    from bibox_plugin import settings
-    settings.set("links", join_links(links))
+    """Write the list back into link1..link5, touching only the slots that change."""
+    from bibox_plugin import config, settings
+    for i in range(SLOTS):
+        want = links[i] if i < len(links) else ""
+        if str(config.get(slot(i)) or "").strip() != want:
+            settings.set(slot(i), want)
 
 
 def open_cmd(params):
@@ -169,8 +179,11 @@ def find_cmd(params):
     if index is None:
         return "cancelled"
     chosen = hits[index]
+    rest = [l for l in _links() if l != chosen["link"]]
+    if len(rest) >= SLOTS:
+        return "all {} slots are used; remove one first (v, Manage links)".format(SLOTS)
     try:
-        _save([chosen["link"]] + [l for l in _links() if l != chosen["link"]])
+        _save([chosen["link"]] + rest)
     except RuntimeError as e:
         return "could not save: {}".format(e)
     return "{} is now your default library ({})".format(chosen["name"], host(chosen["link"]))
@@ -201,6 +214,9 @@ def links_cmd(params):
             if index == len(links):
                 find_cmd(params)
             elif index == len(links) + 1:
+                if len(links) >= SLOTS:
+                    window.message("all {} slots are used; remove one first".format(SLOTS), "warn")
+                    continue
                 text = _add_by_hand(window)
                 if text:
                     _save([text] + [l for l in links if l != text])
@@ -234,14 +250,14 @@ def _bibox(*args):
 
 
 def links_from_config():
-    """CLI mode gets no settings, only $BIBOX_CONFIG_DIR: read [plugins.library-proxy] links from config.toml there."""
+    """CLI mode gets no settings, only $BIBOX_CONFIG_DIR: read [plugins.library-proxy] from config.toml there."""
     d = os.environ.get("BIBOX_CONFIG_DIR")
     if not d:
         return []
     try:
         import tomllib
         with open(os.path.join(d, "config.toml"), "rb") as f:
-            return parse_links(tomllib.load(f).get("plugins", {}).get("library-proxy", {}).get("links"))
+            return parse_links(tomllib.load(f).get("plugins", {}).get("library-proxy", {}))
     except (ImportError, OSError, ValueError):
         return []
 
@@ -286,7 +302,7 @@ def cli(argv):
         if args.link:
             link = args.link.strip()
         elif not links:
-            raise ValueError("no links. Pass --link or set [plugins.library-proxy] links in config.toml (see the plugin README)")
+            raise ValueError("no links. Pass --link or set [plugins.library-proxy] link1 in config.toml (see the plugin README)")
         elif args.via:
             link = find_link(links, args.via)
         else:
