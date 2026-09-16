@@ -5,7 +5,7 @@ Two public sources, merged into registry.json next to this file:
 - libproxy-db.org (github.com/tom5760/ezproxy-db, CC BY-SA 4.0): proxy prefixes, `$@` marks the target URL
 - zotero.org/support/locate/openurl_resolvers (raw wiki export): OpenURL link resolvers, one `|Name|%%url%%|` per line
 
-`python3 registry.py` (or `bibox proxy update`) refetches both and rewrites the snapshot. Entries are
+`python3 registry.py` (or `bibox library-proxy update`) refetches both and rewrites the snapshot. Entries are
 {"name", "country", "link", "kind": "proxy" | "resolver"} where `link` is what the `links` setting takes.
 """
 import json

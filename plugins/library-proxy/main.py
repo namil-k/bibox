@@ -1,6 +1,6 @@
 """Open an entry through your library's proxy or link resolver.
 
-CLI (`bibox proxy list|url|open|find|update`, BIBOX_CLI=1) and TUI commands (`proxy.open`, `proxy.choose`, `proxy.find`) share proxied().
+CLI (`bibox library-proxy list|url|open|find|update`, BIBOX_CLI=1) and TUI commands (`library-proxy.open`, `library-proxy.choose`, `library-proxy.find`) share proxied().
 `find` looks a library up by name in registry.json (see registry.py) and saves its link first through settings/set.
 The `links` setting holds one link per line, the first is the default: a prefix (`https://ezproxy.example.edu/login?url=`)
 or a template with {url}, {url_encoded} or {doi}. Nothing is downloaded here: the browser is logged in, bibox is not.
@@ -15,7 +15,7 @@ import urllib.parse
 import registry
 
 PLACEHOLDERS = ("{url}", "{url_encoded}", "{doi}")
-SETUP_HINT = "Set proxy.links in Settings (,): your library's proxy prefix, one per line. See the proxy plugin README"
+SETUP_HINT = "Set library-proxy.links in Settings (,): your library's proxy prefix, one per line. See the library-proxy plugin README"
 
 
 def parse_links(text):
@@ -173,20 +173,20 @@ def _bibox(*args):
 
 
 def links_from_config():
-    """CLI mode gets no settings, only $BIBOX_CONFIG_DIR: read [plugins.proxy] links from config.toml there."""
+    """CLI mode gets no settings, only $BIBOX_CONFIG_DIR: read [plugins.library-proxy] links from config.toml there."""
     d = os.environ.get("BIBOX_CONFIG_DIR")
     if not d:
         return []
     try:
         import tomllib
         with open(os.path.join(d, "config.toml"), "rb") as f:
-            return parse_links(tomllib.load(f).get("plugins", {}).get("proxy", {}).get("links"))
+            return parse_links(tomllib.load(f).get("plugins", {}).get("library-proxy", {}).get("links"))
     except (ImportError, OSError, ValueError):
         return []
 
 
 def cli(argv):
-    ap = argparse.ArgumentParser(prog="bibox proxy", description="Open entries through your library proxy or link resolver.")
+    ap = argparse.ArgumentParser(prog="bibox library-proxy", description="Open entries through your library proxy or link resolver.")
     sub = ap.add_subparsers(dest="cmd")
     sub.add_parser("list", help="print the configured links, first is the default")
     sub.add_parser("find", help="look a library up by name in the bundled directory").add_argument("query", nargs="+")
@@ -203,7 +203,7 @@ def cli(argv):
     if args.cmd == "find":
         hits = registry.search(registry.load(), " ".join(args.query))
         if not hits:
-            print("bibox proxy: no library matches {!r}. The plugin README says how to find the link by hand".format(" ".join(args.query)), file=sys.stderr)
+            print("bibox library-proxy: no library matches {!r}. The plugin README says how to find the link by hand".format(" ".join(args.query)), file=sys.stderr)
             return 1
         for i, e in enumerate(hits, 1):
             print("{}  {}  {}".format(i, registry.label(e).split("  ")[0], e["link"]))
@@ -212,7 +212,7 @@ def cli(argv):
         try:
             p, r = registry.update()
         except OSError as e:
-            print("bibox proxy: could not fetch the directory: {}".format(e), file=sys.stderr)
+            print("bibox library-proxy: could not fetch the directory: {}".format(e), file=sys.stderr)
             return 1
         print("registry.json: {} proxies, {} link resolvers".format(p, r))
         return 0
@@ -225,18 +225,18 @@ def cli(argv):
         if args.link:
             link = args.link.strip()
         elif not links:
-            raise ValueError("no links. Pass --link or set [plugins.proxy] links in config.toml (see the plugin README)")
+            raise ValueError("no links. Pass --link or set [plugins.library-proxy] links in config.toml (see the plugin README)")
         elif args.via:
             link = find_link(links, args.via)
         else:
             link = links[0]
         entry = _bibox("show", args.key, "--json")
     except (RuntimeError, ValueError) as e:
-        print("bibox proxy: {}".format(e), file=sys.stderr)
+        print("bibox library-proxy: {}".format(e), file=sys.stderr)
         return 1
     url = proxied(link, entry)
     if url is None:
-        print("bibox proxy: {} has no DOI or URL to put in the link".format(args.key), file=sys.stderr)
+        print("bibox library-proxy: {} has no DOI or URL to put in the link".format(args.key), file=sys.stderr)
         return 1
     if args.cmd == "open":
         open_in_browser(url)

@@ -1,5 +1,5 @@
 api = 2
-name = "proxy"
+name = "library-proxy"
 version = "0.1.0"
 description = "Open entries through your library proxy or link resolver"
 run = "python3 main.py"

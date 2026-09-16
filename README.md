@@ -148,7 +148,7 @@ bibox
 | `f` | Fetch/refresh metadata from Crossref (preview changes, select which to apply) |
 | `o` | Open PDF (or fetch from web; re-fetches if file missing; opens browser on 403) |
 | `A` | Attach a local PDF via file picker (copies and renames to citekey.pdf) |
-| `w` | Open paper web page in browser (the `proxy` plugin adds `u`: the same page through your library proxy) |
+| `w` | Open paper web page in browser (the `library-proxy` plugin adds `u`: the same page through your library proxy) |
 | `e` | Export menu (selected / collection / all) |
 | `y` | Copy citekey to clipboard |
 | `Y` | Copy a formatted citation (APA, IEEE or Chicago) to clipboard |
@@ -548,7 +548,7 @@ A `[[views]]` entry adds a tab to the preview panel. When the tab is visible bib
 
 **When it breaks.** A broken plugin never stops bibox. Manifest problems are shown before the TUI opens and by `bibox doctor`; an `api = 1` manifest is refused with the new name for each old key. A plugin that exits, hangs (press Esc) or prints something that is not JSON is reported in the status line and restarted on the next call; its fields go blank until then. While `bibox add` waits for `library/adding`, a plugin that says nothing for 30 seconds (no answer, no popup, no `window/progress`) is skipped with a warning and the entry is added unchanged. Default keys that collide with built-in keys are dropped with a warning; bind them yourself in `keymap.toml`.
 
-**Built-in plugins** live inside the bibox binary and appear in `bibox plugin list` as `built-in`: `git-sync` (commits db.json and notes on every write when the portable home is a git repository; `g s` syncs, `g t` shows status, the status bar shows `↑n unpushed`) and `pdf-view` (the PDF tab; needs poppler, so it is not installed until you ask). Remove one like any plugin; `bibox plugin install git-sync` puts it back. **Example plugins** (`plugins/` in this repository): `proxy` (`u` opens the paper through your library's proxy or link resolver; pick your library by name from a directory of 2,000, keep several in order of preference, `v` to choose one), `zotero` (`bibox zotero import` moves a Zotero library over: entries, collections, tags, PDFs, notes), `citations` (Crossref citation counts in every row, `<C-r>` to refetch, `bibox citations <key...>` for scripts) and `summarize` (`S`, PDF to the note's Summary section with Claude; needs `pip install anthropic` and `ANTHROPIC_API_KEY`).
+**Built-in plugins** live inside the bibox binary and appear in `bibox plugin list` as `built-in`: `git-sync` (commits db.json and notes on every write when the portable home is a git repository; `g s` syncs, `g t` shows status, the status bar shows `↑n unpushed`) and `pdf-view` (the PDF tab; needs poppler, so it is not installed until you ask). Remove one like any plugin; `bibox plugin install git-sync` puts it back. **Example plugins** (`plugins/` in this repository): `library-proxy` (`u` opens the paper through your library's proxy or link resolver; pick your library by name from a directory of 2,000, keep several in order of preference, `v` to choose one), `zotero` (`bibox zotero import` moves a Zotero library over: entries, collections, tags, PDFs, notes), `citations` (Crossref citation counts in every row, `<C-r>` to refetch, `bibox citations <key...>` for scripts) and `summarize` (`S`, PDF to the note's Summary section with Claude; needs `pip install anthropic` and `ANTHROPIC_API_KEY`).
 
 ## Settings
 

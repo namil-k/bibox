@@ -127,7 +127,7 @@ class OpenTests(unittest.TestCase):
     """open_cmd hands each proxied URL to $BIBOX_PROXY_OPENER (a recording script here) and reports counts."""
 
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="bibox-proxy-open-")
+        self.tmp = tempfile.mkdtemp(prefix="bibox-library-proxy-open-")
         self.log = os.path.join(self.tmp, "opened.txt")
         opener = os.path.join(self.tmp, "opener.sh")
         with open(opener, "w") as f:
@@ -174,7 +174,7 @@ class OpenTests(unittest.TestCase):
 
     def test_open_cmd_without_a_link_tells_where_to_set_it(self):
         r = main.open_cmd({"command": "open", "trigger": "key", "entry": ACM, "entries": [ACM]})
-        self.assertTrue(r.startswith("Set proxy.links in Settings"), r)
+        self.assertTrue(r.startswith("Set library-proxy.links in Settings"), r)
         self.assertFalse(os.path.exists(self.log), "nothing opened")
 
     def pick_returning(self, answer):
@@ -244,7 +244,7 @@ else:
 
 class CliTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="bibox-proxy-cli-")
+        self.tmp = tempfile.mkdtemp(prefix="bibox-library-proxy-cli-")
         self.bin = os.path.join(self.tmp, "fakebibox")
         with open(self.bin, "w") as f:
             f.write(FAKE_BIBOX)
@@ -264,7 +264,7 @@ class CliTests(unittest.TestCase):
 
     def write_config(self, *links):
         with open(os.path.join(self.tmp, "config.toml"), "w") as f:
-            f.write('bibox_dir = "/tmp/x"\n\n[plugins.proxy]\nlinks = """\n{}\n"""\n'.format("\n".join(links)))
+            f.write('bibox_dir = "/tmp/x"\n\n[plugins.library-proxy]\nlinks = """\n{}\n"""\n'.format("\n".join(links)))
 
     def test_url_reads_the_first_link_from_config_toml_when_no_flag_is_given(self):
         self.write_config(OPENURL, EZ)

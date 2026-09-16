@@ -781,11 +781,11 @@ mod tests {
     /// proxy 플러그인: 설정 links의 첫 줄을 DOI URL 앞에 붙여 opener에 넘긴다. 브라우저 대신 기록 스크립트.
     #[test]
     fn proxy_open_launches_the_configured_opener() {
-        let dir = std::env::temp_dir().join(format!("bibox-proxy-host-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("bibox-library-proxy-host-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let plugin_dir = dir.join("proxy");
+        let plugin_dir = dir.join("library-proxy");
         std::fs::create_dir_all(&plugin_dir).unwrap();
-        let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins/proxy");
+        let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins/library-proxy");
         for f in ["plugin.toml", "main.py", "registry.py", "registry.json", "bibox_plugin.py", "AGENT.md"] {
             std::fs::copy(src.join(f), plugin_dir.join(f)).unwrap();
         }
@@ -803,11 +803,11 @@ mod tests {
         env.extra.insert("BIBOX_PROXY_OPENER".into(), opener.to_string_lossy().to_string());
         let mut tables = BTreeMap::new();
         // 두 줄: 첫 줄이 기본. `u`(open)는 두 번째를 건드리지 않는다.
-        tables.insert("proxy".to_string(), json!({"links": "https://ezproxy.example.edu/login?url=\nhttps://openlink.khu.ac.kr/link.n2s?url=\n"}));
+        tables.insert("library-proxy".to_string(), json!({"links": "https://ezproxy.example.edu/login?url=\nhttps://openlink.khu.ac.kr/link.n2s?url=\n"}));
         let host = PluginHost::new(manifests, tables, env);
         let mut sink = NoUiSink;
         let entry = json!({"bibtex_key": "x2020", "doi": "10.1/x", "title": "X"});
-        let r = host.call_with_ui_idle("proxy", "commands/run", json!({"command": "open", "trigger": "key", "entry": entry, "entries": [entry]}), &mut sink, Duration::from_secs(30)).unwrap();
+        let r = host.call_with_ui_idle("library-proxy", "commands/run", json!({"command": "open", "trigger": "key", "entry": entry, "entries": [entry]}), &mut sink, Duration::from_secs(30)).unwrap();
         assert_eq!(r["message"], "opened 1 via ezproxy.example.edu");
         let mut text = String::new();
         for _ in 0..40 {
