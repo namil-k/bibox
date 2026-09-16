@@ -112,6 +112,39 @@ pub fn seed_builtins_from(plugins_dir: &Path, names: &[&str]) -> Vec<String> {
     created
 }
 
+/// `settings/set`: 플러그인이 자기 설정 하나를 바꾼다. 매니페스트에 선언된 키와 종류만 받아
+/// `[plugins.<name>]`에 넣는다. 저장과 `config/changed` 알림은 부른 쪽(TUI의 `save_settings`)이 한다.
+pub fn set_setting(config: &mut crate::config::Config, manifests: &[Manifest], plugin: &str, key: &str, value: &serde_json::Value) -> Result<(), String> {
+    let m = manifests.iter().find(|m| m.name == plugin).ok_or_else(|| format!("no plugin named {}", plugin))?;
+    let decl = m.settings.iter().find(|s| s.key == key).ok_or_else(|| format!("setting {} is not declared in {}'s plugin.toml", key, plugin))?;
+    let v = match value {
+        serde_json::Value::String(s) => toml::Value::String(s.clone()),
+        serde_json::Value::Bool(b) => toml::Value::Boolean(*b),
+        serde_json::Value::Number(n) if n.is_i64() => toml::Value::Integer(n.as_i64().unwrap_or_default()),
+        other => return Err(format!("setting {} wants {}, got {}", key, decl.kind.name(), json_type_name(other))),
+    };
+    if !decl.kind.accepts(&v) {
+        let expected = match &decl.kind {
+            manifest::SettingKind::Choice(cs) => format!("one of {}", cs.join(", ")),
+            k => k.name().to_string(),
+        };
+        return Err(format!("setting {} wants {}, got {}", key, expected, json_type_name(value)));
+    }
+    config.plugins.entry(plugin.to_string()).or_default().insert(key.to_string(), v);
+    Ok(())
+}
+
+fn json_type_name(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => format!("{:?}", s),
+        serde_json::Value::Bool(_) => "bool".into(),
+        serde_json::Value::Number(_) => "number".into(),
+        serde_json::Value::Array(_) => "array".into(),
+        serde_json::Value::Object(_) => "object".into(),
+        serde_json::Value::Null => "null".into(),
+    }
+}
+
 /// 더 이상 쓰이지 않는 설정. TUI 시작 화면과 doctor에 나온다.
 pub fn obsolete_config_problems(config: &crate::config::Config) -> Vec<PluginProblem> {
     let mut out = Vec::new();
@@ -238,5 +271,42 @@ mod tests {
     fn a_clean_config_has_no_obsolete_problems() {
         let config = crate::config::Config::default();
         assert!(obsolete_config_problems(&config).is_empty());
+    }
+
+    fn demo_manifest() -> Manifest {
+        let text = "api = 2\nname = \"demo\"\nrun = \"x\"\n[[settings]]\nkey = \"links\"\ntype = \"string\"\ndefault = \"\"\n[[settings]]\nkey = \"limit\"\ntype = \"int\"\ndefault = 3\n[[settings]]\nkey = \"mode\"\ntype = \"choice\"\nchoices = [\"a\", \"b\"]\ndefault = \"a\"\n";
+        let mut problems = vec![];
+        manifest::parse_manifest(Path::new("/tmp/demo"), text, &mut problems).expect("manifest")
+    }
+
+    /// `settings/set`: 선언된 키에 맞는 종류의 값만 `[plugins.<name>]`에 들어간다.
+    #[test]
+    fn set_setting_writes_a_declared_value_into_the_plugin_table() {
+        let mut config = crate::config::Config::default();
+        let ms = vec![demo_manifest()];
+        set_setting(&mut config, &ms, "demo", "links", &serde_json::json!("https://a\nhttps://b")).unwrap();
+        set_setting(&mut config, &ms, "demo", "limit", &serde_json::json!(7)).unwrap();
+        set_setting(&mut config, &ms, "demo", "mode", &serde_json::json!("b")).unwrap();
+        let t = &config.plugins["demo"];
+        assert_eq!(t["links"].as_str(), Some("https://a\nhttps://b"));
+        assert_eq!(t["limit"].as_integer(), Some(7));
+        assert_eq!(t["mode"].as_str(), Some("b"));
+    }
+
+    #[test]
+    fn set_setting_refuses_an_unknown_plugin_key_or_kind_and_changes_nothing() {
+        let mut config = crate::config::Config::default();
+        let ms = vec![demo_manifest()];
+        let e = set_setting(&mut config, &ms, "nope", "links", &serde_json::json!("x")).unwrap_err();
+        assert!(e.contains("nope"), "{}", e);
+        let e = set_setting(&mut config, &ms, "demo", "colour", &serde_json::json!("x")).unwrap_err();
+        assert!(e.contains("colour") && e.contains("not declared"), "{}", e);
+        let e = set_setting(&mut config, &ms, "demo", "limit", &serde_json::json!("seven")).unwrap_err();
+        assert!(e.contains("int"), "{}", e);
+        let e = set_setting(&mut config, &ms, "demo", "mode", &serde_json::json!("z")).unwrap_err();
+        assert!(e.contains("one of a, b"), "{}", e);
+        let e = set_setting(&mut config, &ms, "demo", "links", &serde_json::json!(["a"])).unwrap_err();
+        assert!(e.contains("string"), "{}", e);
+        assert!(config.plugins.is_empty(), "nothing written on refusal");
     }
 }

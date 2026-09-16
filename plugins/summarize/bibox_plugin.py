@@ -90,6 +90,14 @@ class fields:
         _notify("fields/set", {"fields": _norm_fields(m)})
 
 
+class settings:
+    @staticmethod
+    def set(key, value):
+        """Save one of this plugin's declared settings; bibox writes config.toml and sends config/changed."""
+        _request("settings/set", {"key": key, "value": value})
+        config[key] = value
+
+
 class library:
     @staticmethod
     def refresh():

@@ -1402,6 +1402,19 @@ impl App {
                             None => Err(RpcError::invalid_params(format!("unknown command {}", name))),
                         }
                     }
+                    // 플러그인이 자기 설정을 저장한다. Settings 화면과 같은 경로(save_settings)로 파일과 메모리를 같이 바꾼다.
+                    "settings/set" => {
+                        let key = params.get("key").and_then(Value::as_str).unwrap_or("");
+                        let value = params.get("value").cloned().unwrap_or(Value::Null);
+                        let manifests = self.host.manifests().to_vec();
+                        match crate::plugin::set_setting(&mut self.config, &manifests, &plugin, key, &value) {
+                            Ok(()) => {
+                                self.save_settings();
+                                Ok(serde_json::json!({}))
+                            }
+                            Err(e) => Err(RpcError::invalid_params(e)),
+                        }
+                    }
                     other => Err(RpcError::method_not_found(other)),
                 };
                 self.host.respond(&plugin, id, result);
