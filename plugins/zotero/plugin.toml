@@ -1,0 +1,25 @@
+api = 2
+name = "zotero"
+version = "0.1.0"
+description = "Import a Zotero library: entries, collections, tags, PDFs and notes"
+run = "python3 main.py"
+guide = "AGENT.md"
+
+[[commands]]
+id = "import"
+desc = "Import from Zotero"
+
+[[settings]]
+key = "data_dir"
+type = "string"
+default = ""
+desc = "Zotero data directory (empty: read Zotero's prefs.js, then ~/Zotero)"
+
+[[settings]]
+key = "all_tags"
+type = "bool"
+default = false
+desc = "Also import tags Zotero added automatically (arXiv categories and the like)"
+
+[cli]
+run = "python3 main.py"

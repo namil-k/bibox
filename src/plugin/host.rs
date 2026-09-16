@@ -778,6 +778,49 @@ mod tests {
         assert!(r["fields"].get("nodoi").is_none());
     }
 
+    /// zotero 플러그인: 합성 픽스처를 읽고 확인 팝업의 제목에 개수를 넣는다. 아니오면 아무것도 안 쓴다.
+    #[test]
+    fn zotero_import_asks_before_writing() {
+        let dir = std::env::temp_dir().join(format!("bibox-zotero-host-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let plugin_dir = dir.join("zotero");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins/zotero");
+        for f in ["plugin.toml", "main.py", "zotero_reader.py", "bibox_plugin.py", "test_zotero.py", "AGENT.md"] {
+            std::fs::copy(src.join(f), plugin_dir.join(f)).unwrap();
+        }
+        let fixture_root = dir.join("fixture");
+        let out = std::process::Command::new("python3")
+            .args(["-c", &format!("from test_zotero import make_fixture; d, b = make_fixture({:?}); print(d); print(b)", fixture_root.to_str().unwrap())])
+            .current_dir(&plugin_dir)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut lines = text.lines();
+        let (data_dir, base) = (lines.next().unwrap().to_string(), lines.next().unwrap().to_string());
+        let (manifests, problems) = crate::plugin::discover(&dir);
+        assert!(problems.is_empty(), "{:?}", problems);
+        let mut env = env();
+        env.extra.insert("BIBOX_ZOTERO_DATA_DIR".into(), data_dir);
+        env.extra.insert("BIBOX_ZOTERO_BASE_PATH".into(), base);
+        let host = PluginHost::new(manifests, BTreeMap::new(), env);
+        struct SayNo(Vec<String>);
+        impl UiSink for SayNo {
+            fn ask(&mut self, _plugin: &str, req: UiRequest) -> UiAnswer {
+                if let UiRequest::Confirm { title } = &req {
+                    self.0.push(title.clone().unwrap_or_default());
+                }
+                UiAnswer::cancel_for(&req)
+            }
+        }
+        let mut sink = SayNo(vec![]);
+        let r = host.call_with_ui_idle("zotero", "commands/run", json!({"command": "import", "trigger": "key"}), &mut sink, Duration::from_secs(30)).unwrap();
+        assert_eq!(r["message"], "cancelled");
+        assert_eq!(sink.0.len(), 1);
+        assert!(sink.0[0].starts_with("Import 3 entries (2 PDFs, 1 notes, 2 collections)"), "{}", sink.0[0]);
+    }
+
     fn alive(pid: u32) -> bool {
         std::process::Command::new("kill").args(["-0", &pid.to_string()]).stderr(std::process::Stdio::null()).status().map(|s| s.success()).unwrap_or(false)
     }

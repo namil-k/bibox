@@ -2976,11 +2976,11 @@ fn find_duplicate(db: &Database, rec: &ImportRecord) -> Option<(usize, String)> 
             .position(|e| e.doi.as_ref().map(|d| d.trim().to_lowercase() == doi).unwrap_or(false))
             .map(|i| (i, format!("same DOI as {}", db.entries[i].bibtex_key)));
     }
-    let title = rec.title.as_deref().map(norm_title)?;
-    let year = rec.year?;
+    // 연도가 둘 다 없어도 같은 제목이면 같은 항목이다(날짜 없는 Zotero 항목을 두 번 넣지 않게)
+    let title = rec.title.as_deref().map(norm_title).filter(|t| !t.is_empty())?;
     db.entries
         .iter()
-        .position(|e| e.year == Some(year) && e.title.as_deref().map(norm_title).as_deref() == Some(title.as_str()))
+        .position(|e| e.year == rec.year && e.title.as_deref().map(norm_title).as_deref() == Some(title.as_str()))
         .map(|i| (i, format!("same title and year as {}", db.entries[i].bibtex_key)))
 }
 
@@ -4872,6 +4872,16 @@ mod tests {
         r.year = Some(2024);
         let o = import_record(&mut db, 1, r, &mut ctx(&config, None));
         assert!(matches!(o.status, ImportStatus::Added), "a different year is a different paper");
+        let mut undated = rec(None, None);
+        undated.entry_type = EntryType::Misc;
+        undated.year = None;
+        undated.title = Some("No date here".into());
+        assert!(matches!(import_record(&mut db, 2, undated, &mut ctx(&config, None)).status, ImportStatus::Added));
+        let mut again = rec(None, None);
+        again.entry_type = EntryType::Misc;
+        again.year = None;
+        again.title = Some("no date HERE".into());
+        assert!(matches!(import_record(&mut db, 3, again, &mut ctx(&config, None)).status, ImportStatus::Skipped), "same title, both undated: the same item");
     }
 
     #[test]

@@ -2,8 +2,10 @@
 
 Run: python3 -m unittest discover -s plugins/zotero -p 'test_*.py'
 """
+import json
 import os
 import sqlite3
+import stat
 import tempfile
 import unittest
 
@@ -145,6 +147,14 @@ class ReaderTests(unittest.TestCase):
         self.assertEqual(len(m.notes_md), 1)
         self.assertIn("**Draft**", m.notes_md[0])
 
+    def test_an_article_without_a_date_is_imported_as_misc_not_dropped(self):
+        item = self.by_key("AAAA0001")
+        item["fields"].pop("date")
+        self.assertEqual(zr.map_item(item, {}).entry["entry_type"], "misc")
+        item = self.by_key("CONF0003")
+        item["creators"] = []
+        self.assertEqual(zr.map_item(item, {}).entry["entry_type"], "misc")
+
     def test_all_tags_includes_automatic(self):
         m = zr.map_item(self.by_key("AAAA0001"), {}, all_tags=True)
         self.assertEqual(m.entry["tags"], ["deep", "Computer Science - Machine Learning"])
@@ -233,6 +243,92 @@ class NoteTests(unittest.TestCase):
         md = zr.html_to_markdown("<div><p>A &amp; B</p><br><br><p></p><p>C</p></div>")
         self.assertEqual(md, "A & B\n\nC")
         self.assertEqual(zr.html_to_markdown(""), "")
+
+
+FAKE_BIBOX = r'''#!/usr/bin/env python3
+"""Records every call (argv + stdin) to calls.jsonl and answers import with a canned outcome array."""
+import json, os, sys
+log = os.path.join(os.path.dirname(os.path.abspath(__file__)), "calls.jsonl")
+data = sys.stdin.read() if not sys.stdin.isatty() else ""
+with open(log, "a") as f:
+    f.write(json.dumps({"argv": sys.argv[1:], "stdin": data}) + "\n")
+if sys.argv[1] == "import":
+    with open(sys.argv[2]) as f:
+        entries = json.load(f)
+    out = []
+    for i, e in enumerate(entries):
+        key = e.get("bibtex_key") or "key{}".format(i)
+        status = "skipped" if e.get("title") == "LiveBot" else "added"
+        out.append({"input": i, "key": key, "status": status})
+    print(json.dumps(out))
+'''
+
+
+class MainTests(unittest.TestCase):
+    """main.py talks to bibox only through $BIBOX_BIN; a fake binary records what it was asked."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="bibox-zotero-main-")
+        self.data_dir, self.base = make_fixture(self.tmp)
+        self.bin = os.path.join(self.tmp, "fakebibox")
+        with open(self.bin, "w") as f:
+            f.write(FAKE_BIBOX)
+        os.chmod(self.bin, os.stat(self.bin).st_mode | stat.S_IEXEC)
+        self.log = os.path.join(self.tmp, "calls.jsonl")
+        os.environ["BIBOX_BIN"] = self.bin
+        os.environ["BIBOX_PLUGIN_DIR"] = self.tmp
+        import main
+        self.main = main
+
+    def tearDown(self):
+        os.environ.pop("BIBOX_BIN", None)
+        os.environ.pop("BIBOX_PLUGIN_DIR", None)
+
+    def calls(self):
+        with open(self.log) as f:
+            return [json.loads(ln) for ln in f if ln.strip()]
+
+    def test_build_plan_counts_match_fixture(self):
+        plan = self.main.build_plan(data_dir=self.data_dir, base_path=self.base)
+        self.assertEqual(plan.counts, {"items": 3, "collections": 2, "pdfs_found": 2, "pdfs_missing": 1, "notes": 1})
+        self.assertEqual(len(plan.entries), 3)
+        self.assertEqual(list(plan.notes), [0], "notes are keyed by entry index until bibox assigns keys")
+        self.assertTrue(plan.missing_pdfs[0].endswith("vaswani.pdf"))
+        text = self.main.summary_text(plan)
+        self.assertIn("3 entries", text)
+        self.assertIn("2 PDFs", text)
+        self.assertIn("1 missing", text)
+        self.assertIn("1 note", text)
+
+    def test_collection_filter_limits_items(self):
+        plan = self.main.build_plan(data_dir=self.data_dir, base_path=self.base, collection="Parent/Child")
+        self.assertEqual([e["title"] for e in plan.entries], ["Deep Learning"])
+        plan = self.main.build_plan(data_dir=self.data_dir, base_path=self.base, collection="Parent")
+        self.assertEqual(sorted(e["title"] for e in plan.entries), ["Deep Learning", "LiveBot"], "a parent includes its children")
+
+    def test_run_import_calls_bibox_import_then_notes_for_added_and_merged_keys(self):
+        plan = self.main.build_plan(data_dir=self.data_dir, base_path=self.base)
+        result = self.main.run_import(plan, dry_run=False, log=lambda *_: None)
+        calls = self.calls()
+        self.assertEqual(calls[0]["argv"][0], "import")
+        self.assertIn("--json", calls[0]["argv"])
+        self.assertNotIn("--dry-run", calls[0]["argv"])
+        with open(calls[0]["argv"][1]) as f:
+            sent = json.load(f)
+        self.assertEqual(len(sent), 3)
+        self.assertTrue(all("file" in e or e["title"] == "Attention Is All You Need" for e in sent))
+        notes = [c for c in calls[1:] if c["argv"][0] == "note"]
+        self.assertEqual(len(notes), 1, "only the entry with a note")
+        self.assertEqual(notes[0]["argv"][:5], ["note", "key0", "--section", "Zotero", "--stdin"])
+        self.assertIn("**Draft**", notes[0]["stdin"])
+        self.assertEqual((result["added"], result["merged"], result["skipped"], result["notes"]), (2, 0, 1, 1))
+
+    def test_run_import_dry_run_passes_flag_and_writes_no_notes(self):
+        plan = self.main.build_plan(data_dir=self.data_dir, base_path=self.base)
+        self.main.run_import(plan, dry_run=True, log=lambda *_: None)
+        calls = self.calls()
+        self.assertEqual(len(calls), 1)
+        self.assertIn("--dry-run", calls[0]["argv"])
 
 
 if __name__ == "__main__":

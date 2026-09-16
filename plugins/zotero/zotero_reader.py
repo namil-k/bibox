@@ -75,6 +75,9 @@ def find_data_dir(explicit=None, home=None):
 
 
 def base_attachment_path(home=None):
+    """Zotero's linked attachment base directory: BIBOX_ZOTERO_BASE_PATH, else prefs.js."""
+    if os.environ.get("BIBOX_ZOTERO_BASE_PATH"):
+        return os.environ["BIBOX_ZOTERO_BASE_PATH"]
     home = home or os.path.expanduser("~")
     return read_prefs(profiles_dir(home)).get("baseAttachmentPath")
 
@@ -315,5 +318,8 @@ def map_item(item, citekeys, all_tags=False):
             break
         if missing is None:
             missing = a["path"]
+    # bibox는 article/book/inproceedings에 제목·저자·연도를 요구한다. 빠진 항목은 버리지 않고 misc로 넣는다
+    if e["entry_type"] != "misc" and (not e.get("title") or not e["author"] or "year" not in e):
+        e["entry_type"] = "misc"
     notes = [html_to_markdown(n) for n in item["notes"]]
     return Mapped(e, [n for n in notes if n], missing)
