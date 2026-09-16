@@ -7,15 +7,21 @@ guide = "AGENT.md"
 
 [[commands]]
 id = "open"
-desc = "Open the entry through your library proxy or link resolver"
+desc = "Open the entry through your library proxy or link resolver (the first link)"
 key = "u"
 menus = ["context"]
 
+[[commands]]
+id = "choose"
+desc = "Pick which library link to open the entry through"
+key = "v"
+menus = ["context"]
+
 [[settings]]
-key = "link"
+key = "links"
 type = "string"
 default = ""
-desc = "Library proxy prefix (https://ezproxy.example.edu/login?url=) or a template with {url}, {url_encoded} or {doi}"
+desc = "Library proxy links, one per line, first is the default: a prefix (https://ezproxy.example.edu/login?url=) or a template with {url}, {url_encoded} or {doi}"
 
 [cli]
 run = "python3 main.py"

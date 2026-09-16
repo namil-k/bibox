@@ -23,6 +23,17 @@ OPENURL = "https://resolver.example.edu/openurl?sid=bibox&id=doi:{doi}"
 
 
 class LinkTests(unittest.TestCase):
+    def test_parse_links_splits_on_whitespace_and_keeps_order(self):
+        self.assertEqual(main.parse_links("\n" + EZ + "\n  " + KHU + "\n\n"), [EZ, KHU])
+        self.assertEqual(main.parse_links(EZ + " " + ATHENS), [EZ, ATHENS], "one line with spaces works too")
+        self.assertEqual(main.parse_links(""), [])
+        self.assertEqual(main.parse_links(None), [])
+
+    def test_label_and_host_strip_what_the_user_does_not_need_to_read(self):
+        self.assertEqual(main.label(EZ), "ezproxy.example.edu/login?url=")
+        self.assertEqual(main.host(EZ), "ezproxy.example.edu")
+        self.assertEqual(main.host(ATHENS), "go.openathens.net")
+
     def test_target_url_prefers_doi_then_url_then_none(self):
         self.assertEqual(main.target_url(ACM), "https://doi.org/10.1145/3025453.3025912")
         self.assertEqual(main.target_url(URL_ONLY), "https://example.org/paper")
@@ -87,21 +98,57 @@ class OpenTests(unittest.TestCase):
         return []
 
     def test_open_cmd_launches_the_opener_once_per_entry_and_counts_skips(self):
-        self.config["link"] = EZ
+        self.config["links"] = EZ
         r = main.open_cmd({"command": "open", "trigger": "key", "entry": ACM, "entries": [ACM, URL_ONLY, BARE]})
-        self.assertEqual(r, "opened 2, skipped 1 (no DOI or URL)")
+        self.assertEqual(r, "opened 2 via ezproxy.example.edu, skipped 1 (no DOI or URL)")
         self.assertEqual(sorted(self.opened(2)), sorted([EZ + "https://doi.org/10.1145/3025453.3025912", EZ + "https://example.org/paper"]), "each once; the two openers run concurrently so order is free")
 
     def test_open_cmd_uses_the_cursor_entry_when_nothing_is_selected(self):
-        self.config["link"] = KHU
+        self.config["links"] = KHU
         r = main.open_cmd({"command": "open", "trigger": "menu", "entry": URL_ONLY, "entries": []})
-        self.assertEqual(r, "opened 1")
+        self.assertEqual(r, "opened 1 via openlink.khu.ac.kr")
         self.assertEqual(self.opened(1), [KHU + "https://example.org/paper"])
+
+    def test_open_cmd_uses_the_first_link_when_several_are_set(self):
+        self.config["links"] = EZ + "\n" + KHU
+        r = main.open_cmd({"command": "open", "trigger": "key", "entry": ACM, "entries": [ACM]})
+        self.assertEqual(r, "opened 1 via ezproxy.example.edu")
+        self.assertEqual(self.opened(1), [EZ + "https://doi.org/10.1145/3025453.3025912"])
 
     def test_open_cmd_without_a_link_tells_where_to_set_it(self):
         r = main.open_cmd({"command": "open", "trigger": "key", "entry": ACM, "entries": [ACM]})
-        self.assertTrue(r.startswith("Set proxy.link in Settings"), r)
+        self.assertTrue(r.startswith("Set proxy.links in Settings"), r)
         self.assertFalse(os.path.exists(self.log), "nothing opened")
+
+    def pick_returning(self, answer):
+        import bibox_plugin
+        asked = []
+
+        def fake_pick(title, items):
+            asked.append((title, list(items)))
+            return answer
+        bibox_plugin.window.pick = staticmethod(fake_pick)
+        return asked
+
+    def test_choose_cmd_opens_through_the_picked_link(self):
+        self.config["links"] = EZ + "\n" + KHU
+        asked = self.pick_returning(1)
+        r = main.choose_cmd({"command": "choose", "trigger": "key", "entry": ACM, "entries": [ACM]})
+        self.assertEqual(asked, [("Open through", ["ezproxy.example.edu/login?url=", "openlink.khu.ac.kr/link.n2s?url="])])
+        self.assertEqual(r, "opened 1 via openlink.khu.ac.kr")
+        self.assertEqual(self.opened(1), [KHU + "https://doi.org/10.1145/3025453.3025912"])
+
+    def test_choose_cmd_with_one_link_opens_without_asking_and_cancel_opens_nothing(self):
+        self.config["links"] = EZ
+        asked = self.pick_returning(0)
+        r = main.choose_cmd({"command": "choose", "trigger": "key", "entry": ACM, "entries": [ACM]})
+        self.assertEqual(r, "opened 1 via ezproxy.example.edu")
+        self.assertEqual(asked, [], "one link: nothing to choose")
+        self.config["links"] = EZ + "\n" + KHU
+        self.pick_returning(None)
+        r = main.choose_cmd({"command": "choose", "trigger": "key", "entry": URL_ONLY, "entries": [URL_ONLY]})
+        self.assertEqual(r, "cancelled")
+        self.assertEqual(self.opened(1), [EZ + "https://doi.org/10.1145/3025453.3025912"], "still only the first open")
 
 
 FAKE_BIBOX = r'''#!/usr/bin/env python3
@@ -136,17 +183,37 @@ class CliTests(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertEqual(p.stdout.strip(), EZ + "https://doi.org/10.1145/3025453.3025912")
 
-    def test_url_reads_the_link_from_config_toml_when_no_flag_is_given(self):
+    def write_config(self, *links):
         with open(os.path.join(self.tmp, "config.toml"), "w") as f:
-            f.write('bibox_dir = "/tmp/x"\n\n[plugins.proxy]\nlink = "{}"\n'.format(OPENURL))
+            f.write('bibox_dir = "/tmp/x"\n\n[plugins.proxy]\nlinks = """\n{}\n"""\n'.format("\n".join(links)))
+
+    def test_url_reads_the_first_link_from_config_toml_when_no_flag_is_given(self):
+        self.write_config(OPENURL, EZ)
         p = self.run_cli("url", "matejka2017", config_dir=self.tmp)
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertEqual(p.stdout.strip(), "https://resolver.example.edu/openurl?sid=bibox&id=doi:10.1145/3025453.3025912")
+
+    def test_via_picks_a_link_by_number_or_by_a_piece_of_its_host(self):
+        self.write_config(EZ, KHU)
+        p = self.run_cli("url", "matejka2017", "--via", "khu", config_dir=self.tmp)
+        self.assertEqual(p.stdout.strip(), KHU + "https://doi.org/10.1145/3025453.3025912", p.stderr)
+        p = self.run_cli("url", "matejka2017", "--via", "2", config_dir=self.tmp)
+        self.assertEqual(p.stdout.strip(), KHU + "https://doi.org/10.1145/3025453.3025912", p.stderr)
+        p = self.run_cli("url", "matejka2017", "--via", "nowhere", config_dir=self.tmp)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("no link matches", p.stderr)
+
+    def test_list_prints_the_links_in_priority_order(self):
+        self.write_config(EZ, KHU)
+        p = self.run_cli("list", config_dir=self.tmp)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stdout.splitlines(), ["1  " + EZ, "2  " + KHU])
 
     def test_url_fails_clearly_without_a_link_or_without_an_identifier(self):
         p = self.run_cli("url", "matejka2017")
         self.assertEqual(p.returncode, 1)
         self.assertIn("--link", p.stderr)
+        self.assertIn("links", p.stderr)
         p = self.run_cli("url", "bare1999", "--link", EZ)
         self.assertEqual(p.returncode, 1)
         self.assertIn("no DOI or URL", p.stderr)

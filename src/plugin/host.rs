@@ -778,7 +778,7 @@ mod tests {
         assert!(r["fields"].get("nodoi").is_none());
     }
 
-    /// proxy 플러그인: 설정의 link 접두사를 DOI URL 앞에 붙여 opener에 넘긴다. 브라우저 대신 기록 스크립트.
+    /// proxy 플러그인: 설정 links의 첫 줄을 DOI URL 앞에 붙여 opener에 넘긴다. 브라우저 대신 기록 스크립트.
     #[test]
     fn proxy_open_launches_the_configured_opener() {
         let dir = std::env::temp_dir().join(format!("bibox-proxy-host-{}", std::process::id()));
@@ -802,12 +802,13 @@ mod tests {
         let mut env = env();
         env.extra.insert("BIBOX_PROXY_OPENER".into(), opener.to_string_lossy().to_string());
         let mut tables = BTreeMap::new();
-        tables.insert("proxy".to_string(), json!({"link": "https://ezproxy.example.edu/login?url="}));
+        // 두 줄: 첫 줄이 기본. `u`(open)는 두 번째를 건드리지 않는다.
+        tables.insert("proxy".to_string(), json!({"links": "https://ezproxy.example.edu/login?url=\nhttps://openlink.khu.ac.kr/link.n2s?url=\n"}));
         let host = PluginHost::new(manifests, tables, env);
         let mut sink = NoUiSink;
         let entry = json!({"bibtex_key": "x2020", "doi": "10.1/x", "title": "X"});
         let r = host.call_with_ui_idle("proxy", "commands/run", json!({"command": "open", "trigger": "key", "entry": entry, "entries": [entry]}), &mut sink, Duration::from_secs(30)).unwrap();
-        assert_eq!(r["message"], "opened 1");
+        assert_eq!(r["message"], "opened 1 via ezproxy.example.edu");
         let mut text = String::new();
         for _ in 0..40 {
             text = std::fs::read_to_string(&log).unwrap_or_default();
