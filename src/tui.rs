@@ -293,6 +293,8 @@ enum PaneRow {
     /// 플러그인 페이지의 Installed 토글
     Installed(String),
     InstallFrom,
+    /// 플러그인 페이지의 명령 한 줄. Enter가 키를 누른 것처럼 실행하고 끝나면 Settings로 돌아온다.
+    Command(PluginCmdId),
 }
 
 /// 플러그인 페이지 머리 줄. 버전이 없는 플러그인(로컬, 오류)은 그 칸을 비우지 않고 건너뛴다.
@@ -301,7 +303,7 @@ fn plugin_page_title(name: &str, version: &str, source: &str) -> String {
 }
 
 fn selectable(row: &PaneRow) -> bool {
-    matches!(row, PaneRow::Item(_) | PaneRow::Plugin(_) | PaneRow::Installed(_) | PaneRow::InstallFrom)
+    matches!(row, PaneRow::Item(_) | PaneRow::Plugin(_) | PaneRow::Installed(_) | PaneRow::InstallFrom | PaneRow::Command(_))
 }
 
 fn first_selectable(rows: &[PaneRow]) -> usize {
@@ -1050,6 +1052,8 @@ fn draw_citation_popup(f: &mut Frame, idx: usize, area: Rect) {
 struct PluginRun {
     plugin: String,
     rx: Receiver<Result<Value, PluginError>>,
+    /// Settings의 명령 행에서 시작했으면 끝난 뒤 Settings로 돌아가고 결과는 알림 줄에.
+    back_to_settings: bool,
 }
 
 /// 팝업이 열려 있으면 뒤에 온 요청은 줄을 선다. 즉시 답할 수 있는 요청(빈 pick)은 호출자가 먼저 걸러 둔다.
@@ -1711,22 +1715,26 @@ impl App {
         std::thread::spawn(move || {
             let _ = tx.send(host.call(&p, "commands/run", params, None));
         });
-        self.plugin_run = Some(PluginRun { plugin: plugin.clone(), rx });
+        self.plugin_run = Some(PluginRun { plugin: plugin.clone(), rx, back_to_settings: false });
         self.spinner_tick = 0;
         self.mode = Mode::Loading(format!("{}: running", plugin));
     }
 
     /// 명령 응답. 오류면 그 문구, 아니면 `message`가 상태 줄에. apply/refresh는 이제 플러그인이 따로 요청한다.
-    fn finish_plugin(&mut self, plugin: &str, result: Result<Value, PluginError>) {
+    /// Settings에서 시작한 명령은 Settings로 돌아가고 문구는 그 알림 줄에.
+    fn finish_plugin(&mut self, plugin: &str, result: Result<Value, PluginError>, back_to_settings: bool) {
+        let (text, is_err) = match result {
+            Err(e) => (Some(format!("{}: {}", plugin, e)), true),
+            Ok(v) => (serde_json::from_value::<CommandResult>(v).unwrap_or_default().message, false),
+        };
+        if back_to_settings {
+            self.mode = Mode::Settings;
+            self.settings.notice = text.map(|t| (t, is_err));
+            return;
+        }
         self.mode = Mode::Normal;
-        match result {
-            Err(e) => self.show_message(format!("{}: {}", plugin, e)),
-            Ok(v) => {
-                let r: CommandResult = serde_json::from_value(v).unwrap_or_default();
-                if let Some(m) = r.message {
-                    self.show_message(m);
-                }
-            }
+        if let Some(t) = text {
+            self.show_message(t);
         }
     }
 
@@ -3119,6 +3127,11 @@ fn settings_pane_rows(app: &App, items: &[crate::settings::Item]) -> Vec<PaneRow
             rows.push(PaneRow::Installed(p.name.clone()));
             if p.installed && p.source != "error" {
                 rows.extend(items.iter().enumerate().filter(|(_, it)| it.plugin.as_deref() == Some(name)).map(|(i, _)| PaneRow::Item(i)));
+                let cmds: Vec<PaneRow> = app.host.commands().iter().filter(|(_, c)| &c.plugin == name).map(|(id, _)| PaneRow::Command(id)).collect();
+                if !cmds.is_empty() {
+                    rows.push(PaneRow::Blank);
+                    rows.extend(cmds);
+                }
             }
             rows
         }
@@ -3132,6 +3145,7 @@ fn row_desc(app: &App, items: &[crate::settings::Item], row: &PaneRow) -> String
         PaneRow::Item(i) => items[*i].desc.clone(),
         PaneRow::Plugin(name) => app.settings.plugins.iter().find(|p| &p.name == name).map(|p| p.description.clone()).unwrap_or_default(),
         PaneRow::InstallFrom => "owner/repo, a git URL or a local path".to_string(),
+        PaneRow::Command(id) => app.host.commands().get(*id).map(|c| format!("Enter runs {}", c.full_name())).unwrap_or_default(),
         PaneRow::Header(_) | PaneRow::Text(_) | PaneRow::Blank | PaneRow::Installed(_) => String::new(),
     }
 }
@@ -3224,6 +3238,14 @@ fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
                 let mark = if is_cursor { "> " } else { "  " };
                 let style = if is_cursor { Style::default().fg(theme().accent) } else { Style::default().fg(theme().heading) };
                 lines.push((Some(ri), Line::from(Span::styled(format!("{}Install from…", mark), style))));
+            }
+            PaneRow::Command(id) => {
+                let Some(c) = app.host.commands().get(*id) else { continue };
+                let mark = if is_cursor { "> " } else { "  " };
+                let key = c.key.as_ref().map(|ks| ks.iter().map(|k| crate::keymap::render_key(*k)).collect::<Vec<_>>().join("")).unwrap_or_default();
+                let style = if is_cursor { Style::default().fg(theme().accent) } else { Style::default().fg(theme().heading) };
+                let text = if key.is_empty() { format!("{}{}", mark, c.desc) } else { format!("{}{}  ({})", mark, c.desc, key) };
+                lines.push((Some(ri), Line::from(Span::styled(text, style))));
             }
             PaneRow::Item(i) => {
                 let it = &items[*i];
@@ -4315,6 +4337,12 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
                 app.settings.row = first_selectable(&rows);
             }
             Some(PaneRow::Installed(_)) => settings_step(app, &items, &rows, 1),
+            Some(PaneRow::Command(id)) => {
+                app.start_plugin_command(id, "menu");
+                if let Some(run) = app.plugin_run.as_mut() {
+                    run.back_to_settings = true;
+                }
+            }
             Some(PaneRow::InstallFrom) => {
                 app.mode = Mode::SettingsInput(SettingsInput {
                     title: app.config.msgs.plugin_install_from_title().to_string(),
@@ -5094,8 +5122,8 @@ fn run_loop(
             };
             match ev {
                 Ok(result) => {
-                    app.plugin_run = None;
-                    app.finish_plugin(&plugin, result);
+                    let back = app.plugin_run.take().map(|r| r.back_to_settings).unwrap_or(false);
+                    app.finish_plugin(&plugin, result, back);
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => { app.spinner_tick = app.spinner_tick.wrapping_add(1); }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {

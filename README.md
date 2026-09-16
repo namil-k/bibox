@@ -470,7 +470,7 @@ Anyone can publish one: push the directory to a repository and others install it
 
 **Install.** `bibox plugin install namil-k/bibox/plugins/citations` clones from GitHub, `bibox plugin install ./my-plugin` symlinks a local directory, `bibox plugin list` shows what is installed and where it came from (`built-in`, `local`, `git`, `dir`), `bibox plugin remove <name>` deletes it. Turning a plugin off is removing it; a built-in comes back with `bibox plugin install <name>` and needs no network. Installing from a repository shows where the code comes from and what it runs, then asks. Nobody has reviewed code that is not in a registry.
 
-**In the TUI.** `,` then Plugins lists what is installed and which built-in plugins are not. `Enter` opens a plugin page: description, an `Installed` toggle (`h`/`l`; removing an external plugin asks first) and the settings the plugin declares. `Install from…` at the end of the list takes `owner/repo`, a git URL or a local path and shows the same confirmation as the CLI.
+**In the TUI.** `,` then Plugins lists what is installed and which built-in plugins are not. `Enter` opens a plugin page: description, an `Installed` toggle (`h`/`l`; removing an external plugin asks first), the settings the plugin declares, and its commands (with their keys) which `Enter` runs from right there, coming back to the page when the command is done. `Install from…` at the end of the list takes `owner/repo`, a git URL or a local path and shows the same confirmation as the CLI.
 
 **Write one.** `bibox plugin new my-plugin` creates a working skeleton with a Python helper (`serve`, `window`, `status`, `fields`, `library`, `@on(event)`, `cache`). The contract for other languages is JSON-RPC 2.0 without headers:
 
