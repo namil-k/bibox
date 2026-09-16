@@ -1,0 +1,21 @@
+api = 2
+name = "proxy"
+version = "0.1.0"
+description = "Open entries through your library proxy or link resolver"
+run = "python3 main.py"
+guide = "AGENT.md"
+
+[[commands]]
+id = "open"
+desc = "Open the entry through your library proxy or link resolver"
+key = "u"
+menus = ["context"]
+
+[[settings]]
+key = "link"
+type = "string"
+default = ""
+desc = "Library proxy prefix (https://ezproxy.example.edu/login?url=) or a template with {url}, {url_encoded} or {doi}"
+
+[cli]
+run = "python3 main.py"

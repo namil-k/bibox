@@ -778,6 +778,47 @@ mod tests {
         assert!(r["fields"].get("nodoi").is_none());
     }
 
+    /// proxy 플러그인: 설정의 link 접두사를 DOI URL 앞에 붙여 opener에 넘긴다. 브라우저 대신 기록 스크립트.
+    #[test]
+    fn proxy_open_launches_the_configured_opener() {
+        let dir = std::env::temp_dir().join(format!("bibox-proxy-host-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let plugin_dir = dir.join("proxy");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins/proxy");
+        for f in ["plugin.toml", "main.py", "bibox_plugin.py", "AGENT.md"] {
+            std::fs::copy(src.join(f), plugin_dir.join(f)).unwrap();
+        }
+        let log = dir.join("opened.txt");
+        let opener = dir.join("opener.sh");
+        std::fs::write(&opener, format!("#!/bin/sh\necho \"$1\" >> {:?}\n", log)).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&opener, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let (manifests, problems) = crate::plugin::discover(&dir);
+        assert!(problems.is_empty(), "{:?}", problems);
+        let mut env = env();
+        env.extra.insert("BIBOX_PROXY_OPENER".into(), opener.to_string_lossy().to_string());
+        let mut tables = BTreeMap::new();
+        tables.insert("proxy".to_string(), json!({"link": "https://ezproxy.example.edu/login?url="}));
+        let host = PluginHost::new(manifests, tables, env);
+        let mut sink = NoUiSink;
+        let entry = json!({"bibtex_key": "x2020", "doi": "10.1/x", "title": "X"});
+        let r = host.call_with_ui_idle("proxy", "commands/run", json!({"command": "open", "trigger": "key", "entry": entry, "entries": [entry]}), &mut sink, Duration::from_secs(30)).unwrap();
+        assert_eq!(r["message"], "opened 1");
+        let mut text = String::new();
+        for _ in 0..40 {
+            text = std::fs::read_to_string(&log).unwrap_or_default();
+            if !text.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(text.trim(), "https://ezproxy.example.edu/login?url=https://doi.org/10.1/x");
+    }
+
     /// zotero 플러그인: 합성 픽스처를 읽고 확인 팝업의 제목에 개수를 넣는다. 아니오면 아무것도 안 쓴다.
     #[test]
     fn zotero_import_asks_before_writing() {
