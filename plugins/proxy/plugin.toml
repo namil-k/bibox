@@ -17,6 +17,11 @@ desc = "Pick which library link to open the entry through"
 key = "v"
 menus = ["context"]
 
+[[commands]]
+id = "find"
+desc = "Find your library by name and make it the default"
+menus = ["context"]
+
 [[settings]]
 key = "links"
 type = "string"

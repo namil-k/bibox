@@ -786,7 +786,7 @@ mod tests {
         let plugin_dir = dir.join("proxy");
         std::fs::create_dir_all(&plugin_dir).unwrap();
         let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("plugins/proxy");
-        for f in ["plugin.toml", "main.py", "bibox_plugin.py", "AGENT.md"] {
+        for f in ["plugin.toml", "main.py", "registry.py", "registry.json", "bibox_plugin.py", "AGENT.md"] {
             std::fs::copy(src.join(f), plugin_dir.join(f)).unwrap();
         }
         let log = dir.join("opened.txt");

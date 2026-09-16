@@ -4,14 +4,16 @@ Open a paper through your university library, from bibox. Press `u` on an entry 
 
 ## Setup
 
-Install, then put your library's link in Settings (`,` then Plugins) or in `config.toml`:
+Install, then find your library by name, the way Google Scholar's "Library links" setting works:
 
     bibox plugin install namil-k/bibox/plugins/proxy
+
+In bibox, run `proxy.find` (right-click menu, or bind a key: `{ on = "f", run = "proxy.find" }` in `keymap.toml`), type part of the name (`seoul national`, `paris-saclay`, `max planck`) and pick the match. The link is saved as your default. `bibox proxy find seoul national` prints the same matches from the shell. The directory is a snapshot of two public lists, 1,513 proxies from [libproxy-db.org](https://libproxy-db.org/) (CC BY-SA 4.0) and 507 link resolvers from [Zotero's directory](https://www.zotero.org/support/locate/openurl_resolvers); `bibox proxy update` refetches both. A library that is missing can be added to those lists, or written by hand:
 
     [plugins.proxy]
     links = "https://ezproxy.example.edu/login?url="
 
-More than one library: one link per line, the first is the one `u` uses.
+More than one library: one link per line, the first is the one `u` uses (`proxy.find` puts the library you pick first).
 
     [plugins.proxy]
     links = """
@@ -28,7 +30,7 @@ Each link is a prefix that goes before the paper's URL (`https://doi.org/<doi>`,
 | OpenAthens | `https://go.openathens.net/redirector/example.edu?url={url_encoded}` |
 | An OpenURL link resolver (the one behind Google Scholar's "FindIt@...") | `https://resolver.example.edu/openurl?sid=bibox&id=doi:{doi}` |
 
-**Finding your value.** Any of these works:
+**Finding your value by hand** (when the directory does not have your library). Any of these works:
 
 - Your library's "proxy bookmarklet" (search the library site for "bookmarklet" or "off-campus access"): the text between `location.href='` and `'+` is the prefix.
 - Off campus, click any database link on the library site and look at the address bar: everything before the database's own URL is the prefix.

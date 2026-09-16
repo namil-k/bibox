@@ -4,6 +4,8 @@ Opens an entry in the browser through the user's library proxy or link resolver,
 
 ## From the shell
 
+    bibox proxy find <words...>                         # libraries whose name or country contains every word, with their links
+    bibox proxy update                                  # refetch the directory (libproxy-db.org and Zotero's resolver list) into registry.json
     bibox proxy list                                   # the configured links, numbered, first is the default
     bibox proxy url <key> [--via N_OR_HOST] [--link L]  # print the proxied URL, open nothing
     bibox proxy open <key> [--via N_OR_HOST] [--link L] # open it in the default browser, then print it
@@ -12,4 +14,4 @@ Opens an entry in the browser through the user's library proxy or link resolver,
 
 ## In the TUI
 
-`u` opens the selected entries through the first link; `v` asks which link first (with a single link it opens right away). Both are in the right-click menu. The status popup says `opened 2 via ezproxy.example.edu, skipped 1 (no DOI or URL)`. With no links it says where to set them.
+`u` opens the selected entries through the first link; `v` asks which link first (with a single link it opens right away); `proxy.find` (no default key) asks for a library name, shows the matches and saves the picked link as the new first line of `links`. All three are in the right-click menu. The status popup says `opened 2 via ezproxy.example.edu, skipped 1 (no DOI or URL)`. With no links it says where to set them.

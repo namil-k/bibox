@@ -1,6 +1,7 @@
 """Open an entry through your library's proxy or link resolver.
 
-CLI (`bibox proxy list|url|open`, BIBOX_CLI=1) and TUI commands (`proxy.open`, `proxy.choose`) share proxied().
+CLI (`bibox proxy list|url|open|find|update`, BIBOX_CLI=1) and TUI commands (`proxy.open`, `proxy.choose`, `proxy.find`) share proxied().
+`find` looks a library up by name in registry.json (see registry.py) and saves its link first through settings/set.
 The `links` setting holds one link per line, the first is the default: a prefix (`https://ezproxy.example.edu/login?url=`)
 or a template with {url}, {url_encoded} or {doi}. Nothing is downloaded here: the browser is logged in, bibox is not.
 """
@@ -10,6 +11,8 @@ import os
 import subprocess
 import sys
 import urllib.parse
+
+import registry
 
 PLACEHOLDERS = ("{url}", "{url_encoded}", "{doi}")
 SETUP_HINT = "Set proxy.links in Settings (,): your library's proxy prefix, one per line. See the proxy plugin README"
@@ -136,6 +139,28 @@ def choose_cmd(params):
     return _open_via(links[index], params)
 
 
+def find_cmd(params):
+    """Look a library up by name, put its link first, save. The Google Scholar "Library links" flow."""
+    from bibox_plugin import config, settings, window
+
+    query = window.prompt("Library name (e.g. Seoul National, Paris-Saclay)")
+    if not query or not query.strip():
+        return "cancelled"
+    hits = registry.search(registry.load(), query)
+    if not hits:
+        return "no library matches {!r}. The plugin README says how to find the link by hand".format(query.strip())
+    index = window.pick("Use", [registry.label(e) for e in hits[:40]])
+    if index is None:
+        return "cancelled"
+    chosen = hits[index]
+    links = [chosen["link"]] + [l for l in parse_links(config.get("links")) if l != chosen["link"]]
+    try:
+        settings.set("links", "\n".join(links))
+    except RuntimeError as e:
+        return "could not save: {}".format(e)
+    return "{} is now your default library ({})".format(chosen["name"], host(chosen["link"]))
+
+
 # ── CLI ─────────────────────────────────────────────────────────────────────
 
 def _bibox(*args):
@@ -164,15 +189,33 @@ def cli(argv):
     ap = argparse.ArgumentParser(prog="bibox proxy", description="Open entries through your library proxy or link resolver.")
     sub = ap.add_subparsers(dest="cmd")
     sub.add_parser("list", help="print the configured links, first is the default")
+    sub.add_parser("find", help="look a library up by name in the bundled directory").add_argument("query", nargs="+")
+    sub.add_parser("update", help="refetch the library directory (libproxy-db.org and Zotero's resolver list)")
     for name, help_ in (("url", "print the proxied URL of an entry"), ("open", "open the entry in the browser through the proxy")):
         p = sub.add_parser(name, help=help_)
         p.add_argument("key", help="citation key")
         p.add_argument("--via", metavar="N_OR_HOST", help="which configured link: its number or a piece of its host (default: the first)")
         p.add_argument("--link", help="use this prefix or template instead of the configured ones")
     args = ap.parse_args(argv)
-    if args.cmd not in ("list", "url", "open"):
+    if args.cmd not in ("list", "url", "open", "find", "update"):
         ap.print_help()
         return 2
+    if args.cmd == "find":
+        hits = registry.search(registry.load(), " ".join(args.query))
+        if not hits:
+            print("bibox proxy: no library matches {!r}. The plugin README says how to find the link by hand".format(" ".join(args.query)), file=sys.stderr)
+            return 1
+        for i, e in enumerate(hits, 1):
+            print("{}  {}  {}".format(i, registry.label(e).split("  ")[0], e["link"]))
+        return 0
+    if args.cmd == "update":
+        try:
+            p, r = registry.update()
+        except OSError as e:
+            print("bibox proxy: could not fetch the directory: {}".format(e), file=sys.stderr)
+            return 1
+        print("registry.json: {} proxies, {} link resolvers".format(p, r))
+        return 0
     links = links_from_config()
     if args.cmd == "list":
         for i, l in enumerate(links, 1):
@@ -206,4 +249,4 @@ if __name__ == "__main__":
         sys.exit(cli(sys.argv[1:]))
     from bibox_plugin import serve
 
-    serve({"open": open_cmd, "choose": choose_cmd})
+    serve({"open": open_cmd, "choose": choose_cmd, "find": find_cmd})

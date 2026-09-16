@@ -11,6 +11,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import main  # noqa: E402
+import registry  # noqa: E402
 
 ACM = {"bibtex_key": "matejka2017", "doi": "10.1145/3025453.3025912", "url": "https://dl.acm.org/doi/10.1145/3025453.3025912"}
 URL_ONLY = {"bibtex_key": "web2020", "url": "https://example.org/paper"}
@@ -59,6 +60,62 @@ class LinkTests(unittest.TestCase):
             main.proxied("   ", ACM)
         self.assertIsNone(main.proxied(OPENURL, URL_ONLY), "a DOI template cannot use a URL-only entry")
         self.assertIsNone(main.proxied(ATHENS, BARE))
+
+
+LIBPROXY = [
+    {"name": "Seoul National University", "url": "https://ezproxy.snu.ac.kr/login?url=$@", "country": "South Korea", "location": {"lat": 1, "lng": 2}},
+    {"name": "Yonsei", "url": "https://access.yonsei.ac.kr/link.n2s?url=$@", "country": "South Korea"},
+    {"name": "Odd University", "url": "https://odd.example.edu/go?target=$@&campus=1", "country": "Nowhere"},
+]
+
+ZOTERO_RAW = """===== Asia =====
+==== China ====
+|Peking University|%%https://zm8lp2fe5j.search.serialssolutions.com/%%|
+===== Africa =====
+|University of Cape Town|%%https://uct.primo.exlibrisgroup.com/openurl/27UCT_INST/27UCT_INST:27UCT%%|
+===== Europe =====
+==== Germany ====
+|Max Planck Society URL|%%http://sfx.mpg.de/sfx_local%%|
+|Broken line without url|
+"""
+
+
+class RegistryTests(unittest.TestCase):
+    def test_libproxy_entries_become_prefixes_or_url_templates(self):
+        r = registry.convert_libproxy(LIBPROXY)
+        self.assertEqual(r[0], {"name": "Seoul National University", "country": "South Korea", "link": "https://ezproxy.snu.ac.kr/login?url=", "kind": "proxy"})
+        self.assertEqual(r[1]["link"], "https://access.yonsei.ac.kr/link.n2s?url=")
+        self.assertEqual(r[2]["link"], "https://odd.example.edu/go?target={url}&campus=1", "$@ in the middle becomes {url}")
+
+    def test_zotero_resolvers_get_a_doi_query_and_their_country(self):
+        r = registry.parse_zotero(ZOTERO_RAW)
+        self.assertEqual([e["name"] for e in r], ["Peking University", "University of Cape Town", "Max Planck Society URL"])
+        self.assertEqual(r[0]["country"], "China")
+        self.assertEqual(r[1]["country"], "Africa", "a region without country headings is the best we have")
+        self.assertEqual(r[0]["link"], "https://zm8lp2fe5j.search.serialssolutions.com/?url_ver=Z39.88-2004&rfr_id=info:sid/bibox&rft_id=info:doi/{doi}")
+        self.assertEqual(r[2]["kind"], "resolver")
+        with_query = registry.parse_zotero("|X|%%https://x.example/openurl?vid=1%%|\n")
+        self.assertTrue(with_query[0]["link"].startswith("https://x.example/openurl?vid=1&url_ver="), with_query[0]["link"])
+
+    def test_search_matches_every_word_against_name_and_country_case_insensitively(self):
+        entries = registry.convert_libproxy(LIBPROXY) + registry.parse_zotero(ZOTERO_RAW)
+        self.assertEqual([e["name"] for e in registry.search(entries, "seoul")], ["Seoul National University"])
+        self.assertEqual([e["name"] for e in registry.search(entries, "south korea")], ["Seoul National University", "Yonsei"])
+        self.assertEqual([e["name"] for e in registry.search(entries, "university korea")], ["Seoul National University"])
+        self.assertEqual(registry.search(entries, "nothing here"), [])
+        self.assertEqual(registry.search(entries, "  "), [])
+
+    def test_label_shows_name_country_and_where_the_link_goes(self):
+        e = registry.convert_libproxy(LIBPROXY)[0]
+        self.assertEqual(registry.label(e), "Seoul National University (South Korea)  ezproxy.snu.ac.kr")
+        z = registry.parse_zotero(ZOTERO_RAW)[2]
+        self.assertEqual(registry.label(z), "Max Planck Society URL (Germany)  resolver sfx.mpg.de")
+
+    def test_load_reads_the_bundled_snapshot_and_it_is_not_tiny(self):
+        entries = registry.load()
+        self.assertGreater(len(entries), 1500)
+        self.assertTrue(any(e["name"] == "Seoul National University" for e in entries))
+        self.assertTrue(all(set(e) == {"name", "country", "link", "kind"} for e in entries))
 
 
 OPENER = '''#!/bin/sh
@@ -138,6 +195,28 @@ class OpenTests(unittest.TestCase):
         self.assertEqual(r, "opened 1 via openlink.khu.ac.kr")
         self.assertEqual(self.opened(1), [KHU + "https://doi.org/10.1145/3025453.3025912"])
 
+    def test_find_cmd_puts_the_picked_library_first_and_saves_it(self):
+        import bibox_plugin
+        self.config["links"] = KHU
+        saved = []
+        bibox_plugin.window.prompt = staticmethod(lambda title, default="": "seoul national")
+        asked = self.pick_returning(0)
+        bibox_plugin.settings.set = staticmethod(lambda k, v: saved.append((k, v)))
+        r = main.find_cmd({"command": "find", "trigger": "key"})
+        self.assertEqual(asked[0][0], "Use")
+        self.assertTrue(asked[0][1][0].startswith("Seoul National University (South Korea)"), asked[0][1])
+        snu = next(e for e in registry.load() if e["name"] == "Seoul National University")
+        self.assertEqual(saved, [("links", snu["link"] + "\n" + KHU)], "picked link first, the old default second")
+        self.assertEqual(r, "Seoul National University is now your default library ({})".format(registry.host(snu["link"])))
+
+    def test_find_cmd_reports_no_match_and_cancel(self):
+        import bibox_plugin
+        bibox_plugin.window.prompt = staticmethod(lambda title, default="": "zzzz no such place")
+        r = main.find_cmd({"command": "find", "trigger": "key"})
+        self.assertIn("no library matches", r)
+        bibox_plugin.window.prompt = staticmethod(lambda title, default="": None)
+        self.assertEqual(main.find_cmd({"command": "find", "trigger": "key"}), "cancelled")
+
     def test_choose_cmd_with_one_link_opens_without_asking_and_cancel_opens_nothing(self):
         self.config["links"] = EZ
         asked = self.pick_returning(0)
@@ -202,6 +281,15 @@ class CliTests(unittest.TestCase):
         p = self.run_cli("url", "matejka2017", "--via", "nowhere", config_dir=self.tmp)
         self.assertEqual(p.returncode, 1)
         self.assertIn("no link matches", p.stderr)
+
+    def test_find_prints_matches_numbered_with_their_links(self):
+        p = self.run_cli("find", "seoul national")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        snu = next(e for e in registry.load() if e["name"] == "Seoul National University")
+        self.assertIn("1  Seoul National University (South Korea)  " + snu["link"], p.stdout)
+        p = self.run_cli("find", "zzzz no such place")
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("no library matches", p.stderr)
 
     def test_list_prints_the_links_in_priority_order(self):
         self.write_config(EZ, KHU)
