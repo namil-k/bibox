@@ -20,6 +20,9 @@ enum KeyField {
 struct CommandFile {
     id: String,
     desc: String,
+    /// Settings의 설명 상자에 보이는 긴 설명. 없으면 bibox가 "Enter runs <plugin>.<id>"를 쓴다.
+    #[serde(default)]
+    help: Option<String>,
     #[serde(default)]
     key: Option<KeyField>,
     #[serde(default)]
@@ -145,6 +148,7 @@ pub const MENUS: [&str; 1] = ["context"];
 pub struct Command {
     pub id: String,
     pub desc: String,
+    pub help: Option<String>,
     pub key: Option<Vec<KeyPress>>,
     pub layers: Vec<LayerId>,
     pub menus: Vec<String>,
@@ -492,7 +496,7 @@ fn build(dir: &Path, file: ManifestFile, run_override: Option<Vec<String>>, prob
                 }
             }
         };
-        commands.push(Command { id: cf.id.clone(), desc: cf.desc.clone(), key, layers, menus: cf.menus.clone() });
+        commands.push(Command { id: cf.id.clone(), desc: cf.desc.clone(), help: cf.help.clone(), key, layers, menus: cf.menus.clone() });
     }
 
     let activation = match file.activation.as_deref() {
@@ -660,6 +664,7 @@ activation = "startup"
 [[commands]]
 id = "tidy"
 desc = "Tidy the selected entries"
+help = "Normalises author names and page ranges in place; undo with u."
 key = "="
 layers = ["entries", "preview"]
 menus = ["context"]
@@ -699,6 +704,7 @@ run = "python3 cli.py"
         assert_eq!(c.key, Some(vec![KeyPress::new(KeyCode::Char('='), KeyModifiers::NONE)]));
         assert_eq!(c.layers, vec![LayerId::Entries, LayerId::Preview]);
         assert_eq!(c.menus, vec!["context"]);
+        assert_eq!(c.help.as_deref(), Some("Normalises author names and page ranges in place; undo with u."));
         assert_eq!(m.fields.len(), 1);
         assert_eq!((m.fields[0].id.as_str(), m.fields[0].place.as_str(), m.fields[0].align.as_str(), m.fields[0].width), ("count", "row.1", "right", 8));
         assert_eq!(m.fields[0].color.as_deref(), Some("yellow"));

@@ -497,6 +497,7 @@ activation = "startup"               # optional: start with the TUI (default "la
 [[commands]]
 id = "refresh"
 desc = "Refetch the citation count of the selected entries"
+help = "Asks Crossref again for the selected entries and updates the row."   # optional: shown in the Settings page
 key = "<C-r>"                        # default key; users override it in keymap.toml as run = "citations.refresh"
 menus = ["context"]                  # right-click menu
 

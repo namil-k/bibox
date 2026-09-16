@@ -1364,6 +1364,7 @@ mod tests {
             by_plugin.entry(plugin.to_string()).or_default().push(Command {
                 id: id.to_string(),
                 desc: format!("{} desc", id),
+                help: None,
                 key: key.map(|k| k.split(' ').map(|t| parse_key(t).unwrap()).collect()),
                 layers: layers.to_vec(),
                 menus: vec![],

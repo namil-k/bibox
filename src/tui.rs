@@ -3145,7 +3145,7 @@ fn row_desc(app: &App, items: &[crate::settings::Item], row: &PaneRow) -> String
         PaneRow::Item(i) => items[*i].desc.clone(),
         PaneRow::Plugin(name) => app.settings.plugins.iter().find(|p| &p.name == name).map(|p| p.description.clone()).unwrap_or_default(),
         PaneRow::InstallFrom => "owner/repo, a git URL or a local path".to_string(),
-        PaneRow::Command(id) => app.host.commands().get(*id).map(|c| format!("Enter runs {}", c.full_name())).unwrap_or_default(),
+        PaneRow::Command(id) => app.host.commands().get(*id).map(|c| c.help.clone().unwrap_or_else(|| format!("Enter runs {}", c.full_name()))).unwrap_or_default(),
         PaneRow::Header(_) | PaneRow::Text(_) | PaneRow::Blank | PaneRow::Installed(_) => String::new(),
     }
 }
@@ -3154,7 +3154,7 @@ fn row_desc(app: &App, items: &[crate::settings::Item], row: &PaneRow) -> String
 const DESC_MAX_LINES: usize = 4;
 
 fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
-    use crate::settings::{desc_height, desc_lines, wrap_words, Section};
+    use crate::settings::{desc_height, desc_lines, wrap_hard, wrap_words, Section};
     let height = (area.height * 7 / 10).max(12).min(area.height);
     let popup_area = centered_rect(80, height, area);
     clear_area(f, popup_area);
@@ -3244,15 +3244,23 @@ fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
                 let mark = if is_cursor { "> " } else { "  " };
                 let key = c.key.as_ref().map(|ks| ks.iter().map(|k| crate::keymap::render_key(*k)).collect::<Vec<_>>().join("")).unwrap_or_default();
                 let style = if is_cursor { Style::default().fg(theme().accent) } else { Style::default().fg(theme().heading) };
-                let text = if key.is_empty() { format!("{}{}", mark, c.desc) } else { format!("{}{}  ({})", mark, c.desc, key) };
-                lines.push((Some(ri), Line::from(Span::styled(text, style))));
+                let text = if key.is_empty() { c.desc.clone() } else { format!("{}  ({})", c.desc, key) };
+                for (k, l) in wrap_hard(&text, width.saturating_sub(3)).into_iter().enumerate() {
+                    lines.push((if k == 0 { Some(ri) } else { None }, Line::from(Span::styled(format!("{}{}", if k == 0 { mark } else { "  " }, l), style))));
+                }
             }
             PaneRow::Item(i) => {
+                // 값이 길면(URL, 경로) 값 열 안에서 접는다. 이어지는 줄은 값 열에 맞춰 들여쓴다.
                 let it = &items[*i];
                 let mark = if is_cursor { "> " } else { "  " };
                 let val = crate::settings::value(it, &app.config);
                 let style = if is_cursor { Style::default().fg(theme().accent) } else { Style::default() };
-                lines.push((Some(ri), Line::from(Span::styled(format!("{}{:<18} [{}]", mark, it.label, val), style))));
+                let head = format!("{}{:<18} ", mark, it.label);
+                let indent = " ".repeat(head.chars().count());
+                for (k, l) in wrap_hard(&format!("[{}]", val), width.saturating_sub(head.chars().count() + 1)).into_iter().enumerate() {
+                    let prefix = if k == 0 { head.clone() } else { indent.clone() };
+                    lines.push((if k == 0 { Some(ri) } else { None }, Line::from(Span::styled(format!("{}{}", prefix, l), style))));
+                }
             }
         }
     }
@@ -5886,8 +5894,8 @@ mod tests {
         let m = Manifest {
             name: "tidy".into(), version: None, description: None, run: vec!["sh".into()],
             commands: vec![
-                Command { id: "run".into(), desc: "Normalize the entry".into(), key: Some(vec![parse_key("=").unwrap()]), layers: vec![LayerId::Entries], menus: vec!["context".into()] },
-                Command { id: "quiet".into(), desc: "No menu".into(), key: None, layers: vec![LayerId::Entries], menus: vec![] },
+                Command { id: "run".into(), desc: "Normalize the entry".into(), help: None, key: Some(vec![parse_key("=").unwrap()]), layers: vec![LayerId::Entries], menus: vec!["context".into()] },
+                Command { id: "quiet".into(), desc: "No menu".into(), help: None, key: None, layers: vec![LayerId::Entries], menus: vec![] },
             ],
             activation: crate::plugin::manifest::Activation::Lazy, fields: vec![], views: vec![], events: vec![], cli: None, settings: vec![], builtin: None, dir: "/tmp".into(), guide: None,
         };

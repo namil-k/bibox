@@ -8,23 +8,27 @@ guide = "AGENT.md"
 [[commands]]
 id = "open"
 desc = "Open through your library (link1)"
+help = "Opens the selected entries in the browser through link1. Log in there; bibox never fetches through the proxy itself."
 key = "u"
 menus = ["context"]
 
 [[commands]]
 id = "choose"
 desc = "Open through a library you pick"
+help = "Shows link1 to link5 and opens through the one you pick. The last item, Manage links, reorders them."
 key = "v"
 menus = ["context"]
 
 [[commands]]
 id = "find"
 desc = "Find your library by name"
+help = "Searches a directory of 2,000 library proxies and link resolvers by name or country and saves the match as link1."
 menus = ["context"]
 
 [[commands]]
 id = "links"
 desc = "Manage links: order, add, remove"
+help = "Lists link1 to link5; pick one to make it the default, move it up or down, or remove it. Add by hand or from the directory."
 menus = ["context"]
 
 [[settings]]

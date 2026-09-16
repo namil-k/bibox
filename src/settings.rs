@@ -514,6 +514,38 @@ pub fn wrap_words(text: &str, width: usize) -> Vec<String> {
     out
 }
 
+/// `wrap_words`와 같되 폭보다 긴 단어(URL, 경로)는 글자에서 끊는다. 값 행에 쓴다.
+pub fn wrap_hard(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(8);
+    let mut out = Vec::new();
+    let mut line = String::new();
+    for word in text.split_whitespace() {
+        let chars: Vec<char> = word.chars().collect();
+        let mut rest = &chars[..];
+        while !rest.is_empty() {
+            let used = line.chars().count();
+            let room = if line.is_empty() { width } else { width.saturating_sub(used + 1) };
+            if rest.len() <= room {
+                if !line.is_empty() {
+                    line.push(' ');
+                }
+                line.extend(rest.iter());
+                rest = &[];
+            } else if line.is_empty() {
+                line.extend(rest[..width].iter());
+                rest = &rest[width..];
+                out.push(std::mem::take(&mut line));
+            } else {
+                out.push(std::mem::take(&mut line));
+            }
+        }
+    }
+    if !line.is_empty() || out.is_empty() {
+        out.push(line);
+    }
+    out
+}
+
 /// 설명 상자의 줄 수: 목록에 보이는 설명 중 가장 긴 것(줄바꿈 뒤)에 맞춘다. 1..=max.
 /// 커서를 옮겨도 목록이 위아래로 움직이지 않도록 절 단위로 한 번 정한다.
 pub fn desc_height(descs: &[&str], width: usize, max: usize) -> usize {
@@ -586,6 +618,16 @@ pub fn search(items: &[Item], plugins: &[(String, String)], query: &str) -> Vec<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 값 행의 접기: 단어 단위지만 URL처럼 폭보다 긴 한 덩어리는 글자에서 끊는다.
+    #[test]
+    fn wrap_hard_breaks_a_long_url_by_characters_and_keeps_short_words_whole() {
+        assert_eq!(wrap_hard("[https://go.openathens.net/redirector/example.edu?url={url_encoded}]", 30), vec!["[https://go.openathens.net/red", "irector/example.edu?url={url_e", "ncoded}]"]);
+        assert_eq!(wrap_hard("Open through your library (link1)  (u)", 20), vec!["Open through your", "library (link1) (u)"]);
+        assert_eq!(wrap_hard("short", 30), vec!["short"]);
+        assert_eq!(wrap_hard("", 30), vec![""]);
+        assert_eq!(wrap_hard("abcdefghij", 8).len(), 2, "width floor is 8");
+    }
 
     fn find<'a>(items: &'a [Item], id: &str) -> &'a Item {
         items.iter().find(|i| i.id == id).unwrap_or_else(|| panic!("no item {}", id))

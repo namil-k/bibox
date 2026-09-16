@@ -27,6 +27,7 @@ pub struct PluginCommand {
     pub plugin: String,
     pub id: String,
     pub desc: String,
+    pub help: Option<String>,
     pub key: Option<Vec<KeyPress>>,
     pub layers: Vec<LayerId>,
     pub menus: Vec<String>,
@@ -228,7 +229,7 @@ impl PluginHost {
         let mut views = Vec::new();
         for m in &manifests {
             for c in &m.commands {
-                list.push(PluginCommand { plugin: m.name.clone(), id: c.id.clone(), desc: c.desc.clone(), key: c.key.clone(), layers: c.layers.clone(), menus: c.menus.clone() });
+                list.push(PluginCommand { plugin: m.name.clone(), id: c.id.clone(), desc: c.desc.clone(), help: c.help.clone(), key: c.key.clone(), layers: c.layers.clone(), menus: c.menus.clone() });
             }
             for v in &m.views {
                 views.push(PluginView { plugin: m.name.clone(), title: v.title.clone(), run: v.run.clone() });
