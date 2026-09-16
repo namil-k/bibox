@@ -22,6 +22,11 @@ id = "find"
 desc = "Find your library by name and make it the default"
 menus = ["context"]
 
+[[commands]]
+id = "links"
+desc = "Manage library links: add, reorder, remove"
+menus = ["context"]
+
 [[settings]]
 key = "links"
 type = "string"

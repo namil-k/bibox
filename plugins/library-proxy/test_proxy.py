@@ -172,11 +172,6 @@ class OpenTests(unittest.TestCase):
         self.assertEqual(r, "opened 1 via ezproxy.example.edu")
         self.assertEqual(self.opened(1), [EZ + "https://doi.org/10.1145/3025453.3025912"])
 
-    def test_open_cmd_without_a_link_tells_where_to_set_it(self):
-        r = main.open_cmd({"command": "open", "trigger": "key", "entry": ACM, "entries": [ACM]})
-        self.assertTrue(r.startswith("Set library-proxy.links in Settings"), r)
-        self.assertFalse(os.path.exists(self.log), "nothing opened")
-
     def pick_returning(self, answer):
         import bibox_plugin
         asked = []
@@ -191,7 +186,7 @@ class OpenTests(unittest.TestCase):
         self.config["links"] = EZ + "\n" + KHU
         asked = self.pick_returning(1)
         r = main.choose_cmd({"command": "choose", "trigger": "key", "entry": ACM, "entries": [ACM]})
-        self.assertEqual(asked, [("Open through", ["ezproxy.example.edu/login?url=", "openlink.khu.ac.kr/link.n2s?url="])])
+        self.assertEqual(asked, [("Open through", ["ezproxy.example.edu/login?url= (default)", "openlink.khu.ac.kr/link.n2s?url=", "Manage links (add, reorder, remove, find by name)"])])
         self.assertEqual(r, "opened 1 via openlink.khu.ac.kr")
         self.assertEqual(self.opened(1), [KHU + "https://doi.org/10.1145/3025453.3025912"])
 
@@ -206,7 +201,7 @@ class OpenTests(unittest.TestCase):
         self.assertEqual(asked[0][0], "Use")
         self.assertTrue(asked[0][1][0].startswith("Seoul National University (South Korea)"), asked[0][1])
         snu = next(e for e in registry.load() if e["name"] == "Seoul National University")
-        self.assertEqual(saved, [("links", snu["link"] + "\n" + KHU)], "picked link first, the old default second")
+        self.assertEqual(saved, [("links", snu["link"] + " " + KHU)], "picked link first, the old default second, one line so the Settings row shows it")
         self.assertEqual(r, "Seoul National University is now your default library ({})".format(registry.host(snu["link"])))
 
     def test_find_cmd_reports_no_match_and_cancel(self):
@@ -217,17 +212,76 @@ class OpenTests(unittest.TestCase):
         bibox_plugin.window.prompt = staticmethod(lambda title, default="": None)
         self.assertEqual(main.find_cmd({"command": "find", "trigger": "key"}), "cancelled")
 
-    def test_choose_cmd_with_one_link_opens_without_asking_and_cancel_opens_nothing(self):
+    def fake_ui(self, picks, prompts=()):
+        """window.pick answers `picks` in order (None = Escape), window.prompt answers `prompts`; settings.set is recorded."""
+        import bibox_plugin
+        picks, prompts, asked, saved = list(picks), list(prompts), [], []
+
+        def pick(title, items):
+            asked.append((title, list(items)))
+            return picks.pop(0) if picks else None
+
+        def prompt(title, default=""):
+            return prompts.pop(0) if prompts else None
+
+        def save(k, v):
+            saved.append((k, v))
+            self.config[k] = v
+        bibox_plugin.window.pick = staticmethod(pick)
+        bibox_plugin.window.prompt = staticmethod(prompt)
+        bibox_plugin.settings.set = staticmethod(save)
+        return asked, saved
+
+    def test_links_cmd_lists_links_with_the_default_marked_and_make_default_reorders(self):
+        self.config["links"] = EZ + " " + KHU
+        asked, saved = self.fake_ui([1, 0, None])
+        r = main.links_cmd({"command": "links", "trigger": "menu"})
+        self.assertEqual(asked[0][1], ["1. ezproxy.example.edu (default)", "2. openlink.khu.ac.kr", "+ Find a library by name", "+ Add a link by hand"])
+        self.assertEqual(asked[1][0], "openlink.khu.ac.kr")
+        self.assertEqual(asked[1][1], ["Make it the default", "Move up", "Move down", "Remove"])
+        self.assertEqual(saved, [("links", KHU + " " + EZ)])
+        self.assertEqual(asked[2][1][0], "1. openlink.khu.ac.kr (default)", "the menu reopens with the new order until Escape")
+        self.assertEqual(r, "links: openlink.khu.ac.kr, ezproxy.example.edu")
+
+    def test_links_cmd_moves_removes_and_adds_by_hand(self):
+        self.config["links"] = EZ + " " + KHU + " " + ATHENS
+        asked, saved = self.fake_ui([2, 1, 0, 3, 3, None], prompts=["  https://proxy.new.edu/login?url=  "])
+        r = main.links_cmd({"command": "links", "trigger": "menu"})
+        self.assertEqual(saved[0], ("links", EZ + " " + ATHENS + " " + KHU), "move up")
+        self.assertEqual(saved[1], ("links", ATHENS + " " + KHU), "remove the first")
+        self.assertEqual(saved[2], ("links", "https://proxy.new.edu/login?url= " + ATHENS + " " + KHU), "a link added by hand goes first")
+        self.assertEqual(r, "links: proxy.new.edu, go.openathens.net, openlink.khu.ac.kr")
+
+    def test_links_cmd_refuses_a_link_with_spaces_or_without_a_scheme(self):
         self.config["links"] = EZ
-        asked = self.pick_returning(0)
+        asked, saved = self.fake_ui([2, 2, None], prompts=["ezproxy.example.edu/login?url=", "https://a.example/ b"])
+        main.links_cmd({"command": "links", "trigger": "menu"})
+        self.assertEqual(saved, [])
+        self.assertTrue(all(t.startswith("1. ") or "Library links" in t for t, _ in asked), asked)
+
+    def test_open_cmd_without_links_opens_the_manager_instead_of_a_hint(self):
+        asked, saved = self.fake_ui([None])
+        r = main.open_cmd({"command": "open", "trigger": "key", "entry": ACM, "entries": [ACM]})
+        self.assertEqual(asked[0][1], ["+ Find a library by name", "+ Add a link by hand"])
+        self.assertEqual(r, "no links yet")
+
+    def test_choose_cmd_lists_links_then_manage_and_opens_through_the_pick(self):
+        self.config["links"] = EZ + " " + KHU
+        asked, saved = self.fake_ui([1])
         r = main.choose_cmd({"command": "choose", "trigger": "key", "entry": ACM, "entries": [ACM]})
-        self.assertEqual(r, "opened 1 via ezproxy.example.edu")
-        self.assertEqual(asked, [], "one link: nothing to choose")
+        self.assertEqual(asked[0][1], ["ezproxy.example.edu/login?url= (default)", "openlink.khu.ac.kr/link.n2s?url=", "Manage links (add, reorder, remove, find by name)"])
+        self.assertEqual(r, "opened 1 via openlink.khu.ac.kr")
+        asked, saved = self.fake_ui([2, None])
+        r = main.choose_cmd({"command": "choose", "trigger": "key", "entry": ACM, "entries": [ACM]})
+        self.assertEqual(asked[1][0], "Library links, first is the default")
+        self.assertEqual(r, "links: ezproxy.example.edu, openlink.khu.ac.kr")
+
+    def test_choose_cmd_cancel_opens_nothing(self):
         self.config["links"] = EZ + "\n" + KHU
         self.pick_returning(None)
         r = main.choose_cmd({"command": "choose", "trigger": "key", "entry": URL_ONLY, "entries": [URL_ONLY]})
         self.assertEqual(r, "cancelled")
-        self.assertEqual(self.opened(1), [EZ + "https://doi.org/10.1145/3025453.3025912"], "still only the first open")
+        self.assertFalse(os.path.exists(self.log))
 
 
 FAKE_BIBOX = r'''#!/usr/bin/env python3

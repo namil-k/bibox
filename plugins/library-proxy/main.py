@@ -2,7 +2,7 @@
 
 CLI (`bibox library-proxy list|url|open|find|update`, BIBOX_CLI=1) and TUI commands (`library-proxy.open`, `library-proxy.choose`, `library-proxy.find`) share proxied().
 `find` looks a library up by name in registry.json (see registry.py) and saves its link first through settings/set.
-The `links` setting holds one link per line, the first is the default: a prefix (`https://ezproxy.example.edu/login?url=`)
+The `links` setting holds links separated by whitespace (one line, or one per line), the first is the default: a prefix (`https://ezproxy.example.edu/login?url=`)
 or a template with {url}, {url_encoded} or {doi}. Nothing is downloaded here: the browser is logged in, bibox is not.
 """
 import argparse
@@ -15,12 +15,19 @@ import urllib.parse
 import registry
 
 PLACEHOLDERS = ("{url}", "{url_encoded}", "{doi}")
-SETUP_HINT = "Set library-proxy.links in Settings (,): your library's proxy prefix, one per line. See the library-proxy plugin README"
+MANAGE = "Manage links (add, reorder, remove, find by name)"
+FIND_ITEM = "+ Find a library by name"
+ADD_ITEM = "+ Add a link by hand"
 
 
 def parse_links(text):
     """One link per line (or space separated), first is the default. Links never contain whitespace."""
     return (text or "").split()
+
+
+def join_links(links):
+    """Saved on one line so the Settings row shows and edits the whole value."""
+    return " ".join(links)
 
 
 def label(link):
@@ -114,34 +121,43 @@ def _open_via(link, params):
     return summary(link, *open_entries(link, entries))
 
 
-def open_cmd(params):
-    """`u`: the first link."""
+def _links():
     from bibox_plugin import config
+    return parse_links(config.get("links"))
 
-    links = parse_links(config.get("links"))
+
+def _save(links):
+    from bibox_plugin import settings
+    settings.set("links", join_links(links))
+
+
+def open_cmd(params):
+    """`u`: the first link. With no links yet, the manager, so the first press sets things up."""
+    links = _links()
     if not links:
-        return SETUP_HINT
+        return links_cmd(params)
     return _open_via(links[0], params)
 
 
 def choose_cmd(params):
-    """`v`: pick a link first; with a single link there is nothing to pick."""
-    from bibox_plugin import config, window
+    """`v`: pick a link (first is the default), or go to the manager."""
+    from bibox_plugin import window
 
-    links = parse_links(config.get("links"))
+    links = _links()
     if not links:
-        return SETUP_HINT
-    if len(links) == 1:
-        return _open_via(links[0], params)
-    index = window.pick("Open through", [label(l) for l in links])
+        return links_cmd(params)
+    items = [label(l) + (" (default)" if i == 0 else "") for i, l in enumerate(links)] + [MANAGE]
+    index = window.pick("Open through", items)
     if index is None:
         return "cancelled"
+    if index == len(links):
+        return links_cmd(params)
     return _open_via(links[index], params)
 
 
 def find_cmd(params):
     """Look a library up by name, put its link first, save. The Google Scholar "Library links" flow."""
-    from bibox_plugin import config, settings, window
+    from bibox_plugin import window
 
     query = window.prompt("Library name (e.g. Seoul National, Paris-Saclay)")
     if not query or not query.strip():
@@ -153,12 +169,57 @@ def find_cmd(params):
     if index is None:
         return "cancelled"
     chosen = hits[index]
-    links = [chosen["link"]] + [l for l in parse_links(config.get("links")) if l != chosen["link"]]
     try:
-        settings.set("links", "\n".join(links))
+        _save([chosen["link"]] + [l for l in _links() if l != chosen["link"]])
     except RuntimeError as e:
         return "could not save: {}".format(e)
     return "{} is now your default library ({})".format(chosen["name"], host(chosen["link"]))
+
+
+def _add_by_hand(window):
+    text = window.prompt("Link: a prefix such as https://ezproxy.example.edu/login?url= or a template with {url}, {url_encoded} or {doi}")
+    text = (text or "").strip()
+    if not text:
+        return None
+    if " " in text or "://" not in text:
+        window.message("not a link: {!r} (no spaces, must start with http:// or https://)".format(text), "warn")
+        return None
+    return text
+
+
+def links_cmd(params):
+    """The manager: list, reorder, remove, add by hand or from the directory. Loops until Escape."""
+    from bibox_plugin import window
+
+    while True:
+        links = _links()
+        items = ["{}. {}{}".format(i + 1, host(l), " (default)" if i == 0 else "") for i, l in enumerate(links)] + [FIND_ITEM, ADD_ITEM]
+        index = window.pick("Library links, first is the default", items)
+        if index is None:
+            break
+        try:
+            if index == len(links):
+                find_cmd(params)
+            elif index == len(links) + 1:
+                text = _add_by_hand(window)
+                if text:
+                    _save([text] + [l for l in links if l != text])
+            else:
+                link = links[index]
+                action = window.pick(host(link), ["Make it the default", "Move up", "Move down", "Remove"])
+                rest = [l for l in links if l != link]
+                if action == 0:
+                    _save([link] + rest)
+                elif action == 1 and index > 0:
+                    _save(rest[:index - 1] + [link] + rest[index - 1:])
+                elif action == 2 and index < len(links) - 1:
+                    _save(rest[:index + 1] + [link] + rest[index + 1:])
+                elif action == 3:
+                    _save(rest)
+        except RuntimeError as e:
+            return "could not save: {}".format(e)
+    links = _links()
+    return "links: " + ", ".join(host(l) for l in links) if links else "no links yet"
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────
@@ -249,4 +310,4 @@ if __name__ == "__main__":
         sys.exit(cli(sys.argv[1:]))
     from bibox_plugin import serve
 
-    serve({"open": open_cmd, "choose": choose_cmd, "find": find_cmd})
+    serve({"open": open_cmd, "choose": choose_cmd, "find": find_cmd, "links": links_cmd})

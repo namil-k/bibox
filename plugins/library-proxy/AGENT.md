@@ -14,4 +14,4 @@ Opens an entry in the browser through the user's library proxy or link resolver,
 
 ## In the TUI
 
-`u` opens the selected entries through the first link; `v` asks which link first (with a single link it opens right away); `library-proxy.find` (no default key) asks for a library name, shows the matches and saves the picked link as the new first line of `links`. All three are in the right-click menu. The status popup says `opened 2 via ezproxy.example.edu, skipped 1 (no DOI or URL)`. With no links it says where to set them.
+`u` opens the selected entries through the first link (with no links yet it opens the manager instead); `v` asks which link, with "Manage links" as the last item; `library-proxy.links` is that manager (add by hand, find by name, make default, move, remove; loops until Escape); `library-proxy.find` asks for a library name, shows the matches and saves the pick as the first link. All are in the right-click menu. Links are saved space-separated on one line so the Settings row can edit them. The status popup says `opened 2 via ezproxy.example.edu, skipped 1 (no DOI or URL)`. With no links it says where to set them.
