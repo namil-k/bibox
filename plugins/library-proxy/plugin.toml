@@ -7,24 +7,24 @@ guide = "AGENT.md"
 
 [[commands]]
 id = "open"
-desc = "Open the entry through your library proxy or link resolver (the first link)"
+desc = "Open through your library (link1)"
 key = "u"
 menus = ["context"]
 
 [[commands]]
 id = "choose"
-desc = "Pick which library link to open the entry through"
+desc = "Open through a library you pick"
 key = "v"
 menus = ["context"]
 
 [[commands]]
 id = "find"
-desc = "Find your library by name and make it the default"
+desc = "Find your library by name"
 menus = ["context"]
 
 [[commands]]
 id = "links"
-desc = "Manage library links: add, reorder, remove"
+desc = "Manage links: order, add, remove"
 menus = ["context"]
 
 [[settings]]
