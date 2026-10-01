@@ -206,6 +206,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "toml",
+ "unicode-width",
  "urlencoding",
  "uuid",
  "zip",

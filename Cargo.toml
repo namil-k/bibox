@@ -21,7 +21,7 @@ path = "src/main.rs"
 
 [features]
 default = ["tui"]
-tui = ["dep:ratatui", "dep:pulldown-cmark", "dep:ratatree", "dep:ratatui-image"]
+tui = ["dep:ratatui", "dep:pulldown-cmark", "dep:ratatree", "dep:ratatui-image", "dep:unicode-width"]
 
 [dependencies]
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
@@ -41,6 +41,7 @@ crossterm = "0.29"
 ratatui = { version = "0.30", optional = true }
 ratatree = { version = "0.4", optional = true }
 ratatui-image = { version = "11", default-features = false, features = ["crossterm"], optional = true }
+unicode-width = { version = "0.2", optional = true }
 arboard = "3"
 regex = "1"
 scraper = "0.22"

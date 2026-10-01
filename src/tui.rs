@@ -1790,40 +1790,112 @@ impl App {
 fn draw_plugin_ui(f: &mut Frame, state: &PluginUiState, area: Rect) {
     match &state.kind {
         PluginUiKind::Pick { title, items, index } => {
-            let height = (items.len() as u16 + 5).min(20);
-            let popup_area = centered_rect(55, height, area);
+            let inner = centered_rect(55, 5, area).width.saturating_sub(2) as usize;
+            let head = fit_lines(title, inner);
+            // 접힌 항목은 이어지는 줄을 두 칸 더 들여 다음 항목과 구별한다
+            let rows: Vec<Vec<String>> = items
+                .iter()
+                .map(|item| match fit_lines(item, inner.saturating_sub(2)) {
+                    one if one.len() == 1 => one,
+                    _ => fit_lines(item, inner.saturating_sub(4)).into_iter().enumerate().map(|(k, l)| if k == 0 { l } else { format!("  {l}") }).collect(),
+                })
+                .collect();
+            // 테두리 둘, 제목 아래 빈 줄, 안내 위 빈 줄, 안내 줄. 옛 코드는 하나 적게 잡아 안내 줄이 늘 잘렸다
+            let chrome = head.len() + 5;
+            let budget = (area.height as usize).min(20).saturating_sub(chrome).max(1);
+            let heights: Vec<usize> = rows.iter().map(Vec::len).collect();
+            let shown = pick_window(&heights, *index, budget);
+            let body: usize = heights[shown.clone()].iter().sum();
+            let popup_area = centered_rect(55, ((chrome + body) as u16).min(area.height), area);
             clear_area(f, popup_area);
-            let visible = (height as usize).saturating_sub(5).max(1);
-            let start = index.saturating_sub(visible.saturating_sub(1));
-            let mut lines = vec![
-                Line::from(Span::styled(title.clone(), Style::default().fg(theme().heading))),
-                Line::from(""),
-            ];
-            for (i, item) in items.iter().enumerate().skip(start).take(visible) {
-                let arrow = if i == *index { "▶ " } else { "  " };
+            let mut lines: Vec<Line> = head.into_iter().map(|l| Line::from(Span::styled(l, Style::default().fg(theme().heading)))).collect();
+            lines.push(Line::from(""));
+            for i in shown {
                 let style = if i == *index { Style::default().fg(theme().accent) } else { Style::default() };
-                lines.push(Line::from(vec![
-                    Span::styled(arrow, Style::default().fg(theme().heading)),
-                    Span::styled(item.clone(), style),
-                ]));
+                for (k, part) in rows[i].iter().enumerate() {
+                    let arrow = if i == *index && k == 0 { "▶ " } else { "  " };
+                    lines.push(Line::from(vec![Span::styled(arrow, Style::default().fg(theme().heading)), Span::styled(part.clone(), style)]));
+                }
             }
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled("↑↓ select  Enter choose  Esc cancel", Style::default().fg(theme().muted))));
             let popup = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(format!(" {} ", state.plugin)));
             f.render_widget(popup, popup_area);
         }
-        PluginUiKind::Prompt { title, buf } => {
-            let popup_area = centered_rect(60, 5, area);
-            clear_area(f, popup_area);
-            let text = Paragraph::new(vec![
-                Line::from(Span::styled(title.clone(), Style::default().fg(theme().heading))),
-                Line::from(format!("> {}▏", buf)),
-            ])
-            .block(Block::default().borders(Borders::ALL).title(format!(" {} ", state.plugin)));
-            f.render_widget(text, popup_area);
-        }
+        PluginUiKind::Prompt { title, buf } => draw_input_popup(f, title, buf, &state.plugin, area),
         PluginUiKind::Confirm { title } => draw_confirm_popup(f, &format!("{} (y/n)", title), area),
     }
+}
+
+/// 팝업 안 글을 화면 칸 폭에 맞춰 접는다. 다 들어가면 그대로 두고(항목의 두 칸 띄움 보존),
+/// 넘치면 단어에서, 폭보다 긴 단어(URL)는 글자에서 끊는다. 한글은 두 칸으로 잰다.
+fn fit_lines(text: &str, width: usize) -> Vec<String> {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    let width = width.max(1);
+    if text.width() <= width {
+        return vec![text.to_string()];
+    }
+    let mut out = Vec::new();
+    let mut line = String::new();
+    let mut used = 0;
+    for word in text.split_whitespace() {
+        let w = word.width();
+        if used > 0 && used + 1 + w <= width {
+            line.push(' ');
+            line.push_str(word);
+            used += 1 + w;
+            continue;
+        }
+        if used > 0 {
+            out.push(std::mem::take(&mut line));
+            used = 0;
+        }
+        for c in word.chars() {
+            let cw = c.width().unwrap_or(0);
+            if used + cw > width {
+                out.push(std::mem::take(&mut line));
+                used = 0;
+            }
+            line.push(c);
+            used += cw;
+        }
+    }
+    if !line.is_empty() {
+        out.push(line);
+    }
+    out
+}
+
+/// 줄 수가 `heights`인 항목들 중 `budget` 줄에 그릴 범위. 맨 위부터 채우다가
+/// 고른 항목이 넘치면 그 항목이 마지막 줄에 오게 내린다(옛 한 줄짜리 스크롤과 같은 움직임).
+fn pick_window(heights: &[usize], index: usize, budget: usize) -> std::ops::Range<usize> {
+    if heights.is_empty() {
+        return 0..0;
+    }
+    let index = index.min(heights.len() - 1);
+    let mut start = index;
+    let mut used = heights[index];
+    while start > 0 && used + heights[start - 1] <= budget {
+        start -= 1;
+        used += heights[start];
+    }
+    let mut end = index + 1;
+    while end < heights.len() && used + heights[end] <= budget {
+        used += heights[end];
+        end += 1;
+    }
+    start..end
+}
+
+/// 안내 + 입력 줄 팝업(플러그인 prompt, Settings 값 입력, 키 받기). 안내가 길면 접고 그만큼 키운다.
+fn draw_input_popup(f: &mut Frame, title: &str, buf: &str, label: &str, area: Rect) {
+    let inner = centered_rect(60, 5, area).width.saturating_sub(2) as usize;
+    let mut lines: Vec<Line> = fit_lines(title, inner).into_iter().map(|l| Line::from(Span::styled(l, Style::default().fg(theme().heading)))).collect();
+    lines.push(Line::from(format!("> {}▏", buf)));
+    let popup_area = centered_rect(60, (lines.len() as u16 + 3).min(area.height), area);
+    clear_area(f, popup_area);
+    let text = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(format!(" {} ", label)));
+    f.render_widget(text, popup_area);
 }
 
 fn handle_plugin_ui(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
@@ -3370,14 +3442,7 @@ fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_settings_input(f: &mut Frame, input: &SettingsInput, area: Rect) {
-    let popup_area = centered_rect(60, 5, area);
-    clear_area(f, popup_area);
-    let text = Paragraph::new(vec![
-        Line::from(Span::styled(input.title.clone(), Style::default().fg(theme().heading))),
-        Line::from(format!("> {}▏", input.buf)),
-    ])
-    .block(Block::default().borders(Borders::ALL).title(" Settings "));
-    f.render_widget(text, popup_area);
+    draw_input_popup(f, &input.title, &input.buf, "Settings", area);
 }
 
 // ── Event loop ───────────────────────────────────────────────────────────────
@@ -6134,5 +6199,71 @@ mod tests {
         let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text, "Cited by:   ★ 312");
         assert!(info_field_lines(&[]).is_empty());
+    }
+
+    /// 팝업을 80x24에 그려 화면 글자를 줄마다 이어 붙인 것. 줄 끝 공백은 지운다.
+    fn render_popup(draw: impl FnOnce(&mut ratatui::Frame)) -> String {
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        term.draw(draw).unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>().trim_end().to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// 프롬프트 안내가 팝업 폭보다 길면 접어서 끝까지 보인다. 한 줄에 잘리면 "Backspace clears" 같은 안내를 못 읽는다.
+    #[test]
+    fn a_long_prompt_title_wraps_instead_of_being_cut() {
+        use super::{draw_plugin_ui, draw_settings_input, InputTarget, PluginUiKind, PluginUiState, SettingsInput};
+        let title = "Link: a prefix such as https://ezproxy.example.edu/login?url= or a template with {url}, {url_encoded} or {doi} LASTWORD";
+        let state = PluginUiState { plugin: "p".into(), id: 1, kind: PluginUiKind::Prompt { title: title.into(), buf: "typed".into() } };
+        let screen = render_popup(|f| draw_plugin_ui(f, &state, f.area()));
+        assert!(screen.contains("LASTWORD"), "{screen}");
+        assert!(screen.contains("> typed"), "{screen}");
+
+        let input = SettingsInput { title: title.into(), buf: "x".into(), target: InputTarget::InstallSource };
+        let screen = render_popup(|f| draw_settings_input(f, &input, f.area()));
+        assert!(screen.contains("LASTWORD"), "{screen}");
+        assert!(screen.contains("> x"), "{screen}");
+    }
+
+    #[test]
+    fn fit_lines_measures_screen_cells_and_breaks_long_words() {
+        use super::fit_lines;
+        assert_eq!(fit_lines("a  b", 10), vec!["a  b"], "fits: spacing kept");
+        assert_eq!(fit_lines("새 키를 누르세요", 10), vec!["새 키를", "누르세요"], "hangul is two cells wide");
+        assert_eq!(fit_lines("go https://x.example.edu/login", 10), vec!["go", "https://x.", "example.ed", "u/login"]);
+        assert_eq!(fit_lines("", 10), vec![""]);
+    }
+
+    #[test]
+    fn pick_window_fills_from_the_top_and_keeps_the_chosen_item_last_when_scrolled() {
+        use super::pick_window;
+        assert_eq!(pick_window(&[1, 1, 1], 0, 5), 0..3);
+        assert_eq!(pick_window(&[2, 2, 2, 2], 1, 5), 0..2);
+        assert_eq!(pick_window(&[2, 2, 2, 2], 3, 5), 2..4);
+        assert_eq!(pick_window(&[9, 1], 0, 5), 0..1, "an item taller than the window is still shown");
+        assert_eq!(pick_window(&[], 0, 5), 0..0);
+    }
+
+    /// 긴 항목은 접히고, 접혀서 늘어난 줄 때문에 고른 항목이 창 밖으로 밀려나지 않는다.
+    #[test]
+    fn long_pick_items_wrap_and_the_chosen_one_stays_on_screen() {
+        use super::{draw_plugin_ui, PluginUiKind, PluginUiState};
+        let long = |i: usize| format!("Université Number {i} (France)  resolver upsaclay.focus.example.fr/openurl?sid=bibox&id=doi:{{doi}} TAIL{i}");
+        let items: Vec<String> = (0..30).map(long).collect();
+        let state = PluginUiState { plugin: "p".into(), id: 1, kind: PluginUiKind::Pick { title: "Use".into(), items, index: 29 } };
+        let screen = render_popup(|f| draw_plugin_ui(f, &state, f.area()));
+        assert!(screen.contains("TAIL29"), "{screen}");
+        assert!(screen.contains("▶ Université Number 29"), "{screen}");
+        assert!(screen.contains("Esc cancel"), "{screen}");
+
+        let items = vec!["Paris (France)  ezproxy.example.fr".to_string(), long(1)];
+        let state = PluginUiState { plugin: "p".into(), id: 1, kind: PluginUiKind::Pick { title: "Use".into(), items, index: 0 } };
+        let screen = render_popup(|f| draw_plugin_ui(f, &state, f.area()));
+        assert!(screen.contains("TAIL1"), "{screen}");
+        assert!(screen.contains("▶ Paris (France)  ezproxy.example.fr"), "an item that fits keeps its double space: {screen}");
+        assert!(screen.contains("Esc cancel"), "{screen}");
     }
 }
