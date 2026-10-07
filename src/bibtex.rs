@@ -201,17 +201,62 @@ pub fn entry_to_filename(entry: &Entry) -> String {
             .collect()
     };
 
-    format!(
+    let mut name = format!(
         "{}_{}_{}",
         sanitize(&author_part),
         year_part,
         sanitize(title_part)
-    )
+    );
+    if name.len() > FILENAME_STEM_MAX {
+        let mut cut = FILENAME_STEM_MAX;
+        while !name.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        name.truncate(cut);
+        name.truncate(name.trim_end_matches([' ', '_', '.', '-']).len());
+    }
+    name
 }
+
+/// `entry_to_filename`의 최대 바이트. 파일 이름 한계 255에서 충돌 때 붙는 `_<key>`와 `.pdf` 자리를 남긴다.
+pub const FILENAME_STEM_MAX: usize = 200;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn titled(title: &str) -> Entry {
+        use crate::models::EntryType;
+        Entry {
+            id: "1".into(), bibtex_key: "kim2025".into(), entry_type: EntryType::Article,
+            title: Some(title.into()), author: vec!["Kim, J.".into()], year: Some(2025),
+            journal: None, volume: None, number: None, pages: None, publisher: None, editor: None,
+            edition: None, isbn: None, booktitle: None, doi: None, url: None, abstract_text: None,
+            tags: vec![], howpublished: None, month: None, note: None, collections: vec![],
+            file_path: None, created_at: "2026-01-01 00:00:00".into(), updated_at: None,
+        }
+    }
+
+    #[test]
+    fn short_titles_keep_the_whole_name() {
+        assert_eq!(entry_to_filename(&titled("Deep: learning?")), "Kim_2025_Deep_ learning_");
+    }
+
+    /// 파일 이름은 255바이트가 한계다. 충돌 때 붙는 `_<key>`와 `.pdf`가 들어갈 자리를 남기고 글자 경계에서 자른다.
+    #[test]
+    fn long_titles_are_cut_at_a_character_boundary_with_room_for_the_key_and_extension() {
+        let ascii = entry_to_filename(&titled(&"word ".repeat(80)));
+        assert!(ascii.len() <= FILENAME_STEM_MAX, "{} bytes", ascii.len());
+        assert!(ascii.starts_with("Kim_2025_word word"));
+        assert!(!ascii.ends_with(' ') && !ascii.ends_with('_'), "{ascii:?}");
+
+        let hangul = entry_to_filename(&titled(&"한국어 제목 ".repeat(40)));
+        assert!(hangul.len() <= FILENAME_STEM_MAX, "{} bytes", hangul.len());
+        assert!(hangul.starts_with("Kim_2025_한국어 제목"));
+
+        // 충돌 이름 `<stem>_<key>.pdf`도 한계 안
+        assert!(format!("{}_{}.pdf", hangul, "averyveryverylongcitationkey2025title").len() <= 255);
+    }
 
     #[test]
     fn escape_raw_ampersand() {

@@ -5543,6 +5543,18 @@ fn run_loop(
     Ok(())
 }
 
+/// 받은 PDF의 이름. import와 같은 규칙: `Author_Year_Title.pdf`, 그 이름에 다른 항목의 파일이 있으면 `<stem>_<key>.pdf`.
+/// (받기는 이 항목의 파일이 없을 때만 하므로 그 자리의 파일은 남의 것이다.)
+fn fetched_pdf_name(entry: &Entry, bibox_dir: &std::path::Path) -> String {
+    let stem = entry_to_filename(entry);
+    let plain = format!("{}.pdf", stem);
+    if bibox_dir.join(&plain).exists() {
+        format!("{}_{}.pdf", stem, entry.bibtex_key)
+    } else {
+        plain
+    }
+}
+
 /// Fetch PDF via Unpaywall (DOI) or direct URL. Runs on background thread.
 fn run_fetch_pdf(entry: &Entry, bibox_dir: &std::path::Path) -> Result<(String, String)> {
     let rt = tokio::runtime::Runtime::new()?;
@@ -5576,7 +5588,7 @@ fn run_fetch_pdf(entry: &Entry, bibox_dir: &std::path::Path) -> Result<(String, 
     })?;
 
     std::fs::create_dir_all(bibox_dir)?;
-    let filename = entry_to_filename(entry);
+    let filename = fetched_pdf_name(entry, bibox_dir);
     let dest = bibox_dir.join(&filename);
     std::fs::copy(&tmp, &dest)?;
     let _ = std::fs::remove_file(&tmp);
@@ -6226,6 +6238,28 @@ mod tests {
         let screen = render_popup(|f| draw_settings_input(f, &input, f.area()));
         assert!(screen.contains("LASTWORD"), "{screen}");
         assert!(screen.contains("> x"), "{screen}");
+    }
+
+    /// 받은 PDF는 `.pdf`로 끝나고, 다른 항목의 PDF가 같은 이름으로 있으면 덮어쓰지 않고 `_<key>`를 붙인다.
+    #[test]
+    fn a_fetched_pdf_gets_an_extension_and_never_replaces_another_entrys_file() {
+        use super::fetched_pdf_name;
+        let dir = std::env::temp_dir().join(format!("bibox-fetch-name-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut entry = Entry {
+            id: "1".into(), bibtex_key: "kim2025deep".into(), entry_type: EntryType::Article,
+            title: Some("Deep".into()), author: vec!["Kim, J.".into()], year: Some(2025),
+            journal: None, volume: None, number: None, pages: None, publisher: None, editor: None,
+            edition: None, isbn: None, booktitle: None, doi: None, url: None, abstract_text: None,
+            tags: vec![], howpublished: None, month: None, note: None, collections: vec![],
+            file_path: None, created_at: "2026-01-01 00:00:00".into(), updated_at: None,
+        };
+        assert_eq!(fetched_pdf_name(&entry, &dir), "Kim_2025_Deep.pdf");
+        std::fs::write(dir.join("Kim_2025_Deep.pdf"), b"another entry").unwrap();
+        entry.bibtex_key = "kim2025deepb".into();
+        assert_eq!(fetched_pdf_name(&entry, &dir), "Kim_2025_Deep_kim2025deepb.pdf");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
