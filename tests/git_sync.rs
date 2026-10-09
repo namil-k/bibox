@@ -256,3 +256,67 @@ fn shutdown_is_answered_and_ends_the_process() {
     let status = p.child.wait().unwrap();
     assert!(status.success());
 }
+
+/// 원격(다른 기계의 클론)과 이 홈이 db.json의 같은 줄을 서로 다르게 고친 상태. 홈 쪽 커밋은 아직 안 올라갔다.
+fn diverged_home(tag: &str) -> PathBuf {
+    let home = fresh_home(tag);
+    std::fs::write(home.join("db.json"), "{\"entries\":[\n{\"title\":\"original\"}\n]}\n").unwrap();
+    git(&home, &["add", "."]);
+    git(&home, &["commit", "-qm", "init"]);
+    let remote = home.with_extension("remote.git");
+    let other = home.with_extension("other");
+    let _ = std::fs::remove_dir_all(&remote);
+    let _ = std::fs::remove_dir_all(&other);
+    git(&home, &["init", "-q", "--bare", remote.to_str().unwrap()]);
+    git(&home, &["remote", "add", "origin", remote.to_str().unwrap()]);
+    git(&home, &["push", "-q", "-u", "origin", "HEAD"]);
+    git(&home, &["clone", "-q", remote.to_str().unwrap(), other.to_str().unwrap()]);
+    git(&other, &["config", "user.email", "other@example.com"]);
+    git(&other, &["config", "user.name", "other machine"]);
+    git(&other, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(other.join("db.json"), "{\"entries\":[\n{\"title\":\"edited on the other machine\"}\n]}\n").unwrap();
+    git(&other, &["commit", "-qam", "other edit"]);
+    git(&other, &["push", "-q"]);
+    std::fs::write(home.join("db.json"), "{\"entries\":[\n{\"title\":\"edited here\"}\n]}\n").unwrap();
+    git(&home, &["commit", "-qam", "bibox: edit here"]);
+    home
+}
+
+fn in_progress(home: &Path) -> bool {
+    let git_dir = home.join(".git");
+    ["rebase-merge", "rebase-apply", "MERGE_HEAD"].iter().any(|p| git_dir.join(p).exists())
+}
+
+/// 4월 사고: pull이 충돌로 멈춘 채 남으면 db.json에 충돌 표시가 들어가고 bibox가 열리지 않는다.
+/// 동기화는 충돌을 만나면 pull 전으로 되돌리고, 무엇이 겹쳤는지 말한다.
+#[test]
+fn a_conflicting_sync_is_undone_and_the_library_stays_as_it_was() {
+    let home = diverged_home("conflict");
+    let before = git(&home, &["rev-parse", "HEAD"]);
+    let mut p = Plugin::start(Some(&home), serde_json::json!({}));
+    let r = p.run("sync");
+    let e = error(&r);
+    assert!(e.contains("db.json"), "names the conflicting file: {}", e);
+    assert!(!in_progress(&home), "no rebase is left behind");
+    assert_eq!(git(&home, &["rev-parse", "HEAD"]), before, "the local commit is kept");
+    assert!(!git(&home, &["branch", "--show-current"]).is_empty(), "back on the branch, not a detached HEAD");
+    let db = std::fs::read_to_string(home.join("db.json")).unwrap();
+    assert!(db.contains("edited here") && !db.contains("<<<<<<<"), "{}", db);
+}
+
+/// 사용자가 손으로 pull하다 충돌이 난 저장소라도, 노트 저장이나 항목 쓰기가 충돌 표시를 커밋하면 안 된다.
+#[test]
+fn nothing_is_committed_while_a_rebase_is_in_progress() {
+    let home = diverged_home("midrebase");
+    let o = Command::new("git").arg("-C").arg(&home).args(["pull", "--rebase", "-q"]).output().unwrap();
+    assert!(!o.status.success() && in_progress(&home), "the setup leaves a conflicted rebase");
+    let before = git(&home, &["rev-parse", "HEAD"]);
+    std::fs::write(home.join("notes/kim2025.md"), "# note\n").unwrap();
+    let mut p = Plugin::start(Some(&home), serde_json::json!({}));
+    p.notify("note/saved", serde_json::json!({"entry": {"bibtex_key": "kim2025"}}));
+    let r = p.run("commit");
+    assert_eq!(git(&home, &["rev-parse", "HEAD"]), before, "no commit on top of the conflict");
+    assert!(git(&home, &["diff", "--name-only", "--diff-filter=U"]).contains("db.json"), "db.json stays unmerged");
+    assert!(r.messages.iter().any(|m| m.contains("rebase")), "the note save says why: {:?}", r.messages);
+    assert!(error(&r).contains("rebase"), "{:?}", r.error);
+}

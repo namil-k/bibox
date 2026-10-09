@@ -225,8 +225,26 @@ fn repo(home: Option<&Path>) -> Result<Git, String> {
     Ok(g)
 }
 
+/// 진행 중인 rebase·merge가 있으면 그 이름. 그 사이에 `git add`하면 충돌 표시가 남은 db.json이
+/// "해결됨"으로 커밋되고 다음 push로 퍼진다(2026-04 실제 사고).
+fn in_progress(g: &Git) -> Option<&'static str> {
+    let git_dir = g.ok(&["rev-parse", "--absolute-git-dir"]).ok()?;
+    let git_dir = Path::new(&git_dir);
+    if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
+        Some("rebase")
+    } else if git_dir.join("MERGE_HEAD").exists() {
+        Some("merge")
+    } else {
+        None
+    }
+}
+
 /// db.json, notes/(있으면), include_pdfs면 pdfs/(있으면)를 스테이지하고 변경이 있을 때만 커밋한다.
+/// rebase·merge 도중이면 아무것도 스테이지하지 않고 거부한다.
 fn stage_and_commit(g: &Git, include_pdfs: bool, message: &str) -> Result<bool, String> {
+    if let Some(op) = in_progress(g) {
+        return Err(format!("a git {} is in progress in {}; finish or abort it there first (nothing committed)", op, g.home.display()));
+    }
     let mut paths: Vec<&str> = Vec::new();
     if g.home.join("db.json").is_file() {
         paths.push("db.json");
@@ -277,7 +295,17 @@ fn cmd_sync(g: &Git, include_pdfs: bool, ui: &mut Ui) -> Result<String, String> 
         return Err(format!("no upstream branch; run `git push -u origin {}` once", branch));
     }
     // autostash: include_pdfs = false인 채 pdfs/를 지운 트리처럼 unstaged 변경이 남아 있어도 rebase가 거부하지 않는다
-    g.ok(&["pull", "--rebase", "--autostash", "-q"]).map_err(|e| format!("git pull failed: {}", e))?;
+    if let Err(e) = g.ok(&["pull", "--rebase", "--autostash", "-q"]) {
+        // 충돌로 멈춘 rebase를 남기면 db.json에 충돌 표시가 들어가 bibox가 열리지 않는다. pull 전으로 되돌린다
+        // (--abort는 로컬 커밋과 autostash까지 원래대로 돌려놓는다).
+        if in_progress(g).is_some() {
+            let files = g.ok(&["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
+            let _ = g.ok(&["rebase", "--abort"]);
+            let files = if files.is_empty() { "the library".to_string() } else { files.lines().collect::<Vec<_>>().join(", ") };
+            return Err(format!("sync stopped: this library and the remote both changed {}. Nothing was pulled or pushed, and your library is as it was", files));
+        }
+        return Err(format!("git pull failed: {}", e));
+    }
     ui.progress("pushing");
     let n = ahead(g).unwrap_or(0);
     g.ok(&["push", "-q"]).map_err(|e| format!("git push failed: {}", e))?;
