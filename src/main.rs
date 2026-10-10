@@ -579,7 +579,7 @@ Examples:
         action: PluginAction,
     },
 
-    /// git merge driver for db.json (git calls it; see .gitattributes)
+    /// git merge driver for db.json (git calls it; registered in .git/info/attributes)
     #[command(name = "merge-db", hide = true)]
     MergeDb { base: PathBuf, ours: PathBuf, theirs: PathBuf },
 
@@ -671,6 +671,10 @@ async fn main() -> Result<()> {
         std::process::exit(merge::run_driver(base, ours, theirs));
     }
     let config = load_config()?;
+    // 이 기계에 db.json 병합 도우미를 등록한다. 커밋되는 파일은 건드리지 않고, 실패는 조용히(doctor가 보고한다)
+    if let Some(home) = config.home.as_deref() {
+        merge::register_quietly(&config::expand_tilde(home));
+    }
 
     match cli.command {
         None => {

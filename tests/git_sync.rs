@@ -43,8 +43,14 @@ struct Reply {
 impl Plugin {
     /// 띄우고 initialize까지. `home`이 None이면 paths.home도 null.
     fn start(home: Option<&Path>, config: serde_json::Value) -> Plugin {
+        // bibox는 명령마다 설정의 홈에 병합 도우미를 등록하므로 사용자의 실제 설정을 읽지 않게 빈 HOME을 준다
+        let fake_home = std::env::temp_dir().join(format!("bibox-git-sync-home-{}", std::process::id()));
+        std::fs::create_dir_all(&fake_home).unwrap();
         let mut child = Command::new(env!("CARGO_BIN_EXE_bibox"))
             .args(["plugin", "run", "git-sync"])
+            .env("HOME", &fake_home)
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("XDG_DATA_HOME")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -293,8 +299,7 @@ fn in_progress(home: &Path) -> bool {
 fn a_conflicting_sync_is_undone_and_the_library_stays_as_it_was() {
     let home = diverged_home("conflict");
     let mut p = Plugin::start(Some(&home), serde_json::json!({}));
-    // 시작할 때 만든 .gitattributes를 먼저 커밋해 둔다. 기준은 그 뒤
-    p.run("commit");
+    // 시작할 때 도우미가 등록되지만 이 db.json은 bibox 서재가 아니라 도우미가 실패하고, 등록 안 된 기계처럼 충돌한다
     let before = git(&home, &["rev-parse", "HEAD"]);
     let r = p.run("sync");
     let e = error(&r);
@@ -323,15 +328,16 @@ fn nothing_is_committed_while_a_rebase_is_in_progress() {
     assert!(error(&r).contains("rebase"), "{:?}", r.error);
 }
 
-/// 플러그인이 뜨면 이 저장소에 병합 도우미가 등록되고, .gitattributes는 다음 커밋에 들어간다.
+/// 플러그인이 뜨면 이 기계에 병합 도우미가 등록된다(info/attributes와 git 설정). 커밋되는 파일은 없다.
 #[test]
-fn starting_registers_the_merge_driver_and_commits_the_attribute() {
+fn starting_registers_the_merge_driver_in_info_attributes_and_commits_nothing_extra() {
     let home = fresh_home("register");
     let mut p = Plugin::start(Some(&home), serde_json::json!({}));
     assert_eq!(message(&p.run("commit")), "committed");
-    assert!(std::fs::read_to_string(home.join(".gitattributes")).unwrap().contains("db.json merge=bibox"));
+    assert!(std::fs::read_to_string(home.join(".git/info/attributes")).unwrap().lines().any(|l| l == "db.json merge=bibox"));
     assert!(git(&home, &["config", "--get", "merge.bibox.driver"]).contains("merge-db %O %A %B"));
-    assert!(git(&home, &["show", "--name-only", "--format=", "HEAD"]).contains(".gitattributes"));
+    assert!(!home.join(".gitattributes").exists());
+    assert!(!git(&home, &["show", "--name-only", "--format=", "HEAD"]).contains(".gitattributes"));
 }
 
 fn full_entry(id: &str, title: &str, at: &str) -> serde_json::Value {

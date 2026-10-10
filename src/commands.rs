@@ -4526,7 +4526,8 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
     // ── db.json 병합 도우미 ──────────────────────────────────────────────────
     let exe = std::env::current_exe().unwrap_or_default();
     let merge_db = crate::storage::load_db(&db_path).unwrap_or_default();
-    for f in crate::merge::doctor_findings(config.home.as_deref(), &merge_db, &exe) {
+    let merge_home = config.home.as_deref().map(crate::config::expand_tilde);
+    for f in crate::merge::doctor_findings(merge_home.as_deref(), &merge_db, &exe) {
         issues.push(Issue { kind: f.kind.into(), key: f.key, detail: f.detail, fixable: true });
     }
 
@@ -4758,7 +4759,7 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
 
         // db.json 병합 도우미 등록, 병합 기록 비우기
         if issues.iter().any(|i| i.kind == "merge_driver") {
-            if let Some(home) = config.home.as_deref() {
+            if let Some(home) = &merge_home {
                 match crate::merge::ensure_registered(home, &exe) {
                     Ok(_) => { println!("    OK    Registered the db.json merge driver"); fixed += 1; }
                     Err(e) => println!("    FAIL  merge driver: {}", e),

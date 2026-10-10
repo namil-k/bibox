@@ -2,7 +2,7 @@
 //! 스펙: docs/superpowers/specs/2026-10-10-db-merge-design.md
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::{json, Map, Value};
@@ -273,9 +273,13 @@ pub fn driver_command(exe: &Path) -> String {
     format!("'{}' merge-db %O %A %B", exe.display().to_string().replace('\'', r"'\''"))
 }
 
-fn git_config_get(home: &Path, key: &str) -> Option<String> {
-    let o = Command::new("git").arg("-C").arg(home).args(["config", "--local", "--get", key]).output().ok()?;
+fn git_out(home: &Path, args: &[&str]) -> Option<String> {
+    let o = Command::new("git").arg("-C").arg(home).args(args).output().ok()?;
     o.status.success().then(|| String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
+fn git_config_get(home: &Path, key: &str) -> Option<String> {
+    git_out(home, &["config", "--local", "--get", key])
 }
 
 fn git_config_set(home: &Path, key: &str, value: &str) -> Result<(), String> {
@@ -283,14 +287,50 @@ fn git_config_set(home: &Path, key: &str, value: &str) -> Result<(), String> {
     if o.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&o.stderr).trim().to_string()) }
 }
 
-fn has_attr_line(home: &Path) -> bool {
-    std::fs::read_to_string(home.join(".gitattributes")).map(|s| s.lines().any(|l| l.trim() == ATTR_LINE)).unwrap_or(false)
+/// 홈이 저장소 루트일 때 그 git 디렉토리와 info/attributes 경로. git 한 번으로 묻는다.
+pub struct RepoPaths {
+    pub git_dir: PathBuf,
+    pub attributes: PathBuf,
+}
+
+pub fn repo_root_paths(home: &Path) -> Option<RepoPaths> {
+    let out = git_out(home, &["rev-parse", "--show-toplevel", "--absolute-git-dir", "--git-path", "info/attributes"])?;
+    let mut lines = out.lines();
+    let (top, git_dir, attributes) = (lines.next()?, lines.next()?, lines.next()?);
+    if std::fs::canonicalize(top).ok()? != std::fs::canonicalize(home).ok()? {
+        return None;
+    }
+    // --git-path는 -C 기준 상대 경로일 수 있다
+    Some(RepoPaths { git_dir: PathBuf::from(git_dir), attributes: home.join(attributes) })
+}
+
+/// 진행 중인 rebase·merge가 있으면 그 이름. 그 사이에는 저장소를 건드리지 않는다.
+pub fn in_progress(git_dir: &Path) -> Option<&'static str> {
+    if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
+        Some("rebase")
+    } else if git_dir.join("MERGE_HEAD").exists() {
+        Some("merge")
+    } else {
+        None
+    }
+}
+
+/// 이 기계만 읽는 `$GIT_DIR/info/attributes`. 커밋되는 `.gitattributes`는 pull --rebase 때 원격 쪽 것을 읽어서 쓸 수 없다.
+fn attributes_path(home: &Path) -> Option<PathBuf> {
+    git_out(home, &["rev-parse", "--git-path", "info/attributes"]).map(|p| home.join(p))
+}
+
+fn has_attr_line(attributes: &Path) -> bool {
+    std::fs::read_to_string(attributes).map(|s| s.lines().any(|l| l.trim() == ATTR_LINE)).unwrap_or(false)
 }
 
 /// 빠진 것을 말한다. 없으면 None.
 pub fn registration_problem(home: &Path, exe: &Path) -> Option<String> {
-    if !has_attr_line(home) {
-        return Some(format!(".gitattributes has no `{}`", ATTR_LINE));
+    let Some(attributes) = attributes_path(home) else {
+        return Some(format!("{} is not a git repository", home.display()));
+    };
+    if !has_attr_line(&attributes) {
+        return Some(format!("{} has no `{}`", attributes.display(), ATTR_LINE));
     }
     if git_config_get(home, "merge.bibox.driver").as_deref() != Some(driver_command(exe).as_str()) {
         return Some("this machine's git config does not run bibox to merge db.json".to_string());
@@ -298,18 +338,25 @@ pub fn registration_problem(home: &Path, exe: &Path) -> Option<String> {
     None
 }
 
-/// `.gitattributes` 줄과 이 기계의 git 설정을 맞춘다. 바꾼 게 있으면 true.
+/// info/attributes 줄과 이 기계의 git 설정을 맞춘다. 바꾼 게 있으면 true.
 pub fn ensure_registered(home: &Path, exe: &Path) -> Result<bool, String> {
+    let attributes = attributes_path(home).ok_or_else(|| format!("{} is not a git repository", home.display()))?;
+    ensure_registered_at(home, &attributes, exe)
+}
+
+fn ensure_registered_at(home: &Path, attributes: &Path, exe: &Path) -> Result<bool, String> {
     let mut changed = false;
-    if !has_attr_line(home) {
-        let path = home.join(".gitattributes");
-        let mut s = std::fs::read_to_string(&path).unwrap_or_default();
+    if !has_attr_line(attributes) {
+        let mut s = std::fs::read_to_string(attributes).unwrap_or_default();
         if !s.is_empty() && !s.ends_with('\n') {
             s.push('\n');
         }
         s.push_str(ATTR_LINE);
         s.push('\n');
-        std::fs::write(&path, s).map_err(|e| format!("cannot write {}: {}", path.display(), e))?;
+        if let Some(dir) = attributes.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {}", dir.display(), e))?;
+        }
+        std::fs::write(attributes, s).map_err(|e| format!("cannot write {}: {}", attributes.display(), e))?;
         changed = true;
     }
     let cmd = driver_command(exe);
@@ -319,6 +366,18 @@ pub fn ensure_registered(home: &Path, exe: &Path) -> Result<bool, String> {
         changed = true;
     }
     Ok(changed)
+}
+
+/// 모든 명령 앞에서 부른다. 홈이 저장소 루트이고 rebase·merge 중이 아닐 때만, 실패는 조용히(doctor가 보고한다).
+/// 작업 트리에는 아무것도 만들지 않는다(info/attributes와 .git/config뿐).
+pub fn register_quietly(home: &Path) {
+    let Some(paths) = repo_root_paths(home) else { return };
+    if in_progress(&paths.git_dir).is_some() {
+        return;
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = ensure_registered_at(home, &paths.attributes, &exe);
+    }
 }
 
 pub struct Finding {
@@ -673,17 +732,42 @@ mod tests {
     }
 
     #[test]
-    fn registration_writes_the_attribute_and_the_config_once() {
+    fn registration_writes_info_attributes_and_the_config_once() {
         let home = git_repo("reg");
-        std::fs::write(home.join(".gitattributes"), "*.pdf binary\n").unwrap();
+        let attributes = home.join(".git/info/attributes");
+        std::fs::write(&attributes, "*.pdf binary").unwrap();
         let exe = std::path::Path::new("/opt/bibox");
         assert!(registration_problem(&home, exe).is_some());
         assert_eq!(ensure_registered(&home, exe), Ok(true));
         assert_eq!(ensure_registered(&home, exe), Ok(false), "second time: nothing to change");
-        assert_eq!(std::fs::read_to_string(home.join(".gitattributes")).unwrap(), "*.pdf binary\ndb.json merge=bibox\n");
+        assert_eq!(std::fs::read_to_string(&attributes).unwrap(), "*.pdf binary\ndb.json merge=bibox\n");
+        assert!(!home.join(".gitattributes").exists(), "nothing in the work tree");
         assert_eq!(registration_problem(&home, exe), None);
         // 실행 파일이 옮겨지면 설정만 고친다
         assert_eq!(ensure_registered(&home, std::path::Path::new("/new/bibox")), Ok(true));
         assert!(registration_problem(&home, std::path::Path::new("/new/bibox")).is_none());
+    }
+
+    #[test]
+    fn registration_creates_a_missing_info_directory() {
+        let home = git_repo("noinfo");
+        let _ = std::fs::remove_dir_all(home.join(".git/info"));
+        assert_eq!(ensure_registered(&home, std::path::Path::new("/opt/bibox")), Ok(true));
+        assert_eq!(std::fs::read_to_string(home.join(".git/info/attributes")).unwrap(), "db.json merge=bibox\n");
+    }
+
+    #[test]
+    fn quiet_registration_skips_a_subdirectory_and_a_rebase_in_progress() {
+        let home = git_repo("quiet");
+        std::fs::create_dir_all(home.join("sub")).unwrap();
+        register_quietly(&home.join("sub"));
+        assert!(git_config_get(&home, "merge.bibox.driver").is_none(), "not the repository root");
+        std::fs::create_dir_all(home.join(".git/rebase-merge")).unwrap();
+        register_quietly(&home);
+        assert!(git_config_get(&home, "merge.bibox.driver").is_none(), "a rebase is in progress");
+        std::fs::remove_dir_all(home.join(".git/rebase-merge")).unwrap();
+        register_quietly(&home);
+        assert!(git_config_get(&home, "merge.bibox.driver").is_some());
+        assert!(has_attr_line(&home.join(".git/info/attributes")));
     }
 }

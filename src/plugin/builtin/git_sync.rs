@@ -82,12 +82,9 @@ impl State {
     fn on_initialize(&mut self, params: &Value) {
         self.home = params.pointer("/paths/home").and_then(Value::as_str).map(PathBuf::from);
         self.set_config(params.get("config").unwrap_or(&Value::Null));
-        // 이 저장소에 db.json 병합 도우미를 등록한다(.gitattributes 줄 + 이 기계의 git 설정).
-        // rebase·merge 도중에는 작업 트리에 새 파일을 만들지 않는다. 실패는 조용히 둔다. doctor가 보고한다.
-        if let (Ok(g), Ok(exe)) = (repo(self.home.as_deref()), std::env::current_exe()) {
-            if in_progress(&g).is_none() {
-                let _ = crate::merge::ensure_registered(&g.home, &exe);
-            }
+        // 이 기계에 db.json 병합 도우미를 등록한다(info/attributes 줄 + git 설정). main도 하지만 플러그인만 띄운 경우를 위해
+        if let Some(home) = self.home.as_deref() {
+            crate::merge::register_quietly(home);
         }
     }
 
@@ -223,27 +220,17 @@ fn repo(home: Option<&Path>) -> Result<Git, String> {
     let Some(home) = home else {
         return Err(NEEDS_REPO.to_string());
     };
-    let g = Git { home: home.to_path_buf() };
-    let top = g.ok(&["rev-parse", "--show-toplevel"]).map_err(|_| NEEDS_REPO.to_string())?;
-    let same = std::fs::canonicalize(&top).ok() == std::fs::canonicalize(home).ok();
-    if !same {
+    if crate::merge::repo_root_paths(home).is_none() {
         return Err(NEEDS_REPO.to_string());
     }
-    Ok(g)
+    Ok(Git { home: home.to_path_buf() })
 }
 
 /// 진행 중인 rebase·merge가 있으면 그 이름. 그 사이에 `git add`하면 충돌 표시가 남은 db.json이
 /// "해결됨"으로 커밋되고 다음 push로 퍼진다(2026-04 실제 사고).
 fn in_progress(g: &Git) -> Option<&'static str> {
     let git_dir = g.ok(&["rev-parse", "--absolute-git-dir"]).ok()?;
-    let git_dir = Path::new(&git_dir);
-    if git_dir.join("rebase-merge").exists() || git_dir.join("rebase-apply").exists() {
-        Some("rebase")
-    } else if git_dir.join("MERGE_HEAD").exists() {
-        Some("merge")
-    } else {
-        None
-    }
+    crate::merge::in_progress(Path::new(&git_dir))
 }
 
 /// db.json, notes/(있으면), include_pdfs면 pdfs/(있으면)를 스테이지하고 변경이 있을 때만 커밋한다.
@@ -255,9 +242,6 @@ fn stage_and_commit(g: &Git, include_pdfs: bool, message: &str) -> Result<bool, 
     let mut paths: Vec<&str> = Vec::new();
     if g.home.join("db.json").is_file() {
         paths.push("db.json");
-    }
-    if g.home.join(".gitattributes").is_file() {
-        paths.push(".gitattributes");
     }
     if g.home.join("notes").is_dir() {
         paths.push("notes");
