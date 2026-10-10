@@ -202,9 +202,10 @@ pub fn merge(base: &Database, ours: &Database, theirs: &Database, now: &str) -> 
         }
         let refs: Vec<&str> = taken.iter().map(String::as_str).collect();
         let new_key = crate::storage::generate_unique_key_excluding(&refs, &key, "");
-        log.push(record(now, &entries[k], "bibtex_key", Value::String(new_key.clone()), entries[k].updated_at.as_deref(), Value::String(key.clone()), None, "key_taken"));
         taken.push(new_key.clone());
-        entries[k].bibtex_key = new_key;
+        entries[k].bibtex_key = new_key.clone();
+        // 기록은 이름이 바뀐 항목의 새 키로 남긴다
+        log.push(record(now, &entries[k], "bibtex_key", Value::String(new_key), entries[k].updated_at.as_deref(), Value::String(key.clone()), None, "key_taken"));
     }
 
     let records = log.len();
@@ -352,6 +353,34 @@ mod tests {
         assert_eq!(keys, vec!["kim2025", "kim2025a"]);
         let r = &out.db.merge_log[0];
         assert_eq!((r["rule"].as_str(), r["kept"].as_str(), r["dropped"].as_str()), (Some("key_taken"), Some("kim2025a"), Some("kim2025")));
+    }
+
+    #[test]
+    fn the_ours_side_holder_keeps_a_taken_key_even_when_placed_later() {
+        let base = db(vec![e("1", "a", "A", None)]);
+        let ours = db(vec![e("1", "a", "A", None), e("3", "kim2025", "Y", None)]);
+        let theirs = db(vec![e("1", "a", "A", None), e("2", "kim2025", "Z", None)]);
+        let out = merge(&base, &ours, &theirs, NOW).unwrap();
+        assert_eq!(titles(&out.db), vec!["A", "Z", "Y"]);
+        let keys: Vec<&str> = out.db.entries.iter().map(|x| x.bibtex_key.as_str()).collect();
+        assert_eq!(keys, vec!["a", "kim2025a", "kim2025"]);
+        assert_eq!(out.records, 1);
+        let r = &out.db.merge_log[0];
+        assert_eq!((r["id"].as_str(), r["bibtex_key"].as_str()), (Some("2"), Some("kim2025a")));
+        assert_eq!((r["rule"].as_str(), r["kept"].as_str(), r["dropped"].as_str()), (Some("key_taken"), Some("kim2025a"), Some("kim2025")));
+    }
+
+    #[test]
+    fn two_theirs_side_holders_get_the_next_suffixes() {
+        let base = db(vec![e("1", "a", "A", None)]);
+        let ours = db(vec![e("1", "a", "A", None), e("3", "kim2025", "Y", None)]);
+        let theirs = db(vec![e("1", "a", "A", None), e("2", "kim2025", "Z", None), e("4", "kim2025", "W", None)]);
+        let out = merge(&base, &ours, &theirs, NOW).unwrap();
+        assert_eq!(titles(&out.db), vec!["A", "Z", "W", "Y"]);
+        let keys: Vec<&str> = out.db.entries.iter().map(|x| x.bibtex_key.as_str()).collect();
+        assert_eq!(keys, vec!["a", "kim2025a", "kim2025b", "kim2025"]);
+        let logged: Vec<(&str, &str)> = out.db.merge_log.iter().map(|r| (r["id"].as_str().unwrap(), r["bibtex_key"].as_str().unwrap())).collect();
+        assert_eq!(logged, vec![("2", "kim2025a"), ("4", "kim2025b")]);
     }
 
     #[test]
