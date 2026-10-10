@@ -292,7 +292,7 @@ fn cmd_sync(g: &Git, include_pdfs: bool, ui: &mut Ui) -> Result<String, String> 
         let branch = g.ok(&["branch", "--show-current"]).unwrap_or_else(|_| "master".to_string());
         return Err(format!("no upstream branch; run `git push -u origin {}` once", branch));
     }
-    let logged = |g: &Git| crate::storage::load_db(&g.home.join("db.json")).map(|d| d.merge_log.len()).unwrap_or(0);
+    let logged = |g: &Git| crate::storage::load_db(&g.home.join("db.json")).map(|d| d.merge_log).unwrap_or_default();
     let before = logged(g);
     // autostash: include_pdfs = false인 채 pdfs/를 지운 트리처럼 unstaged 변경이 남아 있어도 rebase가 거부하지 않는다
     if let Err(e) = g.ok(&["pull", "--rebase", "--autostash", "-q"]) {
@@ -315,8 +315,13 @@ fn cmd_sync(g: &Git, include_pdfs: bool, ui: &mut Ui) -> Result<String, String> 
         1 => "pushed 1 commit".to_string(),
         n => format!("pushed {} commits", n),
     };
-    let merged = logged(g).saturating_sub(before);
+    let merged = new_records(&before, &logged(g));
     Ok(if merged > 0 { format!("{} · {} field(s) merged with a conflict (bibox doctor)", pushed, merged) } else { pushed })
+}
+
+/// pull 뒤에 새로 생긴 병합 기록 수. 길이 차이로 세면 다른 기계가 지운 것과 섞여 적게 센다.
+fn new_records(before: &[Value], after: &[Value]) -> usize {
+    after.iter().filter(|r| !before.contains(r)).count()
 }
 
 fn status_text(g: &Git) -> Result<String, String> {
@@ -340,6 +345,16 @@ mod tests {
 
     fn k(keys: &[&str]) -> Vec<String> {
         keys.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// 알림 수는 pull 뒤에 새로 생긴 기록이다. 다른 기계가 지운 것과 새 겹침이 한꺼번에 와도 새 겹침을 센다.
+    #[test]
+    fn the_notice_counts_records_that_are_new_after_the_pull() {
+        let r = |f: &str| serde_json::json!({"field": f});
+        assert_eq!(new_records(&[r("a"), r("b")], &[r("a"), r("b"), r("c")]), 1);
+        assert_eq!(new_records(&[r("a"), r("b")], &[r("c")]), 1, "two cleared elsewhere, one new here");
+        assert_eq!(new_records(&[r("a")], &[]), 0);
+        assert_eq!(new_records(&[], &[]), 0);
     }
 
     #[test]
