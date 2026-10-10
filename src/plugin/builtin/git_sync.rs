@@ -196,7 +196,11 @@ struct Git {
 
 impl Git {
     fn raw(&self, args: &[&str]) -> Result<Output, String> {
+        // git hook 안처럼 GIT_DIR 등이 내보내져 있으면 -C보다 그쪽이 이겨 다른 저장소에 커밋한다
         Command::new("git")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
             .arg("-C")
             .arg(&self.home)
             .args(args)

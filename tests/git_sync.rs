@@ -43,6 +43,11 @@ struct Reply {
 impl Plugin {
     /// 띄우고 initialize까지. `home`이 None이면 paths.home도 null.
     fn start(home: Option<&Path>, config: serde_json::Value) -> Plugin {
+        Plugin::start_with_env(home, config, &[])
+    }
+
+    /// `start`와 같되 플러그인 프로세스에 환경 변수를 더 준다.
+    fn start_with_env(home: Option<&Path>, config: serde_json::Value, env: &[(&str, &Path)]) -> Plugin {
         // bibox는 명령마다 설정의 홈에 병합 도우미를 등록하므로 사용자의 실제 설정을 읽지 않게 빈 HOME을 준다
         let fake_home = std::env::temp_dir().join(format!("bibox-git-sync-home-{}", std::process::id()));
         std::fs::create_dir_all(&fake_home).unwrap();
@@ -51,6 +56,7 @@ impl Plugin {
             .env("HOME", &fake_home)
             .env_remove("XDG_CONFIG_HOME")
             .env_remove("XDG_DATA_HOME")
+            .envs(env.iter().map(|(k, v)| (*k, *v)))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -376,4 +382,22 @@ fn a_sync_that_merges_a_conflicting_field_says_so() {
     assert_eq!(message(&r), "pushed 1 commit · 1 field(s) merged with a conflict (bibox doctor)", "{:?}", r.error);
     let merged: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(home.join("db.json")).unwrap()).unwrap();
     assert_eq!(merged["entries"][0]["title"], "Server title");
+}
+
+/// git hook 안처럼 GIT_DIR가 다른 저장소를 가리켜도 쓰기 커밋은 라이브러리 저장소에 들어간다.
+#[test]
+fn an_exported_git_dir_does_not_redirect_commits() {
+    let home = fresh_home("gitdir");
+    let other = home.with_extension("other");
+    let _ = std::fs::remove_dir_all(&other);
+    std::fs::create_dir_all(&other).unwrap();
+    git(&other, &["init", "-q"]);
+    let other_git = other.join(".git");
+    let mut p = Plugin::start_with_env(Some(&home), serde_json::json!({}), &[("GIT_DIR", other_git.as_path())]);
+    std::fs::write(home.join("notes/kim2025.md"), "# note\n").unwrap();
+    p.notify("library/written", serde_json::json!({"reason": "add", "entries": [{"bibtex_key": "kim2025"}]}));
+    p.run("status");
+    assert_eq!(git(&home, &["log", "-1", "--format=%s"]), "bibox: add kim2025");
+    let o = Command::new("git").arg("-C").arg(&other).args(["rev-parse", "--verify", "-q", "HEAD"]).output().unwrap();
+    assert!(!o.status.success(), "nothing was committed into the other repository");
 }
