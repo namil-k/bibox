@@ -3399,7 +3399,7 @@ fn draw_settings_popup(f: &mut Frame, app: &App, area: Rect) {
                 let style = if is_cursor { Style::default().fg(theme().accent) } else { Style::default() };
                 let head = format!("{}{:<18} ", mark, it.label);
                 let indent = " ".repeat(head.chars().count());
-                for (k, l) in wrap_hard(&format!("[{}]", val), width.saturating_sub(head.chars().count() + 1)).into_iter().enumerate() {
+                for (k, l) in crate::settings::bracketed(&val, width.saturating_sub(head.chars().count() + 1)).into_iter().enumerate() {
                     let prefix = if k == 0 { head.clone() } else { indent.clone() };
                     lines.push((if k == 0 { Some(ri) } else { None }, Line::from(Span::styled(format!("{}{}", prefix, l), style))));
                 }

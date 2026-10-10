@@ -516,6 +516,18 @@ pub fn wrap_words(text: &str, width: usize) -> Vec<String> {
     out
 }
 
+/// 값 행 `[값]`을 `width`에 맞춰 접는다. 괄호 안쪽만 접고 첫 줄에 `[`, 마지막 줄에 `]`를 붙여서
+/// 닫는 괄호만 따로 한 줄에 남지 않는다. 이어지는 줄은 한 칸 들여 괄호 안쪽에 맞춘다.
+pub fn bracketed(val: &str, width: usize) -> Vec<String> {
+    let inner = wrap_hard(val, width.saturating_sub(2));
+    let last = inner.len() - 1;
+    inner
+        .into_iter()
+        .enumerate()
+        .map(|(k, l)| format!("{}{}{}", if k == 0 { "[" } else { " " }, l, if k == last { "]" } else { "" }))
+        .collect()
+}
+
 /// `wrap_words`와 같되 폭보다 긴 단어(URL, 경로)는 글자에서 끊는다. 값 행에 쓴다.
 pub fn wrap_hard(text: &str, width: usize) -> Vec<String> {
     let width = width.max(8);
@@ -635,6 +647,20 @@ pub fn search(items: &[Item], plugins: &[(String, String)], keys: &[KeyText], qu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 값 행 `[값]`을 접어도 닫는 괄호만 따로 한 줄에 남지 않는다.
+    #[test]
+    fn bracketed_values_never_leave_a_lone_closing_bracket() {
+        // 30칸에 접으면 옛 방식은 마지막 줄이 "]" 하나였다
+        let v = "https://go.openathens.net/redirector/example.edu?url={url_encoded}";
+        let lines = bracketed(v, 30);
+        assert!(lines.iter().all(|l| l.chars().count() <= 30), "{:?}", lines);
+        assert!(lines.first().unwrap().starts_with('[') && lines.last().unwrap().ends_with(']'), "{:?}", lines);
+        assert!(lines.last().unwrap().trim() != "]", "{:?}", lines);
+        assert_eq!(lines.concat().replace(' ', ""), format!("[{}]", v));
+        assert_eq!(bracketed("en", 30), vec!["[en]"]);
+        assert_eq!(bracketed("", 30), vec!["[]"]);
+    }
 
     /// 값 행의 접기: 단어 단위지만 URL처럼 폭보다 긴 한 덩어리는 글자에서 끊는다.
     #[test]
