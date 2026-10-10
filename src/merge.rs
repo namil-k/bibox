@@ -76,7 +76,7 @@ fn record(now: &str, e: &Entry, field: &str, kept: Value, kept_at: Option<&str>,
 }
 
 /// 같은 항목의 세 판을 칸마다 합친다. base가 없으면(양쪽이 같은 id로 따로 추가) 빈 항목으로 본다.
-fn merge_entry(b: Option<&Entry>, o: &Entry, t: &Entry, now: &str, log: &mut Vec<Value>) -> Entry {
+fn merge_entry(b: Option<&Entry>, o: &Entry, t: &Entry, now: &str, log: &mut Vec<Value>) -> Result<Entry, String> {
     let bm = b.map(fields).unwrap_or_default();
     let (om, tm) = (fields(o), fields(t));
     let (winner, rule) = newer(o, t);
@@ -110,7 +110,8 @@ fn merge_entry(b: Option<&Entry>, o: &Entry, t: &Entry, now: &str, log: &mut Vec
             out.insert(k.clone(), v);
         }
     }
-    let mut merged: Entry = serde_json::from_value(Value::Object(out)).unwrap_or_else(|_| o.clone());
+    let mut merged: Entry = serde_json::from_value(Value::Object(out))
+        .map_err(|e| format!("cannot rebuild entry {}: {}", ident(o), e))?;
     merged.updated_at = if same(&merged, o) {
         o.updated_at.clone()
     } else if same(&merged, t) {
@@ -121,13 +122,22 @@ fn merge_entry(b: Option<&Entry>, o: &Entry, t: &Entry, now: &str, log: &mut Vec
             Side::Theirs => t.updated_at.clone(),
         }
     };
-    merged
+    Ok(merged)
 }
 
 /// 세 db를 합친다. `now`는 기록의 `at`.
-pub fn merge(base: &Database, ours: &Database, theirs: &Database, now: &str) -> Outcome {
-    let index = |d: &Database| d.entries.iter().map(|e| (ident(e), e.clone())).collect::<HashMap<String, Entry>>();
-    let (bmap, omap, tmap) = (index(base), index(ours), index(theirs));
+pub fn merge(base: &Database, ours: &Database, theirs: &Database, now: &str) -> Result<Outcome, String> {
+    // 한쪽에 같은 열쇠가 둘이면 어느 쪽을 버릴지 알 수 없어 병합을 거절한다
+    let index = |d: &Database, side: &str| -> Result<HashMap<String, Entry>, String> {
+        let mut m = HashMap::new();
+        for e in &d.entries {
+            if m.insert(ident(e), e.clone()).is_some() {
+                return Err(format!("duplicate entry {} in {}", ident(e), side));
+            }
+        }
+        Ok(m)
+    };
+    let (bmap, omap, tmap) = (index(base, "base")?, index(ours, "ours")?, index(theirs, "theirs")?);
     let mut log: Vec<Value> = Vec::new();
 
     let mut order: Vec<String> = Vec::new();
@@ -142,13 +152,13 @@ pub fn merge(base: &Database, ours: &Database, theirs: &Database, now: &str) -> 
         let result = match (bmap.get(i), omap.get(i), tmap.get(i)) {
             (None, Some(o), None) => Some(o.clone()),
             (None, None, Some(t)) => Some(t.clone()),
-            (None, Some(o), Some(t)) => Some(merge_entry(None, o, t, now, &mut log)),
+            (None, Some(o), Some(t)) => Some(merge_entry(None, o, t, now, &mut log)?),
             (Some(b), None, Some(t)) | (Some(b), Some(t), None) if same(b, t) => None,
             (Some(_), None, Some(kept)) | (Some(_), Some(kept), None) => {
                 log.push(record(now, kept, "entry", Value::String("kept".into()), kept.updated_at.as_deref(), Value::String("deleted".into()), None, "kept_over_delete"));
                 Some(kept.clone())
             }
-            (Some(b), Some(o), Some(t)) => Some(merge_entry(Some(b), o, t, now, &mut log)),
+            (Some(b), Some(o), Some(t)) => Some(merge_entry(Some(b), o, t, now, &mut log)?),
             (Some(_), None, None) | (None, None, None) => None,
         };
         if let Some(e) = result {
@@ -162,7 +172,7 @@ pub fn merge(base: &Database, ours: &Database, theirs: &Database, now: &str) -> 
     let records = log.len();
     let mut merge_log = ours.merge_log.clone();
     merge_log.extend(log);
-    Outcome { db: Database { entries, merge_log }, records }
+    Ok(Outcome { db: Database { entries, merge_log }, records })
 }
 
 #[cfg(test)]
@@ -186,7 +196,7 @@ mod tests {
         let base = db(vec![e("1", "a", "A", None)]);
         let ours = db(vec![e("1", "a", "A2", Some("2026-10-10T10:00:00+02:00"))]);
         let theirs = db(vec![e("1", "a", "A", None), e("2", "b", "B", None)]);
-        let out = merge(&base, &ours, &theirs, NOW);
+        let out = merge(&base, &ours, &theirs, NOW).unwrap();
         assert_eq!(titles(&out.db), vec!["A2", "B"]);
         assert_eq!(out.records, 0);
     }
@@ -198,7 +208,7 @@ mod tests {
         o.tags = vec!["later".into()];
         let mut t = e("1", "a", "A", Some("2026-10-10T08:05:00+00:00"));
         t.year = Some(2021);
-        let out = merge(&base, &db(vec![o]), &db(vec![t]), NOW);
+        let out = merge(&base, &db(vec![o]), &db(vec![t]), NOW).unwrap();
         let x = &out.db.entries[0];
         assert_eq!((x.tags.clone(), x.year), (vec!["later".to_string()], Some(2021)));
         assert_eq!(x.updated_at.as_deref(), Some("2026-10-10T08:05:00+00:00"), "mixed: the later of the two");
@@ -210,7 +220,7 @@ mod tests {
         let base = db(vec![e("1", "a", "A", None)]);
         let o = e("1", "a", "Deep Learning", Some("2026-10-10T10:00:00+02:00"));
         let t = e("1", "a", "Deep learning.", Some("2026-10-10T08:05:00+00:00"));
-        let out = merge(&base, &db(vec![o]), &db(vec![t]), NOW);
+        let out = merge(&base, &db(vec![o]), &db(vec![t]), NOW).unwrap();
         assert_eq!(titles(&out.db), vec!["Deep learning."]);
         assert_eq!(out.records, 1);
         let r = &out.db.merge_log[0];
@@ -224,7 +234,7 @@ mod tests {
         let base = db(vec![e("1", "a", "A", None)]);
         let o = e("1", "a", "Ours", Some("2026-10-10 10:00:00"));
         let t = e("1", "a", "Theirs", Some("2026-10-10T23:00:00+00:00"));
-        let out = merge(&base, &db(vec![o]), &db(vec![t]), NOW);
+        let out = merge(&base, &db(vec![o]), &db(vec![t]), NOW).unwrap();
         assert_eq!(titles(&out.db), vec!["Ours"]);
         assert_eq!(out.db.merge_log[0]["rule"], "ours_on_tie");
     }
@@ -237,7 +247,7 @@ mod tests {
         o.tags = vec!["x".into(), "y".into(), "o".into()]; // ours adds o
         let mut t = b.clone();
         t.tags = vec!["x".into(), "t".into()]; // theirs drops y, adds t
-        let out = merge(&db(vec![b]), &db(vec![o]), &db(vec![t]), NOW);
+        let out = merge(&db(vec![b]), &db(vec![o]), &db(vec![t]), NOW).unwrap();
         assert_eq!(out.db.entries[0].tags, vec!["x", "o", "t"]);
         assert_eq!(out.records, 0);
     }
@@ -248,7 +258,7 @@ mod tests {
         // ours deletes 1 (theirs untouched) and deletes 2 (theirs edited it)
         let ours = db(vec![]);
         let theirs = db(vec![e("1", "a", "A", None), e("2", "b", "B2", Some("2026-10-10T08:00:00+00:00"))]);
-        let out = merge(&base, &ours, &theirs, NOW);
+        let out = merge(&base, &ours, &theirs, NOW).unwrap();
         assert_eq!(titles(&out.db), vec!["B2"]);
         assert_eq!(out.records, 1);
         assert_eq!(out.db.merge_log[0]["rule"], "kept_over_delete");
@@ -257,9 +267,9 @@ mod tests {
     #[test]
     fn both_deleting_or_neither_changing_is_quiet() {
         let base = db(vec![e("1", "a", "A", None)]);
-        let out = merge(&base, &db(vec![]), &db(vec![]), NOW);
+        let out = merge(&base, &db(vec![]), &db(vec![]), NOW).unwrap();
         assert!(out.db.entries.is_empty());
-        let out = merge(&base, &base, &base, NOW);
+        let out = merge(&base, &base, &base, NOW).unwrap();
         assert_eq!(titles(&out.db), vec!["A"]);
         assert_eq!(out.records, 0);
     }
@@ -269,7 +279,15 @@ mod tests {
         let base = db(vec![e("", "a", "A", None), e("", "b", "B", None)]);
         let ours = db(vec![e("", "a", "A2", Some("2026-10-10T10:00:00+02:00")), e("", "b", "B", None)]);
         let theirs = db(vec![e("", "a", "A", None), e("", "b", "B3", Some("2026-10-10T10:00:00+02:00"))]);
-        let out = merge(&base, &ours, &theirs, NOW);
+        let out = merge(&base, &ours, &theirs, NOW).unwrap();
         assert_eq!(titles(&out.db), vec!["A2", "B3"]);
+    }
+
+    #[test]
+    fn a_duplicate_identity_on_one_side_is_refused() {
+        let base = db(vec![e("1", "a", "A", None)]);
+        let ours = db(vec![e("1", "a", "A", None), e("1", "a2", "A2", None)]);
+        let err = merge(&base, &ours, &base, NOW).err().expect("must refuse");
+        assert!(err.contains("duplicate"), "{err}");
     }
 }
