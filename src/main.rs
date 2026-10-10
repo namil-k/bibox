@@ -13,6 +13,7 @@ mod events;
 mod i18n;
 mod interactive;
 mod keymap;
+mod merge;
 mod kitty;
 mod models;
 mod notes;
