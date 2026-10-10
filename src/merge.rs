@@ -233,15 +233,25 @@ fn read_strict(p: &Path) -> Result<Database, String> {
 
 /// git이 부르는 진입점(`merge-db %O %A %B`). 결과는 `ours`에 쓴다. 0이면 병합됨, 1이면 git이 충돌로 처리한다.
 pub fn run_driver(base: &Path, ours: &Path, theirs: &Path) -> i32 {
-    match merge_files(base, ours, theirs) {
-        Ok(records) => {
+    run_guarded(|| merge_files(base, ours, theirs), base, ours, theirs)
+}
+
+/// 병합을 돌려 종료 코드로 바꾼다. 오류든 패닉이든 git의 줄 단위 병합을 남기고 1.
+fn run_guarded(job: impl FnOnce() -> Result<usize, String> + std::panic::UnwindSafe, base: &Path, ours: &Path, theirs: &Path) -> i32 {
+    match std::panic::catch_unwind(job) {
+        Ok(Ok(records)) => {
             if records > 0 {
                 eprintln!("bibox merge-db: {} field(s) kept by rule", records);
             }
             0
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             eprintln!("bibox merge-db: {}", e);
+            text_merge(base, ours, theirs);
+            1
+        }
+        Err(_) => {
+            eprintln!("bibox merge-db: the merge panicked; leaving git's text merge");
             text_merge(base, ours, theirs);
             1
         }
@@ -273,8 +283,16 @@ pub fn driver_command(exe: &Path) -> String {
     format!("'{}' merge-db %O %A %B", exe.display().to_string().replace('\'', r"'\''"))
 }
 
+/// `home` 저장소에 대한 git. git hook 안처럼 GIT_DIR 등이 내보내져 있으면 -C보다 그쪽이 이겨
+/// 엉뚱한 저장소에 쓰게 되므로 지운다.
+fn git_in(home: &Path) -> Command {
+    let mut c = Command::new("git");
+    c.env_remove("GIT_DIR").env_remove("GIT_WORK_TREE").env_remove("GIT_INDEX_FILE").arg("-C").arg(home);
+    c
+}
+
 fn git_out(home: &Path, args: &[&str]) -> Option<String> {
-    let o = Command::new("git").arg("-C").arg(home).args(args).output().ok()?;
+    let o = git_in(home).args(args).output().ok()?;
     o.status.success().then(|| String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
 
@@ -283,7 +301,7 @@ fn git_config_get(home: &Path, key: &str) -> Option<String> {
 }
 
 fn git_config_set(home: &Path, key: &str, value: &str) -> Result<(), String> {
-    let o = Command::new("git").arg("-C").arg(home).args(["config", "--local", key, value]).output().map_err(|e| e.to_string())?;
+    let o = git_in(home).args(["config", "--local", key, value]).output().map_err(|e| e.to_string())?;
     if o.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&o.stderr).trim().to_string()) }
 }
 
@@ -546,6 +564,19 @@ mod tests {
         assert_eq!(out.db.merge_log[0]["rule"], "kept_over_delete");
     }
 
+    /// 지우기와 고치기가 겹치면 고친 쪽이 남는다. ours가 고치고 theirs가 지운 방향.
+    #[test]
+    fn an_edit_on_our_side_survives_a_deletion_on_theirs() {
+        let base = db(vec![e("1", "a", "A", None), e("2", "b", "B", None)]);
+        let ours = db(vec![e("1", "a", "A2", Some("2026-10-10T10:00:00+02:00")), e("2", "b", "B", None)]);
+        let theirs = db(vec![e("2", "b", "B", None)]);
+        let out = merge(&base, &ours, &theirs, NOW).unwrap();
+        assert_eq!(titles(&out.db), vec!["A2", "B"]);
+        assert_eq!(out.records, 1);
+        assert_eq!(out.db.merge_log[0]["rule"], "kept_over_delete");
+        assert_eq!(out.db.merge_log[0]["id"], "1");
+    }
+
     #[test]
     fn both_deleting_or_neither_changing_is_quiet() {
         let base = db(vec![e("1", "a", "A", None)]);
@@ -680,6 +711,22 @@ mod tests {
         assert_eq!(run_driver(&d.join("base"), &d.join("ours"), &d.join("theirs")), 1);
         // ours는 base 그대로라 git은 theirs 쪽을 받는다. bibox가 고쳐 쓴 ours만의 결과가 아니다
         assert_eq!(std::fs::read_to_string(d.join("ours")).unwrap(), format!("{}\n", bad));
+    }
+
+    /// 패닉도 오류와 같다: 도우미가 없는 기계처럼 충돌 표시를 남기고 1로 끝난다.
+    #[test]
+    fn a_panicking_merge_still_leaves_conflict_markers() {
+        let d = scratch("panic");
+        let good = serde_json::to_string(&db(vec![e("1", "a", "A", None)])).unwrap();
+        let mine = serde_json::to_string(&db(vec![e("1", "a", "Mine", None)])).unwrap();
+        let yours = serde_json::to_string(&db(vec![e("1", "a", "Yours", None)])).unwrap();
+        std::fs::write(d.join("base"), format!("{}\n", good)).unwrap();
+        std::fs::write(d.join("ours"), format!("{}\n", mine)).unwrap();
+        std::fs::write(d.join("theirs"), format!("{}\n", yours)).unwrap();
+        let code = run_guarded(|| -> Result<usize, String> { panic!("boom") }, &d.join("base"), &d.join("ours"), &d.join("theirs"));
+        assert_eq!(code, 1);
+        let out = std::fs::read_to_string(d.join("ours")).unwrap();
+        assert!(out.contains("<<<<<<< ours") && out.contains(&mine) && out.contains(&yours), "{}", out);
     }
 
     #[test]

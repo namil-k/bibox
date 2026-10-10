@@ -169,6 +169,32 @@ fn a_failed_driver_leaves_conflict_markers_like_an_unregistered_clone() {
     assert!(ok(&mac, &["diff", "--name-only", "--diff-filter=U"]).contains("db.json"));
 }
 
+/// git hook처럼 GIT_DIR가 다른 저장소를 가리킨 채 bibox가 돌아도, 등록은 라이브러리 저장소에만 한다.
+#[test]
+fn an_exported_git_dir_does_not_redirect_registration() {
+    let root = std::env::temp_dir().join(format!("bibox-merge-driver-gitdir-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let (home, lib, other) = (root.join("home"), root.join("lib"), root.join("other"));
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+    let bibox = |args: &[&str], git_dir: Option<&Path>| {
+        let mut c = isolated(Command::new(env!("CARGO_BIN_EXE_bibox")));
+        c.args(args).env("HOME", &home).env_remove("XDG_CONFIG_HOME").env_remove("XDG_DATA_HOME");
+        if let Some(g) = git_dir {
+            c.env("GIT_DIR", g);
+        }
+        let o = c.output().unwrap();
+        assert!(o.status.success(), "bibox {:?}: {}", args, String::from_utf8_lossy(&o.stderr));
+    };
+    bibox(&["init", lib.to_str().unwrap()], None);
+    ok(&lib, &["init", "-q"]);
+    ok(&other, &["init", "-q"]);
+    bibox(&["list"], Some(&other.join(".git")));
+    assert!(git(&other, &["config", "--get", "merge.bibox.driver"]).stdout.is_empty(), "the other repository is untouched");
+    assert!(!other.join(".git/info/attributes").exists() || !std::fs::read_to_string(other.join(".git/info/attributes")).unwrap().contains("merge=bibox"));
+    assert!(ok(&lib, &["config", "--get", "merge.bibox.driver"]).contains("merge-db"), "the library is registered");
+}
+
 /// 읽기만 하는 명령 하나로 이 기계에 등록된다. 작업 트리에는 아무것도 생기지 않는다.
 #[test]
 fn any_bibox_command_registers_the_driver_on_this_machine() {
