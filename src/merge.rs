@@ -166,11 +166,53 @@ pub fn merge(base: &Database, ours: &Database, theirs: &Database, now: &str) -> 
         }
     }
 
-    // Task 4에서 theirs 위치 보존과 키 겹침으로 바꾼다. 지금은 ours 순서 뒤에 나머지.
-    let entries: Vec<Entry> = order.iter().filter_map(|i| merged.remove(i)).collect();
+    // ours 순서를 지키고, theirs에만 있는 항목은 theirs에서 바로 앞 항목의 뒤에(없으면 끝에)
+    let mut placed: Vec<String> = ours.entries.iter().map(ident).filter(|i| merged.contains_key(i)).collect();
+    let mut prev: Option<String> = None;
+    for e in &theirs.entries {
+        let i = ident(e);
+        if !merged.contains_key(&i) {
+            continue;
+        }
+        if !placed.contains(&i) {
+            let at = prev.as_ref().and_then(|p| placed.iter().position(|x| x == p)).map(|p| p + 1).unwrap_or(placed.len());
+            placed.insert(at, i.clone());
+        }
+        prev = Some(i);
+    }
+    for i in &order {
+        if merged.contains_key(i) && !placed.contains(i) {
+            placed.push(i.clone());
+        }
+    }
+    let mut entries: Vec<Entry> = placed.iter().filter_map(|i| merged.remove(i)).collect();
+
+    // 키 겹침: ours에서 그 키를 쓰던 항목이 지키고, 나머지는 접미사
+    let ours_key: HashMap<String, String> = ours.entries.iter().map(|e| (ident(e), e.bibtex_key.clone())).collect();
+    let mut taken: Vec<String> = entries.iter().map(|e| e.bibtex_key.clone()).collect();
+    for k in 0..entries.len() {
+        let key = entries[k].bibtex_key.clone();
+        let holders: Vec<usize> = (0..entries.len()).filter(|&j| entries[j].bibtex_key == key).collect();
+        if holders.len() < 2 {
+            continue;
+        }
+        let keeper = holders.iter().copied().find(|&j| ours_key.get(&ident(&entries[j])) == Some(&key)).unwrap_or(holders[0]);
+        if k == keeper {
+            continue;
+        }
+        let refs: Vec<&str> = taken.iter().map(String::as_str).collect();
+        let new_key = crate::storage::generate_unique_key_excluding(&refs, &key, "");
+        log.push(record(now, &entries[k], "bibtex_key", Value::String(new_key.clone()), entries[k].updated_at.as_deref(), Value::String(key.clone()), None, "key_taken"));
+        taken.push(new_key.clone());
+        entries[k].bibtex_key = new_key;
+    }
 
     let records = log.len();
-    let mut merge_log = ours.merge_log.clone();
+    let to_value = |v: &[Value]| Value::Array(v.to_vec());
+    let mut merge_log: Vec<Value> = match set_merge(Some(&to_value(&base.merge_log)), Some(&to_value(&ours.merge_log)), Some(&to_value(&theirs.merge_log))) {
+        Value::Array(a) => a,
+        _ => Vec::new(),
+    };
     merge_log.extend(log);
     Ok(Outcome { db: Database { entries, merge_log }, records })
 }
@@ -289,5 +331,53 @@ mod tests {
         let ours = db(vec![e("1", "a", "A", None), e("1", "a2", "A2", None)]);
         let err = merge(&base, &ours, &base, NOW).err().expect("must refuse");
         assert!(err.contains("duplicate"), "{err}");
+    }
+
+    #[test]
+    fn theirs_only_entries_land_after_their_neighbour() {
+        let base = db(vec![e("1", "a", "A", None), e("3", "c", "C", None)]);
+        let ours = db(vec![e("1", "a", "A", None), e("3", "c", "C", None), e("4", "d", "D", None)]);
+        let theirs = db(vec![e("1", "a", "A", None), e("2", "b", "B", None), e("3", "c", "C", None)]);
+        let out = merge(&base, &ours, &theirs, NOW).unwrap();
+        assert_eq!(titles(&out.db), vec!["A", "B", "C", "D"]);
+    }
+
+    #[test]
+    fn a_taken_key_gets_a_suffix_on_the_theirs_side() {
+        let base = db(vec![]);
+        let ours = db(vec![e("1", "kim2025", "Ours paper", None)]);
+        let theirs = db(vec![e("2", "kim2025", "Theirs paper", None)]);
+        let out = merge(&base, &ours, &theirs, NOW).unwrap();
+        let keys: Vec<&str> = out.db.entries.iter().map(|x| x.bibtex_key.as_str()).collect();
+        assert_eq!(keys, vec!["kim2025", "kim2025a"]);
+        let r = &out.db.merge_log[0];
+        assert_eq!((r["rule"].as_str(), r["kept"].as_str(), r["dropped"].as_str()), (Some("key_taken"), Some("kim2025a"), Some("kim2025")));
+    }
+
+    #[test]
+    fn merge_logs_from_both_sides_are_kept_once() {
+        let shared = serde_json::json!({"field": "title", "rule": "newer", "at": "2026-10-01T00:00:00+00:00"});
+        let mine = serde_json::json!({"field": "year", "rule": "newer", "at": "2026-10-02T00:00:00+00:00"});
+        let yours = serde_json::json!({"field": "doi", "rule": "newer", "at": "2026-10-03T00:00:00+00:00"});
+        let mut base = db(vec![]);
+        base.merge_log = vec![shared.clone()];
+        let mut ours = db(vec![]);
+        ours.merge_log = vec![shared.clone(), mine.clone()];
+        let mut theirs = db(vec![]);
+        theirs.merge_log = vec![shared.clone(), yours.clone()];
+        let out = merge(&base, &ours, &theirs, NOW).unwrap();
+        assert_eq!(out.db.merge_log, vec![shared, mine, yours]);
+        assert_eq!(out.records, 0);
+    }
+
+    #[test]
+    fn a_log_cleared_on_one_side_stays_cleared() {
+        let shared = serde_json::json!({"field": "title", "rule": "newer"});
+        let mut base = db(vec![]);
+        base.merge_log = vec![shared.clone()];
+        let ours = db(vec![]); // doctor --fix cleared it here
+        let mut theirs = db(vec![]);
+        theirs.merge_log = vec![shared];
+        assert!(merge(&base, &ours, &theirs, NOW).unwrap().db.merge_log.is_empty());
     }
 }
