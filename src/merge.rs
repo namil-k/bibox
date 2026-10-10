@@ -1,9 +1,9 @@
 //! db.json 3방향 병합. git이 `merge.bibox.driver`로 부른다(`bibox merge-db %O %A %B`).
 //! 스펙: docs/superpowers/specs/2026-10-10-db-merge-design.md
 
-#![allow(dead_code)] // Task 5에서 merge-db 명령이 쓰면 지운다
-
 use std::collections::HashMap;
+use std::path::Path;
+use std::process::Command;
 
 use serde_json::{json, Map, Value};
 
@@ -218,6 +218,99 @@ pub fn merge(base: &Database, ours: &Database, theirs: &Database, now: &str) -> 
     Ok(Outcome { db: Database { entries, merge_log }, records })
 }
 
+/// driver 입력은 엄격하게 읽는다. 깨진 항목을 건너뛰면 결과에서 그 논문이 사라진다.
+fn read_strict(p: &Path) -> Result<Database, String> {
+    let s = std::fs::read_to_string(p).map_err(|e| format!("cannot read {}: {}", p.display(), e))?;
+    if s.trim().is_empty() {
+        return Ok(Database::default());
+    }
+    serde_json::from_str::<Database>(&s).map_err(|e| format!("{} is not a bibox library: {}", p.display(), e))
+}
+
+/// git이 부르는 진입점(`merge-db %O %A %B`). 결과는 `ours`에 쓴다. 0이면 병합됨, 1이면 git이 충돌로 처리한다.
+pub fn run_driver(base: &Path, ours: &Path, theirs: &Path) -> i32 {
+    let read = [base, ours, theirs].map(read_strict);
+    let [b, o, t] = match read {
+        [Ok(b), Ok(o), Ok(t)] => [b, o, t],
+        [Err(e), ..] | [_, Err(e), _] | [.., Err(e)] => {
+            eprintln!("bibox merge-db: {}", e);
+            return 1;
+        }
+    };
+    let out = match merge(&b, &o, &t, &crate::models::now_stamp()) {
+        Ok(out) => out,
+        Err(e) => {
+            eprintln!("bibox merge-db: {}", e);
+            return 1;
+        }
+    };
+    if let Err(e) = crate::storage::save_db(&out.db, ours) {
+        eprintln!("bibox merge-db: cannot write {}: {}", ours.display(), e);
+        return 1;
+    }
+    if out.records > 0 {
+        eprintln!("bibox merge-db: {} field(s) kept by rule", out.records);
+    }
+    0
+}
+
+pub const ATTR_LINE: &str = "db.json merge=bibox";
+
+/// git이 `sh -c`로 돌리는 명령. 경로는 작은따옴표로 감싼다.
+pub fn driver_command(exe: &Path) -> String {
+    format!("'{}' merge-db %O %A %B", exe.display().to_string().replace('\'', r"'\''"))
+}
+
+fn git_config_get(home: &Path, key: &str) -> Option<String> {
+    let o = Command::new("git").arg("-C").arg(home).args(["config", "--local", "--get", key]).output().ok()?;
+    o.status.success().then(|| String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
+fn git_config_set(home: &Path, key: &str, value: &str) -> Result<(), String> {
+    let o = Command::new("git").arg("-C").arg(home).args(["config", "--local", key, value]).output().map_err(|e| e.to_string())?;
+    if o.status.success() { Ok(()) } else { Err(String::from_utf8_lossy(&o.stderr).trim().to_string()) }
+}
+
+fn has_attr_line(home: &Path) -> bool {
+    std::fs::read_to_string(home.join(".gitattributes")).map(|s| s.lines().any(|l| l.trim() == ATTR_LINE)).unwrap_or(false)
+}
+
+/// 빠진 것을 말한다. 없으면 None.
+#[allow(dead_code)] // Task 7: doctor가 쓴다
+pub fn registration_problem(home: &Path, exe: &Path) -> Option<String> {
+    if !has_attr_line(home) {
+        return Some(format!(".gitattributes has no `{}`", ATTR_LINE));
+    }
+    if git_config_get(home, "merge.bibox.driver").as_deref() != Some(driver_command(exe).as_str()) {
+        return Some("this machine's git config does not run bibox to merge db.json".to_string());
+    }
+    None
+}
+
+/// `.gitattributes` 줄과 이 기계의 git 설정을 맞춘다. 바꾼 게 있으면 true.
+#[allow(dead_code)] // Task 6: sync/init이 쓴다
+pub fn ensure_registered(home: &Path, exe: &Path) -> Result<bool, String> {
+    let mut changed = false;
+    if !has_attr_line(home) {
+        let path = home.join(".gitattributes");
+        let mut s = std::fs::read_to_string(&path).unwrap_or_default();
+        if !s.is_empty() && !s.ends_with('\n') {
+            s.push('\n');
+        }
+        s.push_str(ATTR_LINE);
+        s.push('\n');
+        std::fs::write(&path, s).map_err(|e| format!("cannot write {}: {}", path.display(), e))?;
+        changed = true;
+    }
+    let cmd = driver_command(exe);
+    if git_config_get(home, "merge.bibox.driver").as_deref() != Some(cmd.as_str()) {
+        git_config_set(home, "merge.bibox.name", "bibox entry-level merge")?;
+        git_config_set(home, "merge.bibox.driver", &cmd)?;
+        changed = true;
+    }
+    Ok(changed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,5 +501,74 @@ mod tests {
         let mut theirs = db(vec![]);
         theirs.merge_log = vec![shared];
         assert!(merge(&base, &ours, &theirs, NOW).unwrap().db.merge_log.is_empty());
+    }
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("bibox-merge-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn a_malformed_input_is_refused_and_ours_is_untouched() {
+        let d = scratch("bad");
+        let good = serde_json::to_string(&db(vec![e("1", "a", "A", None)])).unwrap();
+        std::fs::write(d.join("base"), &good).unwrap();
+        std::fs::write(d.join("ours"), &good).unwrap();
+        // 항목 하나가 Entry가 아니다(author 없음)
+        std::fs::write(d.join("theirs"), r#"{"entries":[{"id":"2","bibtex_key":"b"}]}"#).unwrap();
+        assert_eq!(run_driver(&d.join("base"), &d.join("ours"), &d.join("theirs")), 1);
+        assert_eq!(std::fs::read_to_string(d.join("ours")).unwrap(), good);
+    }
+
+    #[test]
+    fn a_duplicate_id_is_refused_and_ours_is_untouched() {
+        let d = scratch("dup");
+        let good = serde_json::to_string(&db(vec![e("1", "a", "A", None)])).unwrap();
+        let dup = serde_json::to_string(&db(vec![e("1", "a", "A", None), e("1", "b", "B", None)])).unwrap();
+        std::fs::write(d.join("base"), &good).unwrap();
+        std::fs::write(d.join("ours"), &dup).unwrap();
+        std::fs::write(d.join("theirs"), &good).unwrap();
+        assert_eq!(run_driver(&d.join("base"), &d.join("ours"), &d.join("theirs")), 1);
+        assert_eq!(std::fs::read_to_string(d.join("ours")).unwrap(), dup);
+    }
+
+    #[test]
+    fn an_empty_base_means_both_sides_added_everything() {
+        let d = scratch("emptybase");
+        std::fs::write(d.join("base"), "").unwrap();
+        std::fs::write(d.join("ours"), serde_json::to_string(&db(vec![e("1", "a", "A", None)])).unwrap()).unwrap();
+        std::fs::write(d.join("theirs"), serde_json::to_string(&db(vec![e("2", "b", "B", None)])).unwrap()).unwrap();
+        assert_eq!(run_driver(&d.join("base"), &d.join("ours"), &d.join("theirs")), 0);
+        let out = crate::storage::load_db(&d.join("ours")).unwrap();
+        assert_eq!(titles(&out), vec!["A", "B"]);
+    }
+
+    #[test]
+    fn the_driver_command_quotes_the_executable_path() {
+        let c = driver_command(std::path::Path::new("/Users/x/Library/Application Support/it's/bibox"));
+        assert_eq!(c, r"'/Users/x/Library/Application Support/it'\''s/bibox' merge-db %O %A %B");
+    }
+
+    fn git_repo(tag: &str) -> std::path::PathBuf {
+        let d = scratch(tag);
+        assert!(std::process::Command::new("git").arg("-C").arg(&d).args(["init", "-q"]).status().unwrap().success());
+        d
+    }
+
+    #[test]
+    fn registration_writes_the_attribute_and_the_config_once() {
+        let home = git_repo("reg");
+        std::fs::write(home.join(".gitattributes"), "*.pdf binary\n").unwrap();
+        let exe = std::path::Path::new("/opt/bibox");
+        assert!(registration_problem(&home, exe).is_some());
+        assert_eq!(ensure_registered(&home, exe), Ok(true));
+        assert_eq!(ensure_registered(&home, exe), Ok(false), "second time: nothing to change");
+        assert_eq!(std::fs::read_to_string(home.join(".gitattributes")).unwrap(), "*.pdf binary\ndb.json merge=bibox\n");
+        assert_eq!(registration_problem(&home, exe), None);
+        // 실행 파일이 옮겨지면 설정만 고친다
+        assert_eq!(ensure_registered(&home, std::path::Path::new("/new/bibox")), Ok(true));
+        assert!(registration_problem(&home, std::path::Path::new("/new/bibox")).is_none());
     }
 }

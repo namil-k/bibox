@@ -579,6 +579,10 @@ Examples:
         action: PluginAction,
     },
 
+    /// git merge driver for db.json (git calls it; see .gitattributes)
+    #[command(name = "merge-db", hide = true)]
+    MergeDb { base: PathBuf, ours: PathBuf, theirs: PathBuf },
+
     /// Run a plugin's command-line entry point (`bibox <plugin> ...`)
     #[command(external_subcommand)]
     External(Vec<OsString>),
@@ -662,6 +666,10 @@ enum TemplateAction {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    // git이 부른다. 설정을 읽지 않는다(설정이 없거나 깨진 기계에서도 병합은 되어야 한다).
+    if let Some(Commands::MergeDb { base, ours, theirs }) = &cli.command {
+        std::process::exit(merge::run_driver(base, ours, theirs));
+    }
     let config = load_config()?;
 
     match cli.command {
@@ -675,6 +683,8 @@ async fn main() -> Result<()> {
                 println!();
             }
         }
+
+        Some(Commands::MergeDb { .. }) => unreachable!("handled before load_config"),
 
         Some(Commands::Add {
             file,
