@@ -4,7 +4,23 @@
 use std::path::Path;
 use std::sync::RwLock;
 
+#[cfg(feature = "tui")]
 use ratatui::style::Color;
+
+/// TUI 없이 빌드할 때 ratatui 대신 쓰는 같은 모양의 색. 그때는 doctor와 설정 검사만 테마 파일을 읽는다.
+#[cfg(not(feature = "tui"))]
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Color {
+    Black,
+    Red,
+    Green,
+    Yellow,
+    Cyan,
+    White,
+    DarkGray,
+    Rgb(u8, u8, u8),
+}
 
 /// 역할별 색. `bg`가 Some이면 화면 전체와 팝업 안을 그 색으로 칠한다(VS Code 테마의 글자색은 그 배경 전제).
 #[derive(Debug, Clone, Copy, PartialEq)]

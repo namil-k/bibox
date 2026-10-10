@@ -1,3 +1,6 @@
+// TUI 없이 빌드하면(--no-default-features) TUI만 쓰는 코드가 남는다. 그 빌드에서만 경고를 끈다.
+#![cfg_attr(not(feature = "tui"), allow(dead_code, unused_imports))]
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::ffi::OsString;
