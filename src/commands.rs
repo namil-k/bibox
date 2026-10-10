@@ -3975,6 +3975,14 @@ bibox export --collection ml --notes-only -o ~/ml-notes
 bibox sync --yes --json
 ```
 
+### Pulling when the library is edited on several machines
+
+bibox registers itself as git's merge driver for db.json on each machine the first time any bibox command runs in the library (a line in `.git/info/attributes` and `merge.bibox.driver` in the repository's git config; nothing is committed). Run one bibox command, for example `bibox list`, before the first `git pull` on a new machine; `bibox doctor` shows whether the merge driver is registered.
+
+With it, `git pull` (rebase or merge) merges db.json entry by entry: different papers and different fields all survive, tags and collections are merged as sets, and when both sides changed the same field the later edit wins. The value that lost is listed by `bibox doctor` under "Dropped by merges"; tell the user about it rather than clearing it yourself.
+
+If git still stops with a conflict in db.json (the driver is missing on this machine, or it refused a library with a broken entry or a duplicate id), do not edit db.json, do not `git add` it with conflict markers, and do not replace it with your own copy: that is how papers get lost. Run `git merge --abort` (or `git rebase --abort` if the pull was a rebase), then `bibox doctor`, fix what it reports, and pull again.
+
 ## Typical AI Agent Workflow
 
 ```bash
@@ -3996,8 +4004,8 @@ bibox note vaswani2017attention --show
 
 # 5. Push to git
 # When the home is a git repository the built-in git-sync plugin already commits every write; run `bibox plugin list` to check it is installed.
-# Push to git (use the home path from `bibox init`)
-cd <bibox-home> && git add . && git commit -m "add vaswani2017attention" && git push
+# Push to git (use the home path from `bibox init`); pull first so the merge driver merges other machines' edits
+cd <bibox-home> && git add . && git commit -m "add vaswani2017attention" && git pull && git push
 ```
 
 ## Key Flags for Agents
@@ -5073,6 +5081,15 @@ mod tests {
         assert!(!AGENT_GUIDE.contains("after_write"), "v1 hook names are gone");
         assert!(AGENT_GUIDE.contains("bibox agent-guide --json"));
         assert!(!AGENT_GUIDE.contains('\u{2014}') && !AGENT_GUIDE.contains('\u{2013}'), "no dashes");
+    }
+
+    /// 서버의 에이전트는 README가 아니라 이 안내를 읽는다. 충돌난 db.json을 손대지 말고 되돌리라는 말이 있어야 한다.
+    #[test]
+    fn the_agent_guide_says_how_to_pull_and_what_to_do_on_a_db_conflict() {
+        assert!(AGENT_GUIDE.contains("merge driver"));
+        assert!(AGENT_GUIDE.contains("git merge --abort") && AGENT_GUIDE.contains("git rebase --abort"));
+        assert!(AGENT_GUIDE.contains("Dropped by merges"));
+        assert!(AGENT_GUIDE.contains("git pull"), "the workflow pulls before it pushes");
     }
 
     fn export_fixture(key: &str) -> Entry {
