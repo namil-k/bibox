@@ -720,14 +720,14 @@ impl App {
                     }
                 }
                 SortCriterion::Created => {
-                    let c = ea.created_at.cmp(&eb.created_at);
+                    let c = crate::models::cmp_stamps(&ea.created_at, &eb.created_at);
                     if ascending { c } else { c.reverse() }
                 }
                 SortCriterion::Updated => {
                     // Fall back to created_at when updated_at is None
                     let a_ts = ea.updated_at.as_deref().unwrap_or(&ea.created_at);
                     let b_ts = eb.updated_at.as_deref().unwrap_or(&eb.created_at);
-                    let c = a_ts.cmp(b_ts);
+                    let c = crate::models::cmp_stamps(a_ts, b_ts);
                     if ascending { c } else { c.reverse() }
                 }
             }
@@ -948,7 +948,7 @@ impl App {
         for e in self.entries.iter_mut() {
             if self.selected_keys.contains(&e.bibtex_key) {
                 e.collections = new_cols.clone();
-                e.updated_at = Some(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+                e.updated_at = Some(crate::models::now_stamp());
             }
         }
         let affected: Vec<Entry> = self.entries.iter().filter(|e| self.selected_keys.contains(&e.bibtex_key)).cloned().collect();
@@ -5157,7 +5157,7 @@ fn handle_fetch_preview(app: &mut App, key: crossterm::event::KeyEvent) -> Resul
                             _ => {}
                         }
                     }
-                    entry.updated_at = Some(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+                    entry.updated_at = Some(crate::models::now_stamp());
                     key_after = entry.bibtex_key.clone();
                 }
                 save_db(&db, &db_path)?;

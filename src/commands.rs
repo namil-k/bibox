@@ -296,7 +296,7 @@ pub async fn cmd_add(
                     note: None,
                     collections: collection.map(|c| vec![c]).unwrap_or_default(),
                     file_path: None,
-                    created_at: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                    created_at: crate::models::now_stamp(),
                     updated_at: None,
                 };
 
@@ -373,7 +373,7 @@ pub async fn cmd_add(
                 note: None,
                 collections,
                 file_path: None,
-                created_at: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                created_at: crate::models::now_stamp(),
                 updated_at: None,
             };
             let entry = run_before_add(config, entry);
@@ -666,7 +666,7 @@ pub async fn cmd_add(
         note: None,
         collections,
         file_path,
-        created_at: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        created_at: crate::models::now_stamp(),
         updated_at: None,
     };
 
@@ -932,7 +932,7 @@ pub fn cmd_show(id_or_key: String, json: bool, cite: Option<String>, config: &Co
     if let Some(note) = &entry.note {
         println!("{}: {}", config.msgs.label_note(), note);
     }
-    println!("{}: {}", config.msgs.label_created(), entry.created_at);
+    println!("{}: {}", config.msgs.label_created(), crate::models::display_stamp(&entry.created_at));
     println!("{}", sep);
 
     Ok(())
@@ -1065,7 +1065,7 @@ pub async fn cmd_edit(
     }
 
     let key = entry.bibtex_key.clone();
-    entry.updated_at = Some(Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+    entry.updated_at = Some(crate::models::now_stamp());
     let snapshot = entry.clone();
     save_db(&db, &db_path)?;
     after_write(config, WriteReason::Edit, vec![snapshot]);
@@ -1133,7 +1133,7 @@ pub fn cmd_collect(id_or_key: String, collections: Vec<String>, config: &Config)
 
     let key = entry.bibtex_key.clone();
     if !added.is_empty() {
-        entry.updated_at = Some(Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+        entry.updated_at = Some(crate::models::now_stamp());
     }
     let snapshot = entry.clone();
     save_db(&db, &db_path)?;
@@ -1165,7 +1165,7 @@ pub fn cmd_uncollect(id_or_key: String, collection: String, config: &Config) -> 
     }
 
     entry.collections.retain(|c| c != &collection);
-    entry.updated_at = Some(Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+    entry.updated_at = Some(crate::models::now_stamp());
     let key = entry.bibtex_key.clone();
     let snapshot = entry.clone();
     save_db(&db, &db_path)?;
@@ -2021,7 +2021,7 @@ pub fn cmd_sync(yes: bool, json: bool, config: &Config) -> Result<()> {
                 note: Some(config.msgs.sync_added_note().to_string()),
                 collections: vec![],
                 file_path: Some(fp.clone()),
-                created_at: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+                created_at: crate::models::now_stamp(),
                 updated_at: None,
             };
 
@@ -2166,7 +2166,7 @@ pub fn cmd_note(
             println!("{}", config.msgs.note_appended(&note_path.display().to_string()));
         }
         if let Some(e) = find_by_key_mut(&mut db, &entry.bibtex_key) {
-            e.updated_at = Some(Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+            e.updated_at = Some(crate::models::now_stamp());
             let snapshot = e.clone();
             let _ = save_db(&db, &db_path);
             after_write(config, WriteReason::Edit, vec![snapshot]);
@@ -2195,7 +2195,7 @@ pub fn cmd_note(
         .with_context(|| format!("Failed to launch editor '{}'", editor))?;
 
     if let Some(e) = find_by_key_mut(&mut db, &entry.bibtex_key) {
-        e.updated_at = Some(Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+        e.updated_at = Some(crate::models::now_stamp());
         let snapshot = e.clone();
         let _ = save_db(&db, &db_path);
         after_write(config, WriteReason::Edit, vec![snapshot]);
@@ -2365,7 +2365,7 @@ pub fn cmd_modify(
                 _ => {}
             }
         }
-        entry.updated_at = Some(Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+        entry.updated_at = Some(crate::models::now_stamp());
         modified += 1;
         affected.push(entry.clone());
     }
@@ -2566,7 +2566,7 @@ pub fn cmd_review(
                 let entry = &mut db.entries[db_idx];
                 if !entry.tags.contains(&"reviewed".to_string()) {
                     entry.tags.push("reviewed".to_string());
-                    entry.updated_at = Some(Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+                    entry.updated_at = Some(crate::models::now_stamp());
                     reviewed_count += 1;
                 }
                 let snapshot = entry.clone();
@@ -3036,7 +3036,7 @@ fn merge_into(existing: &mut Entry, rec: &mut ImportRecord, to: Option<&str>) ->
         }
     }
     if n > 0 {
-        existing.updated_at = Some(Local::now().format("%Y-%m-%d %H:%M:%S").to_string());
+        existing.updated_at = Some(crate::models::now_stamp());
     }
     n
 }
@@ -3131,7 +3131,7 @@ fn import_record(db: &mut Database, input: usize, mut rec: ImportRecord, ctx: &m
         note: rec.note.take(),
         collections,
         file_path: None,
-        created_at: Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        created_at: crate::models::now_stamp(),
         updated_at: None,
     };
     let mut entry = match ctx.events {

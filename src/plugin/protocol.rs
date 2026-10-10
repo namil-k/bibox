@@ -208,7 +208,7 @@ impl UiAnswer {
 /// 전부 아니면 전무. `db`는 현재 항목들, `pending_new`는 `before_add`에서 추가 중인 항목
 /// (아직 `db`에 없다). 통과하면 `updated_at`이 찍힌 항목들을 돌려준다.
 pub fn validate_apply(db: &[Entry], pending_new: Option<&Entry>, incoming: &[Value]) -> Result<Vec<Entry>, String> {
-    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let now = crate::models::now_stamp();
     let mut out: Vec<Entry> = Vec::with_capacity(incoming.len());
 
     for (i, v) in incoming.iter().enumerate() {
