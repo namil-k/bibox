@@ -233,29 +233,37 @@ fn read_strict(p: &Path) -> Result<Database, String> {
 
 /// git이 부르는 진입점(`merge-db %O %A %B`). 결과는 `ours`에 쓴다. 0이면 병합됨, 1이면 git이 충돌로 처리한다.
 pub fn run_driver(base: &Path, ours: &Path, theirs: &Path) -> i32 {
-    let read = [base, ours, theirs].map(read_strict);
-    let [b, o, t] = match read {
-        [Ok(b), Ok(o), Ok(t)] => [b, o, t],
-        [Err(e), ..] | [_, Err(e), _] | [.., Err(e)] => {
-            eprintln!("bibox merge-db: {}", e);
-            return 1;
+    match merge_files(base, ours, theirs) {
+        Ok(records) => {
+            if records > 0 {
+                eprintln!("bibox merge-db: {} field(s) kept by rule", records);
+            }
+            0
         }
-    };
-    let out = match merge(&b, &o, &t, &crate::models::now_stamp()) {
-        Ok(out) => out,
         Err(e) => {
             eprintln!("bibox merge-db: {}", e);
-            return 1;
+            text_merge(base, ours, theirs);
+            1
         }
-    };
-    if let Err(e) = crate::storage::save_db(&out.db, ours) {
-        eprintln!("bibox merge-db: cannot write {}: {}", ours.display(), e);
-        return 1;
     }
-    if out.records > 0 {
-        eprintln!("bibox merge-db: {} field(s) kept by rule", out.records);
-    }
-    0
+}
+
+fn merge_files(base: &Path, ours: &Path, theirs: &Path) -> Result<usize, String> {
+    let (b, o, t) = (read_strict(base)?, read_strict(ours)?, read_strict(theirs)?);
+    let out = merge(&b, &o, &t, &crate::models::now_stamp())?;
+    crate::storage::save_db(&out.db, ours).map_err(|e| format!("cannot write {}: {}", ours.display(), e))?;
+    Ok(out.records)
+}
+
+/// 실패하면 도우미가 없는 기계와 똑같이 보이게 git의 줄 단위 병합(충돌 표시 포함)을 `ours`에 쓴다.
+/// ours만 남은 멀쩡한 db.json을 그대로 커밋하는 일을 막는다. 종료 코드는 충돌 수라 보지 않는다.
+fn text_merge(base: &Path, ours: &Path, theirs: &Path) {
+    let _ = Command::new("git")
+        .args(["merge-file", "-L", "ours", "-L", "base", "-L", "theirs"])
+        .arg(ours)
+        .arg(base)
+        .arg(theirs)
+        .output();
 }
 
 pub const ATTR_LINE: &str = "db.json merge=bibox";
@@ -600,28 +608,45 @@ mod tests {
         d
     }
 
+    /// 도우미가 실패하면 git의 줄 단위 병합 결과가 ours에 남는다. 겹치지 않으면 깨끗한 텍스트 병합이다.
     #[test]
-    fn a_malformed_input_is_refused_and_ours_is_untouched() {
+    fn a_malformed_input_is_refused_and_ours_gets_git_text_merge() {
         let d = scratch("bad");
         let good = serde_json::to_string(&db(vec![e("1", "a", "A", None)])).unwrap();
-        std::fs::write(d.join("base"), &good).unwrap();
-        std::fs::write(d.join("ours"), &good).unwrap();
         // 항목 하나가 Entry가 아니다(author 없음)
-        std::fs::write(d.join("theirs"), r#"{"entries":[{"id":"2","bibtex_key":"b"}]}"#).unwrap();
+        let bad = r#"{"entries":[{"id":"2","bibtex_key":"b"}]}"#;
+        std::fs::write(d.join("base"), format!("{}\n", good)).unwrap();
+        std::fs::write(d.join("ours"), format!("{}\n", good)).unwrap();
+        std::fs::write(d.join("theirs"), format!("{}\n", bad)).unwrap();
         assert_eq!(run_driver(&d.join("base"), &d.join("ours"), &d.join("theirs")), 1);
-        assert_eq!(std::fs::read_to_string(d.join("ours")).unwrap(), good);
+        // ours는 base 그대로라 git은 theirs 쪽을 받는다. bibox가 고쳐 쓴 ours만의 결과가 아니다
+        assert_eq!(std::fs::read_to_string(d.join("ours")).unwrap(), format!("{}\n", bad));
     }
 
     #[test]
-    fn a_duplicate_id_is_refused_and_ours_is_untouched() {
+    fn a_duplicate_id_is_refused_and_ours_gets_conflict_markers() {
         let d = scratch("dup");
         let good = serde_json::to_string(&db(vec![e("1", "a", "A", None)])).unwrap();
         let dup = serde_json::to_string(&db(vec![e("1", "a", "A", None), e("1", "b", "B", None)])).unwrap();
-        std::fs::write(d.join("base"), &good).unwrap();
-        std::fs::write(d.join("ours"), &dup).unwrap();
-        std::fs::write(d.join("theirs"), &good).unwrap();
+        let edited = serde_json::to_string(&db(vec![e("1", "a", "A edited", None)])).unwrap();
+        std::fs::write(d.join("base"), format!("{}\n", good)).unwrap();
+        std::fs::write(d.join("ours"), format!("{}\n", dup)).unwrap();
+        std::fs::write(d.join("theirs"), format!("{}\n", edited)).unwrap();
         assert_eq!(run_driver(&d.join("base"), &d.join("ours"), &d.join("theirs")), 1);
-        assert_eq!(std::fs::read_to_string(d.join("ours")).unwrap(), dup);
+        let out = std::fs::read_to_string(d.join("ours")).unwrap();
+        assert!(out.starts_with("<<<<<<< ours\n") && out.contains(&dup) && out.contains(&edited) && out.contains(">>>>>>> theirs"), "{}", out);
+    }
+
+    #[test]
+    fn an_empty_base_with_a_bad_side_still_gets_conflict_markers() {
+        let d = scratch("emptybad");
+        let good = serde_json::to_string(&db(vec![e("1", "a", "A", None)])).unwrap();
+        std::fs::write(d.join("base"), "").unwrap();
+        std::fs::write(d.join("ours"), "{not json\n").unwrap();
+        std::fs::write(d.join("theirs"), format!("{}\n", good)).unwrap();
+        assert_eq!(run_driver(&d.join("base"), &d.join("ours"), &d.join("theirs")), 1);
+        let out = std::fs::read_to_string(d.join("ours")).unwrap();
+        assert!(out.contains("<<<<<<< ours") && out.contains("{not json") && out.contains(&good), "{}", out);
     }
 
     #[test]
