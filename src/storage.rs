@@ -30,7 +30,8 @@ pub fn load_db(db_path: &Path) -> Result<Database> {
         }
     };
 
-    Ok(Database { entries })
+    let merge_log = raw.get("merge_log").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    Ok(Database { entries, merge_log })
 }
 
 pub fn save_db(db: &Database, db_path: &Path) -> Result<()> {
@@ -227,4 +228,29 @@ pub fn search_entries<'a>(
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod merge_log_tests {
+    use super::*;
+
+    fn tmp(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("bibox-storage-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d.join("db.json")
+    }
+
+    #[test]
+    fn an_empty_merge_log_is_not_written_and_a_full_one_survives_a_round_trip() {
+        let p = tmp("mlog");
+        save_db(&Database::default(), &p).unwrap();
+        assert!(!std::fs::read_to_string(&p).unwrap().contains("merge_log"));
+        let mut db = Database::default();
+        db.merge_log.push(serde_json::json!({"field": "title", "rule": "newer"}));
+        save_db(&db, &p).unwrap();
+        let back = load_db(&p).unwrap();
+        assert_eq!(back.merge_log.len(), 1);
+        assert_eq!(back.merge_log[0]["rule"], "newer");
+    }
 }

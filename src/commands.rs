@@ -4839,7 +4839,7 @@ mod tests {
         existing.journal = None;
         existing.tags = vec!["a".into()];
         existing.collections = vec!["c1".into()];
-        let mut db = Database { entries: vec![existing] };
+        let mut db = Database { entries: vec![existing], ..Default::default() };
         let mut r = rec(Some("other"), Some("10.1/x"));
         r.journal = Some("J".into());
         r.tags = vec!["a".into(), "b".into()];
@@ -4861,7 +4861,7 @@ mod tests {
     #[test]
     fn import_record_merges_a_doiless_entry_by_title_and_year() {
         let config = temp_config("title");
-        let mut db = Database { entries: vec![export_fixture("kim2025rust")] };
+        let mut db = Database { entries: vec![export_fixture("kim2025rust")], ..Default::default() };
         let mut r = rec(None, None);
         r.title = Some("RUST systems programming ".into());
         let o = import_record(&mut db, 0, r, &mut ctx(&config, None));
@@ -4887,7 +4887,7 @@ mod tests {
     #[test]
     fn import_record_skips_non_misc_without_required_fields() {
         let config = temp_config("skip");
-        let mut db = Database { entries: vec![] };
+        let mut db = Database { entries: vec![], ..Default::default() };
         let mut r = rec(Some("x"), None);
         r.year = None;
         let o = import_record(&mut db, 0, r, &mut ctx(&config, None));
@@ -4903,7 +4903,7 @@ mod tests {
     #[test]
     fn import_record_suffixes_a_colliding_key() {
         let config = temp_config("key");
-        let mut db = Database { entries: vec![export_fixture("kim2025rust")] };
+        let mut db = Database { entries: vec![export_fixture("kim2025rust")], ..Default::default() };
         let o = import_record(&mut db, 0, rec(Some("kim2025rust"), Some("10.9/new")), &mut ctx(&config, None));
         assert!(matches!(o.status, ImportStatus::Added));
         assert_eq!(o.key.as_deref(), Some("kim2025rusta"));
@@ -4914,7 +4914,7 @@ mod tests {
     #[test]
     fn import_record_applies_to_as_an_extra_collection_and_pushes_the_entry() {
         let config = temp_config("to");
-        let mut db = Database { entries: vec![] };
+        let mut db = Database { entries: vec![], ..Default::default() };
         let mut r = rec(Some("k"), None);
         r.collections = vec!["A/B".into(), "zotero".into()];
         let mut c = ctx(&config, Some("zotero"));
@@ -5010,7 +5010,7 @@ mod tests {
         let config = temp_config("recfile");
         let src = std::env::temp_dir().join(format!("bibox-recfile-{}.pdf", std::process::id()));
         std::fs::write(&src, b"%PDF-1").unwrap();
-        let mut db = Database { entries: vec![] };
+        let mut db = Database { entries: vec![], ..Default::default() };
         let mut r = rec(Some("a"), Some("10.1/a"));
         r.file = Some(src.clone());
         let o = import_record(&mut db, 0, r, &mut ctx(&config, None));

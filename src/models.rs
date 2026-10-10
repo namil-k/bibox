@@ -152,6 +152,9 @@ pub fn display_stamp(s: &str) -> String {
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct Database {
     pub entries: Vec<Entry>,
+    /// git merge driver가 남긴 기록(겹친 칸에서 진 값 등). 비면 쓰지 않는다.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub merge_log: Vec<serde_json::Value>,
 }
 
 #[cfg(test)]
