@@ -80,6 +80,7 @@ fn merge_entry(b: Option<&Entry>, o: &Entry, t: &Entry, now: &str, log: &mut Vec
     let bm = b.map(fields).unwrap_or_default();
     let (om, tm) = (fields(o), fields(t));
     let (winner, rule) = newer(o, t);
+    let first_record = log.len();
     let mut out = Map::new();
     for k in om.keys() {
         let (bv, ov, tv) = (bm.get(k), om.get(k), tm.get(k));
@@ -117,11 +118,15 @@ fn merge_entry(b: Option<&Entry>, o: &Entry, t: &Entry, now: &str, log: &mut Vec
     } else if same(&merged, t) {
         t.updated_at.clone()
     } else {
-        match newer(o, t).0 {
+        match winner {
             Side::Ours => o.updated_at.clone(),
             Side::Theirs => t.updated_at.clone(),
         }
     };
+    // 기록은 ours 판으로 만들었다. doctor가 맞는 논문을 가리키도록 병합 뒤의 키로 바꾼다
+    for r in &mut log[first_record..] {
+        r["bibtex_key"] = Value::String(merged.bibtex_key.clone());
+    }
     Ok(merged)
 }
 
@@ -208,6 +213,13 @@ pub fn merge(base: &Database, ours: &Database, theirs: &Database, now: &str) -> 
         let new_key = crate::storage::generate_unique_key_excluding(&refs, &key, "");
         taken.push(new_key.clone());
         entries[k].bibtex_key = new_key.clone();
+        // 이 논문의 앞선 기록(칸 겹침)도 새 키를 가리키게 한다. id가 빈 옛 항목은 구별할 수 없어 둔다
+        let id = entries[k].id.clone();
+        if !id.is_empty() {
+            for r in log.iter_mut().filter(|r| r["id"] == id.as_str()) {
+                r["bibtex_key"] = Value::String(new_key.clone());
+            }
+        }
         // 기록은 이름이 바뀐 항목의 새 키로 남긴다
         log.push(record(now, &entries[k], "bibtex_key", Value::String(new_key), entries[k].updated_at.as_deref(), Value::String(key.clone()), None, "key_taken"));
     }
@@ -261,8 +273,22 @@ fn run_guarded(job: impl FnOnce() -> Result<usize, String> + std::panic::UnwindS
 fn merge_files(base: &Path, ours: &Path, theirs: &Path) -> Result<usize, String> {
     let (b, o, t) = (read_strict(base)?, read_strict(ours)?, read_strict(theirs)?);
     let out = merge(&b, &o, &t, &crate::models::now_stamp())?;
-    crate::storage::save_db(&out.db, ours).map_err(|e| format!("cannot write {}: {}", ours.display(), e))?;
+    // 옆의 임시 파일에 다 쓴 뒤 이름을 바꾼다. 쓰다 실패해도 ours가 반쯤 쓰인 채 남지 않는다
+    let json = serde_json::to_string_pretty(&out.db).map_err(|e| e.to_string())?;
+    let tmp = atomic_temp(ours);
+    std::fs::write(&tmp, json)
+        .and_then(|_| std::fs::rename(&tmp, ours))
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&tmp);
+            format!("cannot write {}: {}", ours.display(), e)
+        })?;
     Ok(out.records)
+}
+
+/// `ours` 바로 옆의 임시 파일 이름. 같은 디렉토리라 rename이 한 번에 바뀐다.
+fn atomic_temp(ours: &Path) -> PathBuf {
+    let name = ours.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    ours.with_file_name(format!("{}.bibox-{}.tmp", name, std::process::id()))
 }
 
 /// 실패하면 도우미가 없는 기계와 똑같이 보이게 git의 줄 단위 병합(충돌 표시 포함)을 `ours`에 쓴다.
@@ -564,6 +590,28 @@ mod tests {
         assert_eq!(out.db.merge_log[0]["rule"], "kept_over_delete");
     }
 
+    /// 기록의 bibtex_key는 병합 뒤 그 논문의 키다. theirs가 키 겹침에서 이기거나 나중에 접미사가 붙어도.
+    #[test]
+    fn records_carry_the_key_the_entry_ends_up_with() {
+        let base = db(vec![e("1", "a", "A", None)]);
+        let ours = db(vec![e("1", "a_o", "A", Some("2026-10-10T10:00:00+02:00"))]);
+        let theirs = db(vec![e("1", "a_t", "A", Some("2026-10-10T08:05:00+00:00"))]);
+        let out = merge(&base, &ours, &theirs, NOW).unwrap();
+        assert_eq!(out.db.entries[0].bibtex_key, "a_t");
+        assert_eq!(out.db.merge_log[0]["bibtex_key"], "a_t");
+
+        // theirs 쪽 항목이 제목에서 겹친 뒤 키 겹침으로 이름이 바뀌면, 제목 기록도 새 키를 쓴다
+        // theirs가 2의 키를 k로 바꾸고 제목도 고쳤는데 ours의 새 항목 1이 이미 k다: 2는 ka가 된다
+        let base = db(vec![e("2", "b", "T", None)]);
+        let ours = db(vec![e("2", "b", "T ours", Some("2026-10-10T10:00:00+02:00")), e("1", "k", "Mine", None)]);
+        let theirs = db(vec![e("2", "k", "T theirs", Some("2026-10-10T08:05:00+00:00"))]);
+        let out = merge(&base, &ours, &theirs, NOW).unwrap();
+        let two = out.db.entries.iter().find(|x| x.id == "2").unwrap();
+        assert_eq!(two.bibtex_key, "ka");
+        let title_rec = out.db.merge_log.iter().find(|r| r["field"] == "title").unwrap();
+        assert_eq!(title_rec["bibtex_key"].as_str(), Some(two.bibtex_key.as_str()));
+    }
+
     /// 지우기와 고치기가 겹치면 고친 쪽이 남는다. ours가 고치고 theirs가 지운 방향.
     #[test]
     fn an_edit_on_our_side_survives_a_deletion_on_theirs() {
@@ -711,6 +759,22 @@ mod tests {
         assert_eq!(run_driver(&d.join("base"), &d.join("ours"), &d.join("theirs")), 1);
         // ours는 base 그대로라 git은 theirs 쪽을 받는다. bibox가 고쳐 쓴 ours만의 결과가 아니다
         assert_eq!(std::fs::read_to_string(d.join("ours")).unwrap(), format!("{}\n", bad));
+    }
+
+    /// 결과는 옆의 임시 파일에 다 쓴 뒤 이름을 바꿔 넣는다. 끝나면 임시 파일이 남지 않는다.
+    #[test]
+    fn the_result_replaces_ours_whole_and_leaves_no_temporary_file() {
+        let d = scratch("atomic");
+        std::fs::write(d.join("base"), serde_json::to_string(&db(vec![e("1", "a", "A", None)])).unwrap()).unwrap();
+        std::fs::write(d.join("ours"), serde_json::to_string(&db(vec![e("1", "a", "A", None), e("2", "b", "B", None)])).unwrap()).unwrap();
+        std::fs::write(d.join("theirs"), serde_json::to_string(&db(vec![e("1", "a", "A", None), e("3", "c", "C", None)])).unwrap()).unwrap();
+        assert_eq!(run_driver(&d.join("base"), &d.join("ours"), &d.join("theirs")), 0);
+        // theirs에만 있는 C는 theirs에서의 앞 항목(A) 바로 뒤에 놓인다
+        assert_eq!(titles(&crate::storage::load_db(&d.join("ours")).unwrap()), vec!["A", "C", "B"]);
+        let mut names: Vec<String> = std::fs::read_dir(&d).unwrap().map(|x| x.unwrap().file_name().to_string_lossy().to_string()).collect();
+        names.sort();
+        assert_eq!(names, vec!["base", "ours", "theirs"]);
+        assert!(atomic_temp(&d.join("ours")).file_name().unwrap().to_string_lossy().starts_with("ours."), "the temporary sits next to ours");
     }
 
     /// 패닉도 오류와 같다: 도우미가 없는 기계처럼 충돌 표시를 남기고 1로 끝난다.
