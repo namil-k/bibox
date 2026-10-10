@@ -276,7 +276,6 @@ fn has_attr_line(home: &Path) -> bool {
 }
 
 /// 빠진 것을 말한다. 없으면 None.
-#[allow(dead_code)] // Task 7: doctor가 쓴다
 pub fn registration_problem(home: &Path, exe: &Path) -> Option<String> {
     if !has_attr_line(home) {
         return Some(format!(".gitattributes has no `{}`", ATTR_LINE));
@@ -310,8 +309,85 @@ pub fn ensure_registered(home: &Path, exe: &Path) -> Result<bool, String> {
     Ok(changed)
 }
 
+pub struct Finding {
+    pub kind: &'static str,
+    pub key: Option<String>,
+    pub detail: String,
+}
+
+fn shown(v: &Value) -> String {
+    match v {
+        Value::String(s) => format!("\"{}\"", s),
+        Value::Null => "nothing".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// 기록 하나를 doctor의 한 줄로.
+pub fn describe(r: &Value) -> String {
+    let s = |k: &str| r.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let at = |k: &str| r.get(k).and_then(Value::as_str).map(|t| format!(" ({})", crate::models::display_stamp(t))).unwrap_or_default();
+    match s("rule").as_str() {
+        "key_taken" => format!(
+            "renamed to {new} because {old} was taken; if notes/{old}.md is this paper's note, rename it to {new}.md",
+            new = s("kept"), old = s("dropped")
+        ),
+        "kept_over_delete" => "kept: one side deleted it while the other edited it".to_string(),
+        _ => format!(
+            "{} kept {}{}, dropped {}{}",
+            s("field"), shown(r.get("kept").unwrap_or(&Value::Null)), at("kept_updated_at"),
+            shown(r.get("dropped").unwrap_or(&Value::Null)), at("dropped_updated_at")
+        ),
+    }
+}
+
+/// doctor 결과. 홈이 git 저장소 루트가 아니면 등록 검사는 건너뛴다.
+pub fn doctor_findings(home: Option<&Path>, db: &Database, exe: &Path) -> Vec<Finding> {
+    let mut out = Vec::new();
+    if let Some(home) = home.filter(|h| h.join(".git").exists()) {
+        let problem = if !exe.exists() {
+            Some(format!("{} does not exist", exe.display()))
+        } else {
+            registration_problem(home, exe)
+        };
+        if let Some(p) = problem {
+            out.push(Finding { kind: "merge_driver", key: None, detail: p });
+        }
+    }
+    for r in &db.merge_log {
+        out.push(Finding { kind: "merge_log", key: r.get("bibtex_key").and_then(Value::as_str).map(str::to_string), detail: describe(r) });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn records_read_as_one_line_each() {
+        let r = serde_json::json!({"field": "title", "kept": "Deep learning.", "kept_updated_at": "2026-04-10 13:17:02",
+            "dropped": "Deep Learning", "dropped_updated_at": null, "rule": "newer", "bibtex_key": "lee2015deep"});
+        assert_eq!(describe(&r), r#"title kept "Deep learning." (2026-04-10 13:17), dropped "Deep Learning""#);
+        let k = serde_json::json!({"field": "bibtex_key", "kept": "kim2025a", "dropped": "kim2025", "rule": "key_taken"});
+        assert_eq!(describe(&k), "renamed to kim2025a because kim2025 was taken; if notes/kim2025.md is this paper's note, rename it to kim2025a.md");
+        let d = serde_json::json!({"field": "entry", "rule": "kept_over_delete", "bibtex_key": "x"});
+        assert_eq!(describe(&d), "kept: one side deleted it while the other edited it");
+    }
+
+    #[test]
+    fn doctor_lists_the_log_and_a_missing_registration() {
+        let home = git_repo("doctor");
+        let mut d = db(vec![]);
+        d.merge_log.push(serde_json::json!({"field": "year", "kept": 2021, "dropped": 2020, "rule": "newer", "bibtex_key": "kim2020a"}));
+        let exe = std::env::current_exe().unwrap();
+        let f = doctor_findings(Some(&home), &d, &exe);
+        let kinds: Vec<&str> = f.iter().map(|x| x.kind).collect();
+        assert_eq!(kinds, vec!["merge_driver", "merge_log"]);
+        assert_eq!(f[1].key.as_deref(), Some("kim2020a"));
+        ensure_registered(&home, &exe).unwrap();
+        assert_eq!(doctor_findings(Some(&home), &db(vec![]), &exe).len(), 0);
+        assert_eq!(doctor_findings(None, &db(vec![]), &exe).len(), 0, "no home: nothing to register");
+    }
     use super::*;
     use crate::models::{Database, Entry};
 

@@ -4523,6 +4523,13 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
         issues.push(Issue { kind: "theme_problem".into(), key: Some(config.theme.clone()), detail: e, fixable: false });
     }
 
+    // ── db.json 병합 도우미 ──────────────────────────────────────────────────
+    let exe = std::env::current_exe().unwrap_or_default();
+    let merge_db = crate::storage::load_db(&db_path).unwrap_or_default();
+    for f in crate::merge::doctor_findings(config.home.as_deref(), &merge_db, &exe) {
+        issues.push(Issue { kind: f.kind.into(), key: f.key, detail: f.detail, fixable: true });
+    }
+
     // ── Output (JSON) ────────────────────────────────────────────────────────
     if json {
         let result = serde_json::json!({
@@ -4561,6 +4568,8 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
         ("keymap_problem",  "keymap.toml is valid",          "keymap.toml problems"),
         ("plugin_problem",  "Plugins load cleanly",          "plugin problems"),
         ("theme_problem",   "Theme loads",                   "theme problems"),
+        ("merge_driver",    "db.json merge driver registered", "merge driver not registered"),
+        ("merge_log",       "No values dropped by merges",    "values dropped by merges"),
     ];
 
     println!("  --- Checks {}", "-".repeat(44));
@@ -4586,7 +4595,7 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
     // Detail sections for each issue kind that has problems
     let kinds = ["malformed_entry", "bad_citekey", "duplicate_key", "missing_pdf", "orphaned_pdf",
                   "missing_title", "dirty_title", "latex_escape", "orphaned_note", "keymap_problem",
-                  "plugin_problem", "theme_problem"];
+                  "plugin_problem", "theme_problem", "merge_driver", "merge_log"];
     for kind in &kinds {
         let group: Vec<&Issue> = issues.iter().filter(|i| i.kind == *kind).collect();
         if group.is_empty() { continue; }
@@ -4601,6 +4610,8 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
             "latex_escape"    => ("LaTeX escapes in text",   "--fix decodes to Unicode"),
             "orphaned_note"   => ("Orphaned notes",          "Delete manually or re-add entry"),
             "theme_problem"   => ("Theme",                   "Fix themes/<name>.json or pick another in Settings"),
+            "merge_driver"    => ("Merge driver",            "--fix registers it for this repository"),
+            "merge_log"       => ("Dropped by merges",       "--fix clears the list once you have checked it"),
             _                 => (*kind, ""),
         };
         let fixable = group.iter().any(|i| i.fixable);
@@ -4743,6 +4754,21 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
             }
             fixed += latex_keys.len();
             println!("    OK    Decoded LaTeX in {} entries ({} fields)", latex_keys.len(), field_count);
+        }
+
+        // db.json 병합 도우미 등록, 병합 기록 비우기
+        if issues.iter().any(|i| i.kind == "merge_driver") {
+            if let Some(home) = config.home.as_deref() {
+                match crate::merge::ensure_registered(home, &exe) {
+                    Ok(_) => { println!("    OK    Registered the db.json merge driver"); fixed += 1; }
+                    Err(e) => println!("    FAIL  merge driver: {}", e),
+                }
+            }
+        }
+        if !db.merge_log.is_empty() {
+            println!("    OK    Cleared {} merge record(s)", db.merge_log.len());
+            fixed += db.merge_log.len();
+            db.merge_log.clear();
         }
 
         // Save DB once for all entry-level fixes
