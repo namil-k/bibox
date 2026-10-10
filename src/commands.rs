@@ -4524,10 +4524,11 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
     }
 
     // ── db.json 병합 도우미 ──────────────────────────────────────────────────
-    let exe = std::env::current_exe().unwrap_or_default();
+    // 실행 파일을 못 찾으면 빈 경로로 등록하지 않도록 None으로 둔다(검사는 "없음"으로 보고된다)
+    let exe = std::env::current_exe().ok();
     let merge_db = crate::storage::load_db(&db_path).unwrap_or_default();
     let merge_home = config.home.as_deref().map(crate::config::expand_tilde);
-    for f in crate::merge::doctor_findings(merge_home.as_deref(), &merge_db, &exe) {
+    for f in crate::merge::doctor_findings(merge_home.as_deref(), &merge_db, exe.as_deref().unwrap_or(std::path::Path::new(""))) {
         issues.push(Issue { kind: f.kind.into(), key: f.key, detail: f.detail, fixable: true });
     }
 
@@ -4759,11 +4760,13 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
 
         // db.json 병합 도우미 등록, 병합 기록 비우기
         if issues.iter().any(|i| i.kind == "merge_driver") {
-            if let Some(home) = &merge_home {
-                match crate::merge::ensure_registered(home, &exe) {
+            match (&merge_home, &exe) {
+                (Some(home), Some(exe)) => match crate::merge::ensure_registered(home, exe) {
                     Ok(_) => { println!("    OK    Registered the db.json merge driver"); fixed += 1; }
                     Err(e) => println!("    FAIL  merge driver: {}", e),
-                }
+                },
+                (Some(_), None) => println!("    FAIL  merge driver: cannot find the bibox executable"),
+                (None, _) => {}
             }
         }
         if !db.merge_log.is_empty() {
