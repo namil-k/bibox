@@ -288,7 +288,6 @@ pub fn registration_problem(home: &Path, exe: &Path) -> Option<String> {
 }
 
 /// `.gitattributes` 줄과 이 기계의 git 설정을 맞춘다. 바꾼 게 있으면 true.
-#[allow(dead_code)] // Task 6: sync/init이 쓴다
 pub fn ensure_registered(home: &Path, exe: &Path) -> Result<bool, String> {
     let mut changed = false;
     if !has_attr_line(home) {

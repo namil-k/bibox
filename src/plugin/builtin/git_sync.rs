@@ -82,6 +82,13 @@ impl State {
     fn on_initialize(&mut self, params: &Value) {
         self.home = params.pointer("/paths/home").and_then(Value::as_str).map(PathBuf::from);
         self.set_config(params.get("config").unwrap_or(&Value::Null));
+        // 이 저장소에 db.json 병합 도우미를 등록한다(.gitattributes 줄 + 이 기계의 git 설정).
+        // rebase·merge 도중에는 작업 트리에 새 파일을 만들지 않는다. 실패는 조용히 둔다. doctor가 보고한다.
+        if let (Ok(g), Ok(exe)) = (repo(self.home.as_deref()), std::env::current_exe()) {
+            if in_progress(&g).is_none() {
+                let _ = crate::merge::ensure_registered(&g.home, &exe);
+            }
+        }
     }
 
     fn set_config(&mut self, c: &Value) {
@@ -249,6 +256,9 @@ fn stage_and_commit(g: &Git, include_pdfs: bool, message: &str) -> Result<bool, 
     if g.home.join("db.json").is_file() {
         paths.push("db.json");
     }
+    if g.home.join(".gitattributes").is_file() {
+        paths.push(".gitattributes");
+    }
     if g.home.join("notes").is_dir() {
         paths.push("notes");
     }
@@ -294,6 +304,8 @@ fn cmd_sync(g: &Git, include_pdfs: bool, ui: &mut Ui) -> Result<String, String> 
         let branch = g.ok(&["branch", "--show-current"]).unwrap_or_else(|_| "master".to_string());
         return Err(format!("no upstream branch; run `git push -u origin {}` once", branch));
     }
+    let logged = |g: &Git| crate::storage::load_db(&g.home.join("db.json")).map(|d| d.merge_log.len()).unwrap_or(0);
+    let before = logged(g);
     // autostash: include_pdfs = false인 채 pdfs/를 지운 트리처럼 unstaged 변경이 남아 있어도 rebase가 거부하지 않는다
     if let Err(e) = g.ok(&["pull", "--rebase", "--autostash", "-q"]) {
         // 충돌로 멈춘 rebase를 남기면 db.json에 충돌 표시가 들어가 bibox가 열리지 않는다. pull 전으로 되돌린다
@@ -310,11 +322,13 @@ fn cmd_sync(g: &Git, include_pdfs: bool, ui: &mut Ui) -> Result<String, String> 
     let n = ahead(g).unwrap_or(0);
     g.ok(&["push", "-q"]).map_err(|e| format!("git push failed: {}", e))?;
     ui.refresh();
-    Ok(match n {
+    let pushed = match n {
         0 => "up to date".to_string(),
         1 => "pushed 1 commit".to_string(),
         n => format!("pushed {} commits", n),
-    })
+    };
+    let merged = logged(g).saturating_sub(before);
+    Ok(if merged > 0 { format!("{} · {} field(s) merged with a conflict (bibox doctor)", pushed, merged) } else { pushed })
 }
 
 fn status_text(g: &Git) -> Result<String, String> {

@@ -292,8 +292,10 @@ fn in_progress(home: &Path) -> bool {
 #[test]
 fn a_conflicting_sync_is_undone_and_the_library_stays_as_it_was() {
     let home = diverged_home("conflict");
-    let before = git(&home, &["rev-parse", "HEAD"]);
     let mut p = Plugin::start(Some(&home), serde_json::json!({}));
+    // 시작할 때 만든 .gitattributes를 먼저 커밋해 둔다. 기준은 그 뒤
+    p.run("commit");
+    let before = git(&home, &["rev-parse", "HEAD"]);
     let r = p.run("sync");
     let e = error(&r);
     assert!(e.contains("db.json"), "names the conflicting file: {}", e);
@@ -319,4 +321,53 @@ fn nothing_is_committed_while_a_rebase_is_in_progress() {
     assert!(git(&home, &["diff", "--name-only", "--diff-filter=U"]).contains("db.json"), "db.json stays unmerged");
     assert!(r.messages.iter().any(|m| m.contains("rebase")), "the note save says why: {:?}", r.messages);
     assert!(error(&r).contains("rebase"), "{:?}", r.error);
+}
+
+/// 플러그인이 뜨면 이 저장소에 병합 도우미가 등록되고, .gitattributes는 다음 커밋에 들어간다.
+#[test]
+fn starting_registers_the_merge_driver_and_commits_the_attribute() {
+    let home = fresh_home("register");
+    let mut p = Plugin::start(Some(&home), serde_json::json!({}));
+    assert_eq!(message(&p.run("commit")), "committed");
+    assert!(std::fs::read_to_string(home.join(".gitattributes")).unwrap().contains("db.json merge=bibox"));
+    assert!(git(&home, &["config", "--get", "merge.bibox.driver"]).contains("merge-db %O %A %B"));
+    assert!(git(&home, &["show", "--name-only", "--format=", "HEAD"]).contains(".gitattributes"));
+}
+
+fn full_entry(id: &str, title: &str, at: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": id, "bibtex_key": format!("k{}", id), "entry_type": "article", "title": title, "author": ["Kim, J."], "year": 2020,
+        "tags": [], "collections": [], "created_at": "2026-01-01 00:00:00", "updated_at": at
+    })
+}
+
+/// 같은 칸이 겹친 동기화는 멈추지 않고 합쳐지며, 알림이 doctor를 가리킨다.
+#[test]
+fn a_sync_that_merges_a_conflicting_field_says_so() {
+    let home = fresh_home("mergesync");
+    let db = |t: &str, at: &str| serde_json::to_string_pretty(&serde_json::json!({"entries": [full_entry("1", t, at)]})).unwrap();
+    std::fs::write(home.join("db.json"), db("Original", "2026-10-01T00:00:00+00:00")).unwrap();
+    // 플러그인을 먼저 띄워 등록과 첫 커밋을 만든다
+    let mut p = Plugin::start(Some(&home), serde_json::json!({}));
+    assert_eq!(message(&p.run("commit")), "committed");
+    let remote = home.with_extension("remote.git");
+    let other = home.with_extension("other");
+    let _ = std::fs::remove_dir_all(&remote);
+    let _ = std::fs::remove_dir_all(&other);
+    git(&home, &["init", "-q", "--bare", remote.to_str().unwrap()]);
+    git(&home, &["remote", "add", "origin", remote.to_str().unwrap()]);
+    git(&home, &["push", "-q", "-u", "origin", "HEAD"]);
+    git(&home, &["clone", "-q", remote.to_str().unwrap(), other.to_str().unwrap()]);
+    git(&other, &["config", "user.email", "other@example.com"]);
+    git(&other, &["config", "user.name", "other machine"]);
+    git(&other, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(other.join("db.json"), db("Server title", "2026-10-10T08:05:00+00:00")).unwrap();
+    git(&other, &["commit", "-qam", "server edit"]);
+    git(&other, &["push", "-q"]);
+    std::fs::write(home.join("db.json"), db("Mac title", "2026-10-10T10:00:00+02:00")).unwrap();
+    let r = p.run("sync");
+    // 홈의 `bibox: sync` 커밋 하나가 원격 위에 얹힌다. rebase에서 ours는 원격(08:05Z), theirs는 홈(08:00Z)
+    assert_eq!(message(&r), "pushed 1 commit · 1 field(s) merged with a conflict (bibox doctor)", "{:?}", r.error);
+    let merged: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(home.join("db.json")).unwrap()).unwrap();
+    assert_eq!(merged["entries"][0]["title"], "Server title");
 }
