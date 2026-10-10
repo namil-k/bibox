@@ -192,6 +192,10 @@ pub fn merge(base: &Database, ours: &Database, theirs: &Database, now: &str) -> 
     let mut taken: Vec<String> = entries.iter().map(|e| e.bibtex_key.clone()).collect();
     for k in 0..entries.len() {
         let key = entries[k].bibtex_key.clone();
+        // 빈 키는 겹쳐도 바꿀 이름이 없다. 병합마다 헛기록이 쌓이지 않게 건너뛴다
+        if key.is_empty() {
+            continue;
+        }
         let holders: Vec<usize> = (0..entries.len()).filter(|&j| entries[j].bibtex_key == key).collect();
         if holders.len() < 2 {
             continue;
@@ -549,6 +553,17 @@ mod tests {
         assert_eq!(keys, vec!["a", "kim2025a", "kim2025b", "kim2025"]);
         let logged: Vec<(&str, &str)> = out.db.merge_log.iter().map(|r| (r["id"].as_str().unwrap(), r["bibtex_key"].as_str().unwrap())).collect();
         assert_eq!(logged, vec![("2", "kim2025a"), ("4", "kim2025b")]);
+    }
+
+    #[test]
+    fn empty_keys_are_not_a_collision() {
+        let base = db(vec![]);
+        let ours = db(vec![e("1", "", "A", None)]);
+        let theirs = db(vec![e("2", "", "B", None)]);
+        let out = merge(&base, &ours, &theirs, NOW).unwrap();
+        assert_eq!(titles(&out.db), vec!["A", "B"]);
+        assert!(out.db.entries.iter().all(|x| x.bibtex_key.is_empty()));
+        assert_eq!(out.records, 0);
     }
 
     #[test]
