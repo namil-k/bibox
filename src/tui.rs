@@ -985,6 +985,7 @@ impl App {
         };
         self.picker = None;
         self.entries[idx].collections = new_cols;
+        self.entries[idx].updated_at = Some(crate::models::now_stamp());
         let affected = vec![self.entries[idx].clone()];
         self.persist(crate::events::WriteReason::Edit, affected, true)?;
         self.rebuild_collections();
@@ -1000,6 +1001,7 @@ impl App {
         };
         self.picker = None;
         self.entries[idx].tags = new_tags;
+        self.entries[idx].updated_at = Some(crate::models::now_stamp());
         let affected = vec![self.entries[idx].clone()];
         self.persist(crate::events::WriteReason::Edit, affected, true)?;
         self.apply_filters();
@@ -4693,6 +4695,7 @@ fn handle_file_picker(app: &mut App, key: crossterm::event::KeyEvent) -> Result<
                     FilePickerContext::AttachPdf(key) => {
                         let db_path = crate::config::resolve_db_path(&app.config);
                         let bibox_dir = app.config.bibox_dir.clone();
+                        let stamp = crate::models::now_stamp();
                         match (|| -> anyhow::Result<String> {
                             let mut db = load_db(&db_path)?;
                             let entry = find_by_key_mut(&mut db, &key)
@@ -4702,12 +4705,14 @@ fn handle_file_picker(app: &mut App, key: crossterm::event::KeyEvent) -> Result<
                             let dest = bibox_dir.join(&filename);
                             std::fs::copy(&path, &dest)?;
                             entry.file_path = Some(filename.clone());
+                            entry.updated_at = Some(stamp.clone());
                             save_db(&db, &db_path)?;
                             Ok(dest.to_string_lossy().to_string())
                         })() {
                             Ok(dest) => {
                                 if let Some(e) = app.entries.iter_mut().find(|e| e.bibtex_key == key) {
                                     e.file_path = Some(format!("{}.pdf", key));
+                                    e.updated_at = Some(stamp);
                                 }
                                 if let Some(e) = app.entries.iter().find(|e| e.bibtex_key == key).cloned() {
                                     app.fire_after_write(crate::events::WriteReason::Edit, vec![e]);
@@ -5337,14 +5342,17 @@ fn run_loop(
             match rx.try_recv() {
                 Ok(Ok(result)) => {
                     let db_path = crate::config::resolve_db_path(&app.config);
+                    let stamp = crate::models::now_stamp();
                     if let Ok(mut db) = load_db(&db_path) {
                         if let Some(db_entry) = find_by_key_mut(&mut db, &result.key) {
                             db_entry.file_path = Some(result.file_path.clone());
+                            db_entry.updated_at = Some(stamp.clone());
                         }
                         let _ = save_db(&db, &db_path);
                     }
                     if let Some(mem_entry) = app.entries.iter_mut().find(|e| e.bibtex_key == result.key) {
                         mem_entry.file_path = Some(result.file_path);
+                        mem_entry.updated_at = Some(stamp);
                     }
                     app.bg_result = None;
                     app.bg_fetch_key = None;
