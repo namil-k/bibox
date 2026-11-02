@@ -64,7 +64,9 @@ Examples:
   bibox add --arxiv 2301.12345
   bibox add --isbn 978-0-13-468599-1
   bibox add --url https://arxiv.org/abs/2301.12345
-  bibox add --search \"attention is all you need\"")]
+  bibox add --search \"attention is all you need\"
+
+When the metadata source has no publication year, bibox asks for it at a terminal and otherwise adds nothing: rerun with --year (with --json the reason is printed as {\"warning\": \"year_missing\", \"year_hint\": ...}).")]
     Add {
         /// PDF file to add
         file: Option<PathBuf>,
@@ -109,7 +111,7 @@ Examples:
         #[arg(long)]
         author: Option<String>,
 
-        /// Override publication year
+        /// Override publication year (required when the source has none and stdin is not a terminal)
         #[arg(long)]
         year: Option<u32>,
 
@@ -218,7 +220,11 @@ Examples:
 Examples:
   bibox edit kim2025rust --title \"New Title\" --year 2025
   bibox edit kim2025rust --doi 10.1234/new   # re-fetch metadata
-  bibox edit kim2025rust --tags-add \"ml,nlp\"")]
+  bibox edit kim2025rust --tags-add \"ml,nlp\"
+  bibox edit kopper0000design --key kopper2006design   # rename the citekey
+  bibox edit kopper0000design --year 2006 --regen-key  # fix the year, rebuild the key
+
+Changing the citekey also renames the note (notes/<key>.md); the PDF keeps its Author_Year_Title name.")]
     Edit {
         /// Citation key or entry ID
         key: String,
@@ -286,6 +292,14 @@ Examples:
         /// Attach a local PDF file (copies to bibox pdf dir and updates DB)
         #[arg(long)]
         attach_pdf: Option<PathBuf>,
+
+        /// New citekey (ASCII letters, digits, '_' and '-'; must be unused)
+        #[arg(long = "key", value_name = "NEW_KEY", conflicts_with = "regen_key")]
+        new_key: Option<String>,
+
+        /// Rebuild the citekey from the (edited) metadata with citekey_format
+        #[arg(long)]
+        regen_key: bool,
     },
 
     /// Delete an entry and its associated PDF file
@@ -547,7 +561,7 @@ Issues detected:
 
 Examples:
   bibox doctor            # diagnose only
-  bibox doctor --fix      # auto-repair fixable issues
+  bibox doctor --fix      # auto-repair fixable issues (e.g. decode &amp; in titles and rename the PDF)
   bibox doctor --json     # output as JSON")]
     Doctor {
         /// Auto-repair fixable issues (missing file_path refs, orphaned PDFs)
@@ -763,6 +777,8 @@ async fn main() -> Result<()> {
             tags_add,
             tags_remove,
             attach_pdf,
+            new_key,
+            regen_key,
         }) => {
             commands::cmd_edit(
                 key,
@@ -782,6 +798,8 @@ async fn main() -> Result<()> {
                 tags_add,
                 tags_remove,
                 attach_pdf,
+                new_key,
+                regen_key,
                 &config,
             ).await?;
         }

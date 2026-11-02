@@ -79,6 +79,20 @@ fn prompt_confirm(msg: &str) -> bool {
     matches!(input.trim().to_lowercase().as_str(), "y" | "yes")
 }
 
+/// The year to use when the source had none. Without a terminal nothing is
+/// guessed; at one, Enter takes `hint` and anything else must be a year.
+fn ask_missing_year(hint: Option<u32>, interactive: bool, read: impl FnOnce() -> String) -> Option<u32> {
+    if !interactive {
+        return None;
+    }
+    let input = read();
+    let input = input.trim();
+    if input.is_empty() {
+        return hint;
+    }
+    input.parse().ok().filter(|y| (1000..=9999).contains(y))
+}
+
 fn copy_to_clipboard(text: &str, config: &Config) -> Result<()> {
     let mut ctx = arboard::Clipboard::new()
         .context(config.msgs.clipboard_init_failed())?;
@@ -540,7 +554,34 @@ pub async fn cmd_add(
         vec![]
     };
 
-    let year = year_arg.or_else(|| meta.as_ref().and_then(|m| m.year));
+    let mut year = year_arg.or_else(|| meta.as_ref().and_then(|m| m.year));
+    // A source that knows the paper but not its year would otherwise give a
+    // "0000" citekey that sticks. Ask, or stop before anything is written.
+    if year.is_none() {
+        if let Some(m) = &meta {
+            use std::io::IsTerminal;
+            eprintln!("{}", config.msgs.year_missing_warning(m.year_hint));
+            let interactive = !json && io::stdin().is_terminal();
+            year = ask_missing_year(m.year_hint, interactive, || {
+                print!("{}", config.msgs.year_prompt(m.year_hint));
+                io::stdout().flush().ok();
+                let mut input = String::new();
+                io::stdin().read_line(&mut input).ok();
+                input
+            });
+            if year.is_none() {
+                let message = config.msgs.year_missing_stop(m.year_hint);
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                        "warning": "year_missing",
+                        "message": message,
+                        "year_hint": m.year_hint,
+                    }))?);
+                }
+                anyhow::bail!("{}", message);
+            }
+        }
+    }
     let journal = journal_arg
         .clone()
         .or_else(|| meta.as_ref().and_then(|m| m.journal.clone()));
@@ -958,6 +999,8 @@ pub async fn cmd_edit(
     tags_add: Option<String>,
     tags_remove: Option<String>,
     attach_pdf: Option<std::path::PathBuf>,
+    new_key: Option<String>,
+    regen_key: bool,
     config: &Config,
 ) -> Result<()> {
     let db_path = db_path_from_config(config);
@@ -1048,27 +1091,46 @@ pub async fn cmd_edit(
         // import와 같은 이름 규칙: 같은 이름이 이미 있으면 키를 붙여 덮어쓰지 않는다
         let filename = attach_import_file(entry, &src, config, false).map_err(|e| anyhow::anyhow!("Failed to attach PDF: {}", e))?;
         println!("PDF attached: {}", config.bibox_dir.join(&filename).display());
-    } else if entry.file_path.is_some() {
-        let new_filename = format!("{}.pdf", entry_to_filename(entry));
-        let old_fp = entry.file_path.as_ref().unwrap().clone();
-        if old_fp != new_filename {
-            let old_path = config.bibox_dir.join(&old_fp);
-            let new_path = config.bibox_dir.join(&new_filename);
-            if old_path.exists() {
-                std::fs::rename(&old_path, &new_path).with_context(|| {
-                    config.msgs.file_rename_failed(&old_path.to_string_lossy())
-                })?;
-                entry.file_path = Some(new_filename.clone());
-                println!("{}", config.msgs.file_renamed(&old_fp, &new_filename));
-            }
+    } else if let Some(old_fp) = entry.file_path.clone() {
+        if let Some((_, new_fp)) = crate::storage::sync_pdf_name(entry, &config.bibox_dir)
+            .with_context(|| config.msgs.file_rename_failed(&config.bibox_dir.join(&old_fp).to_string_lossy()))?
+        {
+            println!("{}", config.msgs.file_renamed(&old_fp, &new_fp));
         }
     }
-
-    let key = entry.bibtex_key.clone();
     entry.updated_at = Some(crate::models::now_stamp());
-    let snapshot = entry.clone();
+
+    // A new citekey goes last, so --regen-key sees the edited metadata.
+    let old_key = entry.bibtex_key.clone();
+    let wanted_key = if regen_key {
+        let base = crate::storage::generate_bibtex_key_fmt(
+            &entry.author, entry.year, entry.title.as_deref().unwrap_or("unknown"), &config.citekey_format,
+        );
+        let keys: Vec<&str> = db.entries.iter().map(|e| e.bibtex_key.as_str()).collect();
+        Some(crate::storage::generate_unique_key_excluding(&keys, &base, &old_key))
+    } else {
+        new_key
+    };
+    let key = match wanted_key {
+        Some(k) if k != old_key => {
+            crate::storage::rename_entry(&mut db, &old_key, &k, &config.bibox_dir, &config.notes_dir)?;
+            println!("{}", config.msgs.key_renamed(&old_key, &k));
+            k
+        }
+        _ => old_key.clone(),
+    };
+
+    let snapshot = find_by_key(&db, &key).cloned().with_context(|| config.msgs.entry_not_found(&key))?;
     save_db(&db, &db_path)?;
-    after_write(config, WriteReason::Edit, vec![snapshot]);
+    if key != old_key {
+        let events = crate::events::Events::from_config(config);
+        for o in events.renamed(snapshot, &old_key) {
+            report_outcome(&o);
+        }
+        events.finish_cli(&mut crate::plugin::CliSink);
+    } else {
+        after_write(config, WriteReason::Edit, vec![snapshot]);
+    }
     println!("{}", config.msgs.updated(&key));
 
     Ok(())
@@ -3771,6 +3833,12 @@ bibox add paper.pdf --json
 # By DOI
 bibox add --doi 10.1145/3290605.3300907 --json
 
+# Some Crossref records have no publication year. bibox then tries the other
+# date fields and a year in the venue name ("VR 2006"); if none has one, it
+# adds nothing, exits non-zero and prints {"warning": "year_missing",
+# "year_hint": <DOI registration year or null>}. Check the year and rerun:
+bibox add --doi 10.1109/VR.2006.47 --year 2006 --json
+
 # By arXiv ID
 bibox add --arxiv 2301.12345 --json
 
@@ -3875,6 +3943,12 @@ bibox edit <key> --howpublished '[Online Video]. Available: \url{https://...}' -
 
 # Re-fetch metadata from Crossref by DOI (preserves existing values)
 bibox edit <key> --doi 10.1234/new
+
+# Change the citekey: to a key you choose, or rebuilt from the (edited)
+# metadata with citekey_format. The note file notes/<key>.md is renamed with
+# it; the PDF keeps its Author_Year_Title name. Fails if the key is taken.
+bibox edit kopper0000design --key kopper2006design
+bibox edit kopper0000design --year 2006 --regen-key
 
 # Add/remove tags
 bibox edit <key> --tags-add "transformer,nlp"
@@ -4040,6 +4114,7 @@ Issue types:
 - `missing_title` - Entry has no title
 - `dirty_title` - BibTeX braces {} leaked into text fields [fixable: strips braces]
 - `latex_escape` - LaTeX escapes (\l, \&, \' etc.) in text/author [fixable: decodes to Unicode]
+- `html_entities` - HTML entities (`&amp;`, `&#39;` etc.) in text/author [fixable: decodes them and renames the PDF to match]
 - `orphaned_note` - Note file with no matching entry
 - `invalid_json` - db.json is not valid JSON (e.g. git merge conflict markers)
 - `plugin_problem` - A plugin.toml, its program, a `[plugins.<name>]` setting (wrong type or unknown key), a plugin directory whose symlink target is gone, a missing tool such as poppler for pdf-view, or a missing `guide` file
@@ -4097,7 +4172,7 @@ bibox plugin remove my-plugin
 # TUI: press , then Plugins for the same list, an Installed toggle and each plugin's declared settings
 ```
 
-Protocol: bibox sends `initialize` (paths, config, capabilities) once, then `commands/run` `{command, trigger, entry, entries, focus, collection}` for a command, `fields/get` `{keys, entries}` for row fields, `views/render` `{view, entry, page, width_px, images}` for a preview tab, `library/adding` `{entry}` before an entry is saved (answer `{entry}` to change it; stay silent for 30 seconds and the entry is added unchanged, so send `window/progress` during slow work), and notifications `library/written` `{reason, entries}`, `note/saved` `{entry, path}`, `entry/selected` `{entry}`, `lifecycle/started`, `config/changed` `{config}`, `shutdown`. The plugin may send at any time: requests `window/pick` `{title, items}` -> `{index}`, `window/prompt` `{title, default}` -> `{text}`, `window/confirm` `{title}` -> `{yes}`, `library/apply` `{entries}` -> `{applied}`, `commands/execute` `{command}` (a keymap action name), `settings/set` `{key, value}` -> `{}` (one of the plugin's declared settings; bibox writes config.toml and sends `config/changed`); notifications `window/progress` `{text}`, `window/message` `{text, level}`, `status/set` `{field, text, color}`, `fields/set` `{fields: {key: {id: {text, color}}}}`, `library/refresh`. Errors use the JSON-RPC codes; `-32000` is the plugin's own error and its `message` is shown to the user. Flush stdout after every line. The Python helper (`bibox_plugin.py`, written by `bibox plugin new`) wraps all of this: `serve()`, `window.*`, `status.set`, `fields.set`, `library.*`, `settings.set`, `@on(event)`, `cache`.
+Protocol: bibox sends `initialize` (paths, config, capabilities) once, then `commands/run` `{command, trigger, entry, entries, focus, collection}` for a command, `fields/get` `{keys, entries}` for row fields, `views/render` `{view, entry, page, width_px, images}` for a preview tab, `library/adding` `{entry}` before an entry is saved (answer `{entry}` to change it; stay silent for 30 seconds and the entry is added unchanged, so send `window/progress` during slow work), and notifications `library/written` `{reason, entries, renamed_from?}` (`renamed_from` is the old citekey when an edit changed it), `note/saved` `{entry, path}`, `entry/selected` `{entry}`, `lifecycle/started`, `config/changed` `{config}`, `shutdown`. The plugin may send at any time: requests `window/pick` `{title, items}` -> `{index}`, `window/prompt` `{title, default}` -> `{text}`, `window/confirm` `{title}` -> `{yes}`, `library/apply` `{entries}` -> `{applied}`, `commands/execute` `{command}` (a keymap action name), `settings/set` `{key, value}` -> `{}` (one of the plugin's declared settings; bibox writes config.toml and sends `config/changed`); notifications `window/progress` `{text}`, `window/message` `{text, level}`, `status/set` `{field, text, color}`, `fields/set` `{fields: {key: {id: {text, color}}}}`, `library/refresh`. Errors use the JSON-RPC codes; `-32000` is the plugin's own error and its `message` is shown to the user. Flush stdout after every line. The Python helper (`bibox_plugin.py`, written by `bibox plugin new`) wraps all of this: `serve()`, `window.*`, `status.set`, `fields.set`, `library.*`, `settings.set`, `@on(event)`, `cache`.
 
 Every plugin process gets `BIBOX_BIN` (call it for `modify`, `note --stdin`, `add --json` and send `library/refresh`), `BIBOX_CONFIG_DIR`, `BIBOX_DB_PATH`, `BIBOX_NOTES_DIR`, `BIBOX_PDF_DIR`, `BIBOX_PLUGIN_DIR`; a `[cli]` run also gets `BIBOX_CLI=1`. A bibox call made from inside an event handler does not send events to external plugins again (`BIBOX_IN_HOOK=1`). The plugin's stderr is in `plugins/<name>/stderr.log`, truncated on every start.
 
@@ -4531,6 +4606,32 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
         issues.push(Issue { kind: "theme_problem".into(), key: Some(config.theme.clone()), detail: e, fixable: false });
     }
 
+    // ── 7b. HTML entities left by metadata sources ("Point &amp; Teleport") ──
+    let mut entity_keys: Vec<String> = Vec::new();
+    for e in &good_entries {
+        let has = |s: &str| crate::bibtex::decode_html_entities(s) != s;
+        let fields = [
+            ("title",     e.title.as_deref()),
+            ("journal",   e.journal.as_deref()),
+            ("booktitle", e.booktitle.as_deref()),
+            ("publisher", e.publisher.as_deref()),
+            ("editor",    e.editor.as_deref()),
+        ];
+        let mut affected: Vec<&str> = fields.iter().filter(|(_, v)| v.is_some_and(has)).map(|(f, _)| *f).collect();
+        if e.author.iter().any(|a| has(a)) {
+            affected.push("author");
+        }
+        if !affected.is_empty() {
+            entity_keys.push(e.bibtex_key.clone());
+            issues.push(Issue {
+                kind: "html_entities".into(),
+                key: Some(e.bibtex_key.clone()),
+                detail: format!("HTML entities (&amp; etc.) in: {} - `--fix` decodes them and renames the PDF", affected.join(", ")),
+                fixable: true,
+            });
+        }
+    }
+
     // ── db.json 병합 도우미 ──────────────────────────────────────────────────
     // 실행 파일을 못 찾으면 빈 경로로 등록하지 않도록 None으로 둔다(검사는 "없음"으로 보고된다)
     let exe = std::env::current_exe().ok();
@@ -4687,22 +4788,12 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
             }).collect();
             // Pass 2: apply
             for (old_key, new_key) in &renames {
-                if let Some(e) = db.entries.iter_mut().find(|e| &e.bibtex_key == old_key) {
-                    if let Some(ref fp) = e.file_path {
-                        let old_path = bibox_dir.join(fp);
-                        let new_fp = format!("{}.pdf", new_key);
-                        let new_path = bibox_dir.join(&new_fp);
-                        if old_path.exists() { let _ = std::fs::rename(&old_path, &new_path); }
-                        e.file_path = Some(new_fp);
+                match crate::storage::rename_entry(&mut db, old_key, new_key, bibox_dir, notes_dir) {
+                    Ok(()) => {
+                        println!("    OK    {} -> {}", old_key, new_key);
+                        fixed += 1;
                     }
-                    let old_note = notes_dir.join(format!("{}.md", old_key));
-                    if old_note.exists() {
-                        let new_note = notes_dir.join(format!("{}.md", new_key));
-                        let _ = std::fs::rename(&old_note, &new_note);
-                    }
-                    println!("    OK    {} -> {}", old_key, new_key);
-                    e.bibtex_key = new_key.clone();
-                    fixed += 1;
+                    Err(e) => println!("    FAIL  {}: {}", old_key, e),
                 }
             }
         }
@@ -4764,6 +4855,32 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
             }
             fixed += latex_keys.len();
             println!("    OK    Decoded LaTeX in {} entries ({} fields)", latex_keys.len(), field_count);
+        }
+
+        // Decode HTML entities; the PDF name follows the decoded title
+        if !entity_keys.is_empty() {
+            let decode = crate::bibtex::decode_html_entities;
+            for e in db.entries.iter_mut() {
+                if !entity_keys.contains(&e.bibtex_key) {
+                    continue;
+                }
+                for field in [&mut e.title, &mut e.journal, &mut e.booktitle,
+                              &mut e.publisher, &mut e.editor] {
+                    if let Some(v) = field.as_mut() {
+                        *v = decode(v);
+                    }
+                }
+                for a in e.author.iter_mut() {
+                    *a = decode(a);
+                }
+                e.updated_at = Some(crate::models::now_stamp());
+                match crate::storage::sync_pdf_name(e, bibox_dir) {
+                    Ok(Some((old, new))) => println!("    OK    {}: {} -> {}", e.bibtex_key, old, new),
+                    Ok(None) => println!("    OK    {}: decoded", e.bibtex_key),
+                    Err(err) => println!("    FAIL  {}: PDF not renamed ({})", e.bibtex_key, err),
+                }
+                fixed += 1;
+            }
         }
 
         // db.json 병합 도우미 등록, 병합 기록 비우기
@@ -4843,6 +4960,19 @@ pub fn cmd_agent_guide(json: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_year_is_never_guessed_without_a_terminal() {
+        assert_eq!(ask_missing_year(Some(2006), false, || "2006".into()), None);
+    }
+
+    #[test]
+    fn missing_year_prompt_takes_the_hint_on_enter_or_a_typed_year() {
+        assert_eq!(ask_missing_year(Some(2006), true, || "\n".into()), Some(2006));
+        assert_eq!(ask_missing_year(Some(2006), true, || " 2005\n".into()), Some(2005));
+        assert_eq!(ask_missing_year(None, true, || "\n".into()), None);
+        assert_eq!(ask_missing_year(None, true, || "abc\n".into()), None);
+    }
 
     // ── import_record ──
 

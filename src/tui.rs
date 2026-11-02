@@ -1352,6 +1352,16 @@ impl App {
         }
     }
 
+    /// An edit that gave `entry` a new citekey (`from` is the old one).
+    fn fire_after_rename(&mut self, entry: Entry, from: &str) {
+        self.fields.forget(&[from.to_string(), entry.bibtex_key.clone()]);
+        for o in self.events.renamed(entry, from) {
+            if let Err(e) = o.result {
+                self.show_message(format!("{}: {}", o.plugin, e));
+            }
+        }
+    }
+
     fn fire_after_note_save(&mut self, entry: Entry, note_path: std::path::PathBuf) {
         for o in self.events.note_saved(entry, note_path) {
             if let Err(e) = o.result {
@@ -5127,7 +5137,9 @@ fn handle_fetch_preview(app: &mut App, key: crossterm::event::KeyEvent) -> Resul
 
                 // Apply field changes to DB entry
                 let mut key_after = old_key.clone();
+                let mut rename_error = None;
                 if let Some(entry) = db.entries.iter_mut().find(|e| e.bibtex_key == old_key) {
+                    let mut rename_to = None;
                     for (i, change) in preview.changes.iter().enumerate() {
                         if !preview.selected[i] || !change.changed { continue; }
                         match change.field.as_str() {
@@ -5140,30 +5152,19 @@ fn handle_fetch_preview(app: &mut App, key: crossterm::event::KeyEvent) -> Resul
                             "Journal" => entry.journal = if change.new_val.is_empty() { None } else { Some(change.new_val.clone()) },
                             "Publisher" => entry.publisher = if change.new_val.is_empty() { None } else { Some(change.new_val.clone()) },
                             "DOI" => entry.doi = Some(change.new_val.clone()),
-                            "Citekey" => {
-                                // Rename PDF file if exists
-                                if let Some(ref fp) = entry.file_path {
-                                    let old_path = app.config.bibox_dir.join(fp);
-                                    let new_fp = format!("{}.pdf", new_key);
-                                    let new_path = app.config.bibox_dir.join(&new_fp);
-                                    if old_path.exists() {
-                                        let _ = std::fs::rename(&old_path, &new_path);
-                                    }
-                                    entry.file_path = Some(new_fp);
-                                }
-                                // Rename note file if exists
-                                let old_note = app.config.notes_dir.join(format!("{}.md", old_key));
-                                if old_note.exists() {
-                                    let new_note = app.config.notes_dir.join(format!("{}.md", new_key));
-                                    let _ = std::fs::rename(&old_note, &new_note);
-                                }
-                                entry.bibtex_key = new_key.clone();
-                            }
+                            // After the other fields, so the PDF name sees them
+                            "Citekey" => rename_to = Some(new_key.clone()),
                             _ => {}
                         }
                     }
                     entry.updated_at = Some(crate::models::now_stamp());
-                    key_after = entry.bibtex_key.clone();
+                    let _ = crate::storage::sync_pdf_name(entry, &app.config.bibox_dir);
+                    if let Some(new_key) = rename_to {
+                        match crate::storage::rename_entry(&mut db, &old_key, &new_key, &app.config.bibox_dir, &app.config.notes_dir) {
+                            Ok(()) => key_after = new_key,
+                            Err(e) => rename_error = Some(e.to_string()),
+                        }
+                    }
                 }
                 save_db(&db, &db_path)?;
 
@@ -5172,11 +5173,18 @@ fn handle_fetch_preview(app: &mut App, key: crossterm::event::KeyEvent) -> Resul
                 app.rebuild_collections();
                 app.apply_filters();
                 if let Some(e) = app.entries.iter().find(|e| e.bibtex_key == key_after).cloned() {
-                    app.fire_after_write(crate::events::WriteReason::Edit, vec![e]);
+                    if key_after != old_key {
+                        app.fire_after_rename(e, &old_key);
+                    } else {
+                        app.fire_after_write(crate::events::WriteReason::Edit, vec![e]);
+                    }
                 }
 
                 let applied = preview.selected.iter().filter(|s| **s).count();
-                app.mode = Mode::Message(format!("Updated {} field(s).", applied));
+                app.mode = Mode::Message(match rename_error {
+                    Some(e) => format!("Updated {} field(s), citekey kept: {}", applied, e),
+                    None => format!("Updated {} field(s).", applied),
+                });
             }
             KeyCode::Esc => {
                 app.fetch_preview = None;
@@ -5415,7 +5423,10 @@ fn run_loop(
                             changed: old_author != new_author,
                         });
                         let old_year = entry.year.map(|y| y.to_string()).unwrap_or_default();
-                        let new_year = meta.year.map(|y| y.to_string()).unwrap_or_default();
+                        // Crossref sometimes has no year at all; keep the one we have
+                        // rather than offering to blank it (and a "0000" citekey).
+                        let fetched_year = meta.year.or(entry.year);
+                        let new_year = fetched_year.map(|y| y.to_string()).unwrap_or_default();
                         changes.push(FieldChange {
                             field: "Year".into(), old_val: old_year.clone(), new_val: new_year.clone(),
                             changed: old_year != new_year,
@@ -5441,7 +5452,7 @@ fn run_loop(
                         // Citekey: generate from new data using config format
                         let new_authors = meta.authors.clone();
                         let new_key = crate::storage::generate_bibtex_key_fmt(
-                            &new_authors, meta.year,
+                            &new_authors, fetched_year,
                             meta.title.as_deref().unwrap_or("unknown"),
                             &app.config.citekey_format,
                         );

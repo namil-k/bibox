@@ -144,6 +144,63 @@ pub fn generate_bibtex_key_fmt(authors: &[String], year: Option<u32>, title: &st
         .collect()
 }
 
+/// A citekey has to survive BibTeX, `\cite{}` and a note file name.
+pub fn valid_citekey(key: &str) -> bool {
+    !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Move an entry's PDF to its `Author_Year_Title.pdf` name after the metadata
+/// changed. Never overwrites: if another file has that name, `<stem>_<key>.pdf`
+/// (the import rule); if that is taken too, the file stays where it is.
+/// Returns the old and new names when the file moved.
+pub fn sync_pdf_name(entry: &mut Entry, pdf_dir: &Path) -> Result<Option<(String, String)>> {
+    let Some(old) = entry.file_path.clone() else { return Ok(None) };
+    let old_path = pdf_dir.join(&old);
+    if !old_path.exists() {
+        return Ok(None);
+    }
+    let stem = crate::bibtex::entry_to_filename(entry);
+    for new in [format!("{}.pdf", stem), format!("{}_{}.pdf", stem, entry.bibtex_key)] {
+        if new == old {
+            return Ok(None);
+        }
+        let new_path = pdf_dir.join(&new);
+        if !new_path.exists() {
+            std::fs::rename(&old_path, &new_path)?;
+            entry.file_path = Some(new.clone());
+            return Ok(Some((old, new)));
+        }
+    }
+    Ok(None)
+}
+
+/// Give the entry `old` the citekey `new`. Its note file follows the key; its
+/// PDF keeps the name its metadata gives it. Changes nothing and fails if `new`
+/// is malformed, belongs to another entry, or already has a note file.
+pub fn rename_entry(db: &mut Database, old: &str, new: &str, pdf_dir: &Path, notes_dir: &Path) -> Result<()> {
+    if !valid_citekey(new) {
+        anyhow::bail!("Invalid citekey \"{}\": use only ASCII letters, digits, '_' and '-'", new);
+    }
+    if old == new {
+        return Ok(());
+    }
+    if key_exists(db, new) {
+        anyhow::bail!("Citekey \"{}\" is already used by another entry", new);
+    }
+    let old_note = notes_dir.join(format!("{}.md", old));
+    let new_note = notes_dir.join(format!("{}.md", new));
+    if new_note.exists() {
+        anyhow::bail!("A note file already exists at {}; move it away first", new_note.display());
+    }
+    let entry = find_by_key_mut(db, old).ok_or_else(|| anyhow::anyhow!("Entry not found: {}", old))?;
+    if old_note.exists() {
+        std::fs::rename(&old_note, &new_note)?;
+    }
+    entry.bibtex_key = new.to_string();
+    sync_pdf_name(entry, pdf_dir)?;
+    Ok(())
+}
+
 pub fn filter_entries<'a>(
     db: &'a Database,
     collection: Option<&str>,

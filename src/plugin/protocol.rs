@@ -122,6 +122,9 @@ pub struct AddingResult {
 pub struct WrittenParams {
     pub reason: String,
     pub entries: Vec<Entry>,
+    /// The entry's citekey before this write, when the write changed it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub renamed_from: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

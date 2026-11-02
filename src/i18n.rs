@@ -399,6 +399,39 @@ impl Msgs {
         }
     }
 
+    pub fn key_renamed(&self, old: &str, new: &str) -> String {
+        match self.lang {
+            Lang::En => format!("  Citekey: {} -> {}", old, new),
+            Lang::Ko => format!("  citekey: {} -> {}", old, new),
+        }
+    }
+
+    pub fn year_missing_warning(&self, hint: Option<u32>) -> String {
+        match (&self.lang, hint) {
+            (Lang::En, Some(h)) => format!("  Warning: the source has no publication year (the DOI was registered in {}).", h),
+            (Lang::En, None) => "  Warning: the source has no publication year.".to_string(),
+            (Lang::Ko, Some(h)) => format!("  경고: 출처에 출판 연도가 없습니다 (DOI 등록 연도는 {}).", h),
+            (Lang::Ko, None) => "  경고: 출처에 출판 연도가 없습니다.".to_string(),
+        }
+    }
+
+    pub fn year_prompt(&self, hint: Option<u32>) -> String {
+        match (&self.lang, hint) {
+            (Lang::En, Some(h)) => format!("  Year [{}]: ", h),
+            (Lang::En, None) => "  Year: ".to_string(),
+            (Lang::Ko, Some(h)) => format!("  연도 [{}]: ", h),
+            (Lang::Ko, None) => "  연도: ".to_string(),
+        }
+    }
+
+    pub fn year_missing_stop(&self, hint: Option<u32>) -> String {
+        let example = hint.unwrap_or(2024);
+        match self.lang {
+            Lang::En => format!("Not added: no publication year, so the citekey would be \"0000\". Run again with --year (e.g. --year {}).", example),
+            Lang::Ko => format!("추가하지 않았습니다: 출판 연도가 없어 citekey가 \"0000\"이 됩니다. --year를 붙여 다시 실행하세요 (예: --year {}).", example),
+        }
+    }
+
     pub fn file_moved(&self, name: &str) -> String {
         match self.lang {
             Lang::En => format!("  File moved: {}", name),

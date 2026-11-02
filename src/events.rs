@@ -73,7 +73,16 @@ impl Events {
     }
 
     pub fn written(&self, reason: WriteReason, entries: Vec<Entry>) -> Vec<Outcome> {
-        let params = serde_json::to_value(WrittenParams { reason: reason.as_str().to_string(), entries }).unwrap_or_default();
+        self.emit_written(WrittenParams { reason: reason.as_str().to_string(), entries, renamed_from: None })
+    }
+
+    /// An edit that gave `entry` a new citekey; `from` is the key it had.
+    pub fn renamed(&self, entry: Entry, from: &str) -> Vec<Outcome> {
+        self.emit_written(WrittenParams { reason: WriteReason::Edit.as_str().to_string(), entries: vec![entry], renamed_from: Some(from.to_string()) })
+    }
+
+    fn emit_written(&self, params: WrittenParams) -> Vec<Outcome> {
+        let params = serde_json::to_value(params).unwrap_or_default();
         self.host.emit("library/written", params).into_iter().map(|(plugin, r)| Outcome { plugin, result: r.map_err(|e| e.to_string()) }).collect()
     }
 

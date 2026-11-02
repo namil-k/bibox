@@ -1,14 +1,50 @@
 use crate::models::{Entry, EntryType};
 
-fn decode_html_entities(s: &str) -> String {
-    s.replace("&amp;", "&")
-     .replace("&lt;", "<")
-     .replace("&gt;", ">")
-     .replace("&quot;", "\"")
-     .replace("&#39;", "'")
-     .replace("&apos;", "'")
-     .replace("&#x27;", "'")
-     .replace("&nbsp;", " ")
+/// Decode the HTML entities that metadata sources leave in titles and names
+/// ("Point &amp; Teleport"). One pass, so "&amp;lt;" becomes "&lt;", not "<";
+/// anything that is not a known entity is left as written.
+pub fn decode_html_entities(s: &str) -> String {
+    if !s.contains('&') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        rest = &rest[amp..];
+        let decoded = rest.find(';').filter(|&semi| semi <= 10).and_then(|semi| {
+            let name = &rest[1..semi];
+            let c = match name {
+                "amp" => Some('&'),
+                "lt" => Some('<'),
+                "gt" => Some('>'),
+                "quot" => Some('"'),
+                "apos" => Some('\''),
+                "nbsp" => Some(' '),
+                _ => {
+                    let code = if let Some(hex) = name.strip_prefix("#x").or_else(|| name.strip_prefix("#X")) {
+                        u32::from_str_radix(hex, 16).ok()
+                    } else {
+                        name.strip_prefix('#').and_then(|dec| dec.parse().ok())
+                    };
+                    code.and_then(char::from_u32)
+                }
+            };
+            c.map(|c| (c, semi))
+        });
+        match decoded {
+            Some((c, semi)) => {
+                out.push(c);
+                rest = &rest[semi + 1..];
+            }
+            None => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 fn escape_bibtex(s: &str) -> String {
@@ -282,6 +318,14 @@ mod tests {
         assert_eq!(escape_bibtex("Sex &amp; vision"), "Sex \\& vision");
         assert_eq!(escape_bibtex("A &lt; B &gt; C"), "A < B > C");
         assert_eq!(escape_bibtex("&quot;hello&quot;"), "\"hello\"");
+    }
+
+    #[test]
+    fn html_entities_decode_numeric_forms_once() {
+        assert_eq!(decode_html_entities("Point &amp; Teleport"), "Point & Teleport");
+        assert_eq!(decode_html_entities("Rock &#38; Roll &#x26; &#39;n&#x27;"), "Rock & Roll & 'n'");
+        assert_eq!(decode_html_entities("&amp;lt;"), "&lt;");
+        assert_eq!(decode_html_entities("AT&T &unknown; & &#xZZ;"), "AT&T &unknown; & &#xZZ;");
     }
 
     #[test]

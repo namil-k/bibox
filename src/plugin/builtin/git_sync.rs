@@ -150,6 +150,9 @@ fn written_message(method: &str, params: &Value) -> String {
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(|e| e.get("bibtex_key").and_then(Value::as_str).map(str::to_string)).collect())
         .unwrap_or_default();
+    if let (Some(from), [to]) = (params.get("renamed_from").and_then(Value::as_str), keys.as_slice()) {
+        return format!("bibox: rename {} -> {}", from, to);
+    }
     commit_message(reason, &keys)
 }
 
@@ -448,6 +451,10 @@ mod tests {
     fn written_messages_come_from_reason_and_keys_and_notes_name_the_entry() {
         assert_eq!(written_message("library/written", &serde_json::json!({"reason": "import", "entries": [{"bibtex_key": "a"}, {"bibtex_key": "b"}]})), "bibox: import 2 entries");
         assert_eq!(written_message("library/written", &serde_json::json!({})), "bibox: update");
+        assert_eq!(
+            written_message("library/written", &serde_json::json!({"reason": "edit", "entries": [{"bibtex_key": "kopper2006design"}], "renamed_from": "kopper0000design"})),
+            "bibox: rename kopper0000design -> kopper2006design"
+        );
         assert_eq!(written_message("note/saved", &serde_json::json!({"entry": {"bibtex_key": "kim2025"}, "path": "/n/kim2025.md"})), "bibox: note kim2025");
     }
 

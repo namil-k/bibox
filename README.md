@@ -272,6 +272,11 @@ bibox edit kim2025rust --doi 10.1234/new   # Re-fetch metadata from Crossref
 bibox edit kim2025rust --tags-add "ml,nlp"
 ```
 
+```bash
+bibox edit kopper0000design --key kopper2006design    # Rename the citekey (and notes/<key>.md)
+bibox edit kopper0000design --year 2006 --regen-key   # Fix the year, rebuild the key from citekey_format
+```
+
 **Collections:**
 
 ```bash
@@ -353,8 +358,8 @@ bibox edit kim2025rust --attach-pdf ~/Downloads/paper.pdf
 **Diagnose and repair database issues:**
 
 ```bash
-bibox doctor            # Detect malformed entries, missing PDFs, orphaned notes
-bibox doctor --fix      # Auto-repair fixable issues
+bibox doctor            # Detect malformed entries, missing PDFs, orphaned notes, HTML entities like &amp;
+bibox doctor --fix      # Auto-repair fixable issues (decoded titles also rename the PDF)
 bibox doctor --json     # Machine-readable output
 ```
 

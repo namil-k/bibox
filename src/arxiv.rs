@@ -97,14 +97,12 @@ fn parse_arxiv_response(xml: &str) -> Result<Vec<ArxivResult>> {
             .captures(entry)
             .and_then(|c| c.get(1))
             .map(|m| {
-                m.as_str()
+                let t = m
+                    .as_str()
                     .split_whitespace()
                     .collect::<Vec<_>>()
-                    .join(" ")
-                    .replace("&amp;", "&")
-                    .replace("&lt;", "<")
-                    .replace("&gt;", ">")
-                    .replace("&quot;", "\"")
+                    .join(" ");
+                crate::bibtex::decode_html_entities(&t)
             })
             .unwrap_or_default();
 
