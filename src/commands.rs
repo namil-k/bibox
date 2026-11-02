@@ -4675,6 +4675,7 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
         ("missing_title",   "All entries have titles",       "entries without title"),
         ("dirty_title",     "No BibTeX braces in text",      "entries with {} in text"),
         ("latex_escape",    "No LaTeX escapes in text",      "entries with LaTeX escapes"),
+        ("html_entities",   "No HTML entities in text",      "entries with HTML entities"),
         ("orphaned_note",   "No orphaned notes",             "orphaned notes"),
         ("keymap_problem",  "keymap.toml is valid",          "keymap.toml problems"),
         ("plugin_problem",  "Plugins load cleanly",          "plugin problems"),
@@ -4705,7 +4706,7 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
 
     // Detail sections for each issue kind that has problems
     let kinds = ["malformed_entry", "bad_citekey", "duplicate_key", "missing_pdf", "orphaned_pdf",
-                  "missing_title", "dirty_title", "latex_escape", "orphaned_note", "keymap_problem",
+                  "missing_title", "dirty_title", "latex_escape", "html_entities", "orphaned_note", "keymap_problem",
                   "plugin_problem", "theme_problem", "merge_driver", "merge_log"];
     for kind in &kinds {
         let group: Vec<&Issue> = issues.iter().filter(|i| i.kind == *kind).collect();
@@ -4713,12 +4714,13 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
         let (label, fix_hint) = match *kind {
             "malformed_entry" => ("Malformed entries",       "Manual repair needed"),
             "bad_citekey"     => ("Bad citekey chars",        "--fix sanitizes to ASCII"),
-            "duplicate_key"   => ("Duplicate citekeys",      "Use `bibox edit` to rename"),
+            "duplicate_key"   => ("Duplicate citekeys",      "Use `bibox edit <key> --key <new>` to rename"),
             "missing_pdf"     => ("Missing PDFs",            "--fix clears file_path"),
             "orphaned_pdf"    => ("Orphaned PDFs",           "--fix deletes files"),
             "missing_title"   => ("No title",                "Use `bibox edit --title`"),
             "dirty_title"     => ("BibTeX braces in text",   "--fix strips braces"),
             "latex_escape"    => ("LaTeX escapes in text",   "--fix decodes to Unicode"),
+            "html_entities"   => ("HTML entities in text",   "--fix decodes them and renames the PDF"),
             "orphaned_note"   => ("Orphaned notes",          "Delete manually or re-add entry"),
             "theme_problem"   => ("Theme",                   "Fix themes/<name>.json or pick another in Settings"),
             "merge_driver"    => ("Merge driver",            "--fix registers it for this repository"),
@@ -4739,9 +4741,10 @@ pub fn cmd_doctor(fix: bool, json: bool, config: &Config) -> Result<()> {
                     .and_then(|s| s.split(" —").next())
                     .unwrap_or(&issue.detail)
                     .to_string()
-            } else if *kind == "latex_escape" {
+            } else if *kind == "latex_escape" || *kind == "html_entities" {
                 issue.detail.split("in: ")
                     .nth(1)
+                    .and_then(|s| s.split(" - ").next())
                     .unwrap_or(&issue.detail)
                     .to_string()
             } else if *kind == "orphaned_note" {

@@ -167,6 +167,16 @@ fn doctor_reports_html_entities_as_fixable() {
 }
 
 #[test]
+fn doctor_lists_html_entities_in_its_human_output() {
+    // The footer counted them while no section showed them ("22 fixable" over 20 lines).
+    let h = Home::new("doctor-human");
+    bozgeyikli(&h);
+    let out = String::from_utf8_lossy(&h.bibox(&["doctor"]).stdout).to_string();
+    assert!(out.contains("entries with HTML entities (1)"), "{}", out);
+    assert!(out.contains("bozgeyikli2016point  title, booktitle"), "{}", out);
+}
+
+#[test]
 fn doctor_fix_decodes_html_entities_and_renames_the_pdf() {
     let h = Home::new("doctor-fix");
     bozgeyikli(&h);
