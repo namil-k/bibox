@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 
 use crate::models::{Entry, EntryType};
-use crate::storage::{generate_bibtex_key, generate_unique_key};
+use crate::storage::{generate_bibtex_key_fmt, generate_unique_key};
 use crate::models::Database;
 
 #[derive(Debug, Deserialize)]
@@ -55,7 +55,7 @@ fn parse_year(publish_date: &str) -> Option<u32> {
         .and_then(|m| m.as_str().parse().ok())
 }
 
-pub async fn fetch_by_isbn(isbn: &str, db: &Database) -> Result<Entry> {
+pub async fn fetch_by_isbn(isbn: &str, db: &Database, citekey_format: &str) -> Result<Entry> {
     let client = reqwest::Client::builder()
         .user_agent("bibox/0.1 (https://github.com/user/bibox)")
         .build()?;
@@ -102,10 +102,11 @@ pub async fn fetch_by_isbn(isbn: &str, db: &Database) -> Result<Entry> {
 
     let publisher = book.publishers.as_ref().and_then(|v| v.first().cloned());
 
-    let base_key = generate_bibtex_key(
+    let base_key = generate_bibtex_key_fmt(
         &authors,
         year,
         title.as_deref().unwrap_or("unknown"),
+        citekey_format,
     );
     let bibtex_key = generate_unique_key(db, &base_key);
 

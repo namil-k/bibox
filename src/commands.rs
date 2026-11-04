@@ -14,7 +14,7 @@ use crate::interactive::{interactive_select, SelectItem};
 use crate::models::{Database, Entry, EntryType};
 use crate::pdf;
 use crate::storage::{
-    filter_entries, find_by_key, find_by_key_mut, generate_bibtex_key, generate_unique_key,
+    filter_entries, find_by_key, find_by_key_mut, generate_bibtex_key_fmt, generate_unique_key,
     load_db, save_db, search_entries,
 };
 use crate::arxiv;
@@ -278,7 +278,7 @@ pub async fn cmd_add(
                 let year = year_arg.or(meta.year);
                 let journal = journal_arg.or(meta.journal);
 
-                let base_key = generate_bibtex_key(&authors, year, &title);
+                let base_key = generate_bibtex_key_fmt(&authors, year, &title, &config.citekey_format);
                 let bibtex_key = key_arg.unwrap_or_else(|| generate_unique_key(&db, &base_key));
                 let collection = to.or_else(|| config.default_collection.clone());
 
@@ -356,7 +356,7 @@ pub async fn cmd_add(
             let authors: Vec<String> = author_arg.as_deref()
                 .map(|a| a.split(';').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
                 .unwrap_or_default();
-            let base_key = generate_bibtex_key(&authors, year_arg, title);
+            let base_key = generate_bibtex_key_fmt(&authors, year_arg, title, &config.citekey_format);
             let bibtex_key = key_arg.unwrap_or_else(|| generate_unique_key(&db, &base_key));
             let collections = to
                 .or_else(|| config.default_collection.clone())
@@ -407,7 +407,7 @@ pub async fn cmd_add(
     if file.is_none() && doi_arg.is_none() {
         if let Some(ref isbn) = isbn_arg {
             println!("Fetching metadata from Open Library for ISBN {}...", isbn);
-            let mut entry = openlibrary::fetch_by_isbn(isbn, &db).await?;
+            let mut entry = openlibrary::fetch_by_isbn(isbn, &db, &config.citekey_format).await?;
             // Apply collection
             entry.collections = to
                 .or_else(|| config.default_collection.clone())
@@ -594,7 +594,7 @@ pub async fn cmd_add(
     let doi = doi_found.or_else(|| meta.as_ref().map(|m| m.doi.clone()));
 
     let base_key = key_arg.unwrap_or_else(|| {
-        generate_bibtex_key(&authors, year, title.as_deref().unwrap_or("unknown"))
+        generate_bibtex_key_fmt(&authors, year, title.as_deref().unwrap_or("unknown"), &config.citekey_format)
     });
     let bibtex_key = generate_unique_key(&db, &base_key);
 
@@ -3160,7 +3160,7 @@ fn import_record(db: &mut Database, input: usize, mut rec: ImportRecord, ctx: &m
             ImportOutcome { input, key: Some(key.clone()), status: ImportStatus::Skipped, reason: Some(format!("{}; nothing new{}", why, file_note)), human: msgs.already_exists(&key) }
         };
     }
-    let base_key = rec.key.take().unwrap_or_else(|| generate_bibtex_key(&rec.authors, rec.year, rec.title.as_deref().unwrap_or("unknown")));
+    let base_key = rec.key.take().unwrap_or_else(|| generate_bibtex_key_fmt(&rec.authors, rec.year, rec.title.as_deref().unwrap_or("unknown"), &ctx.config.citekey_format));
     let bibtex_key = generate_unique_key(db, &base_key);
     let mut collections = std::mem::take(&mut rec.collections);
     if let Some(to) = &ctx.to {

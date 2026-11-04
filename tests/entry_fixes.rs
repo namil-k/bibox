@@ -208,3 +208,30 @@ fn doctor_fix_of_a_bad_citekey_keeps_the_pdf_name_rule() {
     assert_eq!(h.pdfs(), vec!["Kim_2025_Deep Things.pdf"]);
     assert!(h.lib().join("notes").join("kim2025deep.md").exists());
 }
+
+// ── citekey_format ──────────────────────────────────────────────────────────
+
+fn set_citekey_format(h: &Home, fmt: &str) {
+    let out = h.bibox(&["config", "--json"]);
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let path = PathBuf::from(v["config_path"].as_str().unwrap());
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let line = format!("citekey_format = \"{}\"", fmt);
+    let text = if text.contains("citekey_format") {
+        text.lines().map(|l| if l.trim_start().starts_with("citekey_format") { line.clone() } else { l.to_string() }).collect::<Vec<_>>().join("\n")
+    } else {
+        format!("{}\n{}\n", line, text)
+    };
+    std::fs::write(&path, text).unwrap();
+}
+
+#[test]
+fn add_and_import_use_the_configured_citekey_format() {
+    let h = Home::new("keyfmt");
+    set_citekey_format(&h, "{author}_{year}");
+    let out = h.bibox(&["add", "--title", "Rust Systems", "--author", "Kim, Namil", "--year", "2025", "--json"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(h.entry("kim_2025").is_some(), "add: {}", String::from_utf8_lossy(&out.stdout));
+    h.import(serde_json::json!([{"entry_type": "article", "title": "Other Things", "author": ["Lee, Ann"], "year": 2024}]));
+    assert!(h.entry("lee_2024").is_some(), "import");
+}

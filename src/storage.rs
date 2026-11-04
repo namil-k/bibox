@@ -100,10 +100,6 @@ pub fn generate_unique_key_excluding(existing: &[&str], base_key: &str, exclude:
     format!("{}_dup", base_key)
 }
 
-pub fn generate_bibtex_key(authors: &[String], year: Option<u32>, title: &str) -> String {
-    generate_bibtex_key_fmt(authors, year, title, "{author}{year}{title}")
-}
-
 pub fn generate_bibtex_key_fmt(authors: &[String], year: Option<u32>, title: &str, fmt: &str) -> String {
     let last_name = authors
         .first()
