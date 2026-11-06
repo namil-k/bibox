@@ -32,6 +32,7 @@ mod storage;
 mod tui;
 mod unpaywall;
 mod url_resolver;
+mod viewer;
 
 use config::load_config;
 
@@ -410,7 +411,7 @@ Examples:
     },
 
     /// Open the PDF file for an entry in the system viewer
-    #[command(after_long_help = "Examples:\n  bibox open kim2025rust")]
+    #[command(after_long_help = "Examples:\n  bibox open kim2025rust\n\nThe PDF opens in the system's default app. To use another one, set pdf_viewer in\nconfig.toml or in the TUI settings (`,` > General > PDF viewer):\n  pdf_viewer = \"Skim\"                   # macOS app name\n  pdf_viewer = \"Adobe Acrobat Reader\"\n  pdf_viewer = \"zathura\"                # a command on PATH; the file is added last")]
     Open {
         /// Citation key or entry ID
         key: String,

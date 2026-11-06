@@ -45,6 +45,7 @@ pub enum Kind {
 pub enum Core {
     Home,
     PdfStorage,
+    PdfViewer,
     CitekeyFormat,
     Language,
     LineNumbers,
@@ -58,9 +59,10 @@ pub enum Core {
 }
 
 impl Core {
-    pub const ALL: [Core; 12] = [
+    pub const ALL: [Core; 13] = [
         Core::Home,
         Core::PdfStorage,
+        Core::PdfViewer,
         Core::CitekeyFormat,
         Core::Language,
         Core::LineNumbers,
@@ -75,7 +77,7 @@ impl Core {
 
     fn section(self) -> Section {
         match self {
-            Core::Home | Core::PdfStorage | Core::CitekeyFormat | Core::Language => Section::General,
+            Core::Home | Core::PdfStorage | Core::PdfViewer | Core::CitekeyFormat | Core::Language => Section::General,
             Core::LineNumbers | Core::PanelRatio | Core::ScrollDirection | Core::StatusBar | Core::Theme | Core::Images => Section::Appearance,
             Core::BibExportDir | Core::ExportDir => Section::Export,
         }
@@ -85,6 +87,7 @@ impl Core {
         match self {
             Core::Home => "general.home",
             Core::PdfStorage => "general.pdf_storage",
+            Core::PdfViewer => "general.pdf_viewer",
             Core::CitekeyFormat => "general.citekey_format",
             Core::Language => "general.language",
             Core::LineNumbers => "appearance.line_numbers",
@@ -102,6 +105,7 @@ impl Core {
         match self {
             Core::Home => "Home",
             Core::PdfStorage => "PDF storage",
+            Core::PdfViewer => "PDF viewer",
             Core::CitekeyFormat => "Citekey format",
             Core::Language => "Language",
             Core::LineNumbers => "Line numbers",
@@ -119,6 +123,7 @@ impl Core {
         match self {
             Core::Home => "Portable home: db.json, pdfs/, notes/ (set by bibox init)",
             Core::PdfStorage => "Where attached PDFs are stored (iCloud, Google Drive, ...)",
+            Core::PdfViewer => "App that opens PDFs. Empty: the system default. A macOS app name (Skim, Adobe Acrobat Reader) or a command (zathura)",
             Core::CitekeyFormat => "Template for new citation keys",
             Core::Language => "UI language",
             Core::LineNumbers => "Entry list line numbers",
@@ -136,6 +141,7 @@ impl Core {
         match self {
             Core::Home => Kind::Path { presets: vec![], optional: true },
             Core::PdfStorage => Kind::Path { presets: pdf_dir_presets(), optional: true },
+            Core::PdfViewer => Kind::Str,
             Core::CitekeyFormat => Kind::Choice(CITEKEY_PRESETS.iter().map(|s| s.to_string()).collect()),
             Core::Language => Kind::Choice(vec!["en".into(), "ko".into()]),
             Core::LineNumbers => Kind::Choice(vec!["absolute".into(), "relative".into(), "none".into()]),
@@ -280,6 +286,7 @@ fn core_value(core: Core, config: &Config) -> String {
             Some(p) => p.display().to_string(),
             None => "(default: home/pdfs/)".to_string(),
         },
+        Core::PdfViewer => config.pdf_viewer.clone().unwrap_or_else(|| "(system default)".to_string()),
         Core::CitekeyFormat => config.citekey_format.clone(),
         Core::Language => config.language.clone(),
         Core::LineNumbers => match config.line_numbers {
@@ -333,7 +340,7 @@ fn apply_core(core: Core, config: &mut Config, chosen: &str) {
             config.language = chosen.to_string();
             config.msgs = crate::i18n::Msgs::new(chosen);
         }
-        Core::Home | Core::PdfStorage | Core::BibExportDir | Core::ExportDir => {}
+        Core::Home | Core::PdfStorage | Core::PdfViewer | Core::BibExportDir | Core::ExportDir => {}
     }
 }
 
@@ -467,6 +474,10 @@ pub fn set(item: &Item, config: &mut Config, text: &str) -> Result<(), String> {
                 return Err("path is empty".to_string());
             }
             set_path(item, config, PathBuf::from(text));
+            Ok(())
+        }
+        (Target::Core(Core::PdfViewer), Kind::Str) => {
+            config.pdf_viewer = if text.is_empty() { None } else { Some(text.to_string()) };
             Ok(())
         }
         (Target::Core(_), Kind::Int) | (Target::Core(_), Kind::Str) => Err("not editable".to_string()),
@@ -677,11 +688,11 @@ mod tests {
     }
 
     #[test]
-    fn core_items_are_twelve_in_section_order_with_stable_ids() {
+    fn core_items_are_thirteen_in_section_order_with_stable_ids() {
         assert_eq!(
             core_items().iter().map(|i| i.id.clone()).collect::<Vec<_>>(),
             vec![
-                "general.home", "general.pdf_storage", "general.citekey_format", "general.language",
+                "general.home", "general.pdf_storage", "general.pdf_viewer", "general.citekey_format", "general.language",
                 "appearance.line_numbers", "appearance.panel_ratio", "appearance.scroll_direction", "appearance.status_bar",
                 "appearance.theme", "appearance.images",
                 "export.bib_export_dir", "export.export_dir",
@@ -811,17 +822,30 @@ mod tests {
     }
 
     #[test]
+    fn pdf_viewer_is_free_text_and_an_empty_value_means_the_system_default() {
+        let items = core_items();
+        let it = find(&items, "general.pdf_viewer");
+        let mut c = Config::default();
+        assert_eq!(value(it, &c), "(system default)");
+        assert!(!step(it, &mut c, 1), "h/l do nothing on free text");
+        set(it, &mut c, " Adobe Acrobat Reader ").unwrap();
+        assert_eq!(c.pdf_viewer.as_deref(), Some("Adobe Acrobat Reader"));
+        set(it, &mut c, "").unwrap();
+        assert_eq!(c.pdf_viewer, None);
+    }
+
+    #[test]
     fn plugin_items_follow_the_core_items_and_carry_the_plugin_name() {
         let items = items(&[manifest_with_settings()]);
-        assert_eq!(items.len(), 16);
-        let p = &items[12];
+        assert_eq!(items.len(), 17);
+        let p = &items[13];
         assert_eq!(p.id, "plugins.demo.push");
         assert_eq!(p.section, Section::Plugins);
         assert_eq!(p.plugin.as_deref(), Some("demo"));
         assert_eq!(p.label, "push");
         assert_eq!(p.desc, "push after commit");
         assert_eq!(p.kind, Kind::Bool { on: "on", off: "off" });
-        assert_eq!(items[15].kind, Kind::Str);
+        assert_eq!(items[16].kind, Kind::Str);
     }
 
     #[test]
@@ -903,7 +927,7 @@ mod tests {
         assert_eq!(ids_of(&search(&items, &plugin_list(), &key_list(), "open_web"), &items), vec!["# Keymap > Entry actions", "key1"]);
         assert_eq!(ids_of(&search(&items, &plugin_list(), &key_list(), "library-proxy"), &items), vec!["# Keymap > Plugins", "key2"]);
         let rows = ids_of(&search(&items, &plugin_list(), &key_list(), "open"), &items);
-        assert_eq!(rows, vec!["# Keymap > Entry actions", "key1", "# Keymap > Plugins", "key2"]);
+        assert_eq!(rows, vec!["# General", "general.pdf_viewer", "# Keymap > Entry actions", "key1", "# Keymap > Plugins", "key2"]);
         let rows = ids_of(&search(&items, &plugin_list(), &key_list(), "keymap focus"), &items);
         assert_eq!(rows, vec!["# Keymap > Navigation", "key0"]);
     }
@@ -944,7 +968,7 @@ mod tests {
         assert_eq!(ids[0], "# General");
         assert!(ids.contains(&"# Appearance".to_string()) && ids.contains(&"# Export".to_string()));
         assert!(ids.contains(&"@other".to_string()));
-        assert_eq!(ids.iter().filter(|s| !s.starts_with('#')).count(), 16 + 2);
+        assert_eq!(ids.iter().filter(|s| !s.starts_with('#')).count(), 17 + 2);
     }
 
     #[test]

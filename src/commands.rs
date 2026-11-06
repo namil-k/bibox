@@ -1801,26 +1801,7 @@ pub fn cmd_open(id_or_key: String, config: &Config) -> Result<()> {
         anyhow::bail!("PDF file not found: {}", full_path.display());
     }
 
-    let path_str = full_path.to_string_lossy().to_string();
-
-    if let Some(viewer) = &config.pdf_viewer {
-        std::process::Command::new(viewer)
-            .arg(&path_str)
-            .spawn()
-            .with_context(|| format!("Failed to launch viewer '{}'", viewer))?;
-    } else {
-        #[cfg(target_os = "macos")]
-        std::process::Command::new("open")
-            .arg(&path_str)
-            .spawn()
-            .context("Failed to run 'open'")?;
-
-        #[cfg(not(target_os = "macos"))]
-        std::process::Command::new("xdg-open")
-            .arg(&path_str)
-            .spawn()
-            .context("Failed to run 'xdg-open'")?;
-    }
+    crate::viewer::open_pdf(config.pdf_viewer.as_deref(), &full_path)?;
 
     println!("Opening: {}", full_path.display());
     Ok(())
@@ -2653,22 +2634,10 @@ pub fn cmd_review(
                 if let Some(fp) = fp_opt {
                     let full_path = config.bibox_dir.join(&fp);
                     if full_path.exists() {
-                        let path_str = full_path.to_string_lossy().to_string();
-                        if let Some(viewer) = &config.pdf_viewer {
-                            let _ = std::process::Command::new(viewer)
-                                .arg(&path_str)
-                                .spawn();
-                        } else {
-                            #[cfg(target_os = "macos")]
-                            let _ = std::process::Command::new("open")
-                                .arg(&path_str)
-                                .spawn();
-                            #[cfg(not(target_os = "macos"))]
-                            let _ = std::process::Command::new("xdg-open")
-                                .arg(&path_str)
-                                .spawn();
+                        match crate::viewer::open_pdf(config.pdf_viewer.as_deref(), &full_path) {
+                            Ok(()) => println!("Opening PDF..."),
+                            Err(e) => println!("Could not open the PDF: {:#}", e),
                         }
-                        println!("Opening PDF...");
                     } else {
                         println!("PDF file not found: {}", full_path.display());
                     }

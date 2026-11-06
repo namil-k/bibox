@@ -816,20 +816,9 @@ impl App {
         self.note_citekey = citekey;
     }
 
-    fn open_pdf(&self, entry: &Entry) {
-        if let Some(fp) = &entry.file_path {
-            let full_path = self.config.bibox_dir.join(fp);
-            if !full_path.exists() { return; }
-            let path_str = full_path.to_string_lossy().to_string();
-            if let Some(viewer) = &self.config.pdf_viewer {
-                let _ = std::process::Command::new(viewer).arg(&path_str).spawn();
-            } else {
-                #[cfg(target_os = "macos")]
-                let _ = std::process::Command::new("open").arg(&path_str).spawn();
-                #[cfg(not(target_os = "macos"))]
-                let _ = std::process::Command::new("xdg-open").arg(&path_str).spawn();
-            }
-        }
+    fn open_pdf(&self, entry: &Entry) -> anyhow::Result<()> {
+        let Some(fp) = &entry.file_path else { return Ok(()) };
+        crate::viewer::open_pdf(self.config.pdf_viewer.as_deref(), &self.config.bibox_dir.join(fp))
     }
 
 
@@ -3856,7 +3845,9 @@ fn execute(app: &mut App, action: Action, ctx: ExecCtx) -> Result<Flow> {
                 if entry.file_path.is_some() {
                     let full_path = app.config.bibox_dir.join(entry.file_path.as_ref().unwrap());
                     if full_path.exists() {
-                        app.open_pdf(&entry);
+                        if let Err(e) = app.open_pdf(&entry) {
+                            app.mode = Mode::Message(format!("Could not open the PDF: {:#}", e));
+                        }
                     } else if entry.doi.is_some() || entry.url.is_some() {
                         let bkey = entry.bibtex_key.clone();
                         app.mode = Mode::Confirm(ConfirmAction::FetchPdf(bkey));
@@ -4527,9 +4518,11 @@ fn handle_settings(app: &mut App, key: crossterm::event::KeyEvent) -> Result<boo
                         }
                     }
                     Kind::Int | Kind::Str => {
+                        // "(system default)" 같은 빈 값 표시는 입력칸에 넣지 않는다
+                        let current = crate::settings::value(it, &app.config);
                         app.mode = Mode::SettingsInput(SettingsInput {
                             title: it.label.clone(),
-                            buf: crate::settings::value(it, &app.config),
+                            buf: if current.starts_with('(') { String::new() } else { current },
                             target: InputTarget::Item(it.id.clone()),
                         });
                     }

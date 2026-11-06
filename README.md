@@ -576,7 +576,10 @@ bib_export_dir = "~/Downloads"         # BibTeX export location
 export_dir = "~/Downloads"             # Other exports location
 home = "~/bibox"                       # Portable home (set by bibox init)
 pdf_dir = "~/iCloud/bibox-pdfs"        # Separate PDF storage (iCloud, Google Drive, etc.)
+pdf_viewer = "Skim"                    # App for `o` and `bibox open`; leave out for the system default
 ```
+
+`pdf_viewer` picks the app that `o` in the TUI and `bibox open` use. Without it, PDFs open in the system's default app (whatever opens a PDF when you double-click it in Finder, or `xdg-open` on Linux). On macOS it can be an app name such as `"Skim"`, `"Adobe Acrobat Reader"` or `"/Applications/PDF Expert.app"`. It can also be a command on `PATH` with arguments, such as `"zathura"` or `"open -a Skim"`; the file path is added at the end. When the viewer cannot be found, the TUI says so instead of doing nothing.
 
 `images` decides how plugin tabs such as the PDF tab draw pictures. `auto` asks the terminal once at start (never inside tmux or screen, where the tab shows text). If a terminal does not answer and keys go missing afterwards, set `images = "off"` or name the protocol. Changing it takes effect on the next start.
 
