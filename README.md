@@ -143,7 +143,7 @@ bibox
 | `n`/`p`, `+`/`-`, `0`, `H`/`L` | PDF tab: next/previous page, zoom in/out, fit width, pan (see below) |
 | `Space` | Toggle select entry |
 | `V` | Select/deselect all |
-| `/` | Search (entries or collections, based on focus) |
+| `/` | Search (entries or collections, based on focus) in a box in the middle of the screen that shows the match count. `Enter` keeps the filter, `Esc` clears it |
 | `s` | Sort menu |
 | `f` | Fetch/refresh metadata from Crossref (preview changes, select which to apply) |
 | `o` | Open PDF (or fetch from web; re-fetches if file missing; opens browser on 403) |

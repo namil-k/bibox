@@ -399,6 +399,31 @@ impl Msgs {
         }
     }
 
+    pub fn search_title(&self, collections: bool) -> &'static str {
+        match (&self.lang, collections) {
+            (Lang::En, false) => "Search entries",
+            (Lang::En, true) => "Search collections",
+            (Lang::Ko, false) => "항목 검색",
+            (Lang::Ko, true) => "컬렉션 검색",
+        }
+    }
+
+    pub fn search_count(&self, n: usize, collections: bool) -> String {
+        match (&self.lang, collections) {
+            (Lang::En, false) => format!("{} {}", n, if n == 1 { "entry" } else { "entries" }),
+            (Lang::En, true) => format!("{} {}", n, if n == 1 { "collection" } else { "collections" }),
+            (Lang::Ko, false) => format!("항목 {}개", n),
+            (Lang::Ko, true) => format!("컬렉션 {}개", n),
+        }
+    }
+
+    pub fn search_hint(&self) -> &'static str {
+        match self.lang {
+            Lang::En => "Enter keep filter · Esc clear",
+            Lang::Ko => "Enter 필터 유지 · Esc 지우기",
+        }
+    }
+
     pub fn key_renamed(&self, old: &str, new: &str) -> String {
         match self.lang {
             Lang::En => format!("  Citekey: {} -> {}", old, new),

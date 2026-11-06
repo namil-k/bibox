@@ -1899,6 +1899,31 @@ fn draw_input_popup(f: &mut Frame, title: &str, buf: &str, label: &str, area: Re
     f.render_widget(text, popup_area);
 }
 
+/// `/` 검색 입력. 상태줄(흐리고, 끌 수 있다) 대신 화면 가운데에 띄워 검색 중인지 바로 보이게 한다.
+/// 첫 줄은 입력과 오른쪽 끝의 결과 수, 둘째 줄은 Enter/Esc 안내.
+fn draw_search_popup(f: &mut Frame, title: &str, query: &str, count: &str, hint: &str, area: Rect) {
+    let popup_area = centered_rect(60, 4.min(area.height), area);
+    let inner = popup_area.width.saturating_sub(4) as usize; // 테두리 2 + 좌우 여백 2
+    let input = format!("/ {}▏", query);
+    let gap = inner.saturating_sub(unicode_width::UnicodeWidthStr::width(input.as_str()) + unicode_width::UnicodeWidthStr::width(count)).max(1);
+    let t = theme();
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(input, Style::default().fg(t.fg).add_modifier(Modifier::BOLD)),
+            Span::raw(" ".repeat(gap)),
+            Span::styled(count.to_string(), Style::default().fg(t.muted)),
+        ]),
+        Line::from(Span::styled(hint.to_string(), Style::default().fg(t.muted))),
+    ];
+    clear_area(f, popup_area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(t.accent))
+        .padding(ratatui::widgets::Padding::horizontal(1))
+        .title(Span::styled(format!(" {} ", title), Style::default().fg(t.accent).add_modifier(Modifier::BOLD)));
+    f.render_widget(Paragraph::new(lines).block(block), popup_area);
+}
+
 fn handle_plugin_ui(app: &mut App, key: crossterm::event::KeyEvent) -> Result<bool> {
     let answer = match &mut app.mode {
         Mode::PluginUi(state) => plugin_ui_step(&mut state.kind, key.code),
@@ -2016,6 +2041,18 @@ fn draw(f: &mut Frame, app: &mut App) {
             if let Some(ref state) = app.fetch_preview {
                 draw_fetch_preview(f, state, size);
             }
+        }
+        Mode::Search => {
+            let m = &app.config.msgs;
+            let collections = app.focus == Panel::Collections;
+            let (query, n) = if collections {
+                let q = app.col_search_query.to_lowercase();
+                let n = std::iter::once("all").chain(app.collections.iter().map(|c| c.as_str())).filter(|c| c.to_lowercase().contains(&q)).count();
+                (app.col_search_query.as_str(), n)
+            } else {
+                (app.search_query.as_str(), app.filtered.len())
+            };
+            draw_search_popup(f, m.search_title(collections), query, &m.search_count(n, collections), m.search_hint(), size);
         }
         Mode::SearchResultPicker => {
             if let Some(ref state) = app.search_picker {
@@ -2739,13 +2776,7 @@ fn status_bar_text(keymap: &Keymap, focus: Panel) -> String {
 
 fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
     let status = match &app.mode {
-        Mode::Search => {
-            if app.focus == Panel::Collections {
-                format!("/ {} (collection search, Esc to clear)", app.col_search_query)
-            } else {
-                format!("/ {} (Esc to clear)", app.search_query)
-            }
-        }
+        Mode::Search => app.config.msgs.search_hint().to_string(),
         _ => status_bar_text(&app.keymap, app.focus),
     };
     // 오른쪽에 플러그인 조각. 조각이 없으면 지금과 같은 화면
@@ -6250,6 +6281,19 @@ mod tests {
         let screen = render_popup(|f| draw_settings_input(f, &input, f.area()));
         assert!(screen.contains("LASTWORD"), "{screen}");
         assert!(screen.contains("> x"), "{screen}");
+    }
+
+    /// `/` 검색은 화면 가운데 팝업에 입력과 결과 수를 보인다. 상태줄을 꺼도 보여야 한다.
+    #[test]
+    fn the_search_popup_shows_the_query_and_the_count() {
+        use super::draw_search_popup;
+        let screen = render_popup(|f| draw_search_popup(f, "Search entries", "point tele", "3 entries", "Enter keep filter · Esc clear", f.area()));
+        let line = screen.lines().find(|l| l.contains("/ point tele")).unwrap_or_else(|| panic!("{screen}"));
+        assert!(line.trim_end().ends_with("3 entries │"), "count sits at the right edge: {line}");
+        assert!(screen.contains("Search entries"), "{screen}");
+        assert!(screen.contains("Esc clear"), "{screen}");
+        let row = screen.lines().position(|l| l.contains("/ point tele")).unwrap();
+        assert!((9..=13).contains(&row), "vertically centered: row {row}\n{screen}");
     }
 
     /// 받은 PDF는 `.pdf`로 끝나고, 다른 항목의 PDF가 같은 이름으로 있으면 덮어쓰지 않고 `_<key>`를 붙인다.
