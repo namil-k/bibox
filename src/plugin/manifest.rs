@@ -924,7 +924,7 @@ run = "python3 cli.py"
     }
     // ── 내장 스텁 ──
 
-    fn noop() {}
+    fn noop(_args: &[String]) {}
 
     const TEST_BUILTINS: &[crate::plugin::builtin::Builtin] = &[crate::plugin::builtin::Builtin {
         name: "demo",
@@ -988,7 +988,7 @@ run = "python3 cli.py"
     /// 내장도 `[cli]`를 가질 수 있다. 임베디드의 `run`은 자리 표시이고, 실제 argv는 bibox 자신을 다시 띄우는 것이다.
     #[test]
     fn a_builtin_cli_runs_the_bibox_executable() {
-        fn noop() {}
+        fn noop(_args: &[String]) {}
         let fake = [crate::plugin::builtin::Builtin {
             name: "fake",
             manifest: "api = 2\nname = \"fake\"\n[cli]\nrun = \"builtin\"\n",

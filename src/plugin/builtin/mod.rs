@@ -11,7 +11,7 @@ pub struct Builtin {
     /// `run`/`builtin` 없는 매니페스트 TOML. 파싱 뒤 `run`과 `version`은 bibox가 채운다.
     pub manifest: &'static str,
     /// `serve()`를 부르는 진입점. 돌아오면 프로세스가 끝난다.
-    pub run: fn(),
+    pub run: fn(args: &[String]),
     /// 첫 실행 때 스텁을 만들어 켤 것인가. 외부 도구가 필요한 것(pdf-view의 poppler)은 옵트인.
     pub seeded: bool,
     /// 에이전트용 사용 설명(Markdown). `bibox agent-guide`의 Installed plugins 절에 실린다.
@@ -25,10 +25,10 @@ pub fn find(name: &str) -> Option<&'static Builtin> {
 }
 
 /// `bibox plugin run <name>`. 모르는 이름이면 종료 코드 2.
-pub fn run(name: &str) -> anyhow::Result<()> {
+pub fn run(name: &str, args: &[String]) -> anyhow::Result<()> {
     match find(name) {
         Some(b) => {
-            (b.run)();
+            (b.run)(args);
             Ok(())
         }
         None => {

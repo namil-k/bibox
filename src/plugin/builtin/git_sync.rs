@@ -56,7 +56,7 @@ pub const GUIDE: &str = "No CLI. When the bibox home (`bibox config --json` -> `
 
 pub const BUILTIN: Builtin = Builtin { name: "git-sync", manifest: MANIFEST, run, seeded: true, guide: GUIDE };
 
-fn run() {
+fn run(_args: &[String]) {
     let mut st = State::default();
     let mut handler = |method: &str, params: Value, ui: &mut Ui| -> Result<Value, RpcError> {
         if method == "initialize" {

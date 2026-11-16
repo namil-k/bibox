@@ -46,7 +46,7 @@ pub const NEEDS_POPPLER: &str = "pdf-view needs poppler (pdftoppm, pdfinfo, pdft
 const NOT_A_TAB: &str = "pdf-view renders the PDF tab; open the preview panel";
 const NO_TEXT: &str = "(no text on this page)";
 
-fn run() {
+fn run(_args: &[String]) {
     // 지난 세션의 PNG. 호스트 캐시는 항목 하나뿐이라 디스크 것도 오래 둘 이유가 없다
     let _ = std::fs::remove_dir_all(cache_dir());
     let mut st = State::default();

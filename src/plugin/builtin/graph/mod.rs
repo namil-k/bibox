@@ -130,13 +130,6 @@ fn join_or_resume<T>(h: std::thread::JoinHandle<T>) -> T {
     }
 }
 
-/// 새 OS 스레드에서 돌리고 기다린다. bibox는 tokio 런타임 안이라 `reqwest::blocking`을 거기서 만들면 패닉한다.
-/// 진행을 중계해야 하는 `open_graph`는 기다리는 쪽이 채널을 읽어야 해서 직접 스레드를 띄운다.
-#[cfg(test)]
-fn off_runtime<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
-    join_or_resume(std::thread::spawn(f))
-}
-
 fn progress_text(p: &citers::Progress) -> Option<String> {
     match p {
         citers::Progress::Library { done, total } => Some(format!("Fetching citations {}/{}", done, total)),
@@ -217,9 +210,9 @@ fn env_path(name: &str) -> Option<PathBuf> {
     std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from)
 }
 
-fn run() {
+fn run(args: &[String]) {
     if std::env::var_os("BIBOX_CLI").is_some() {
-        std::process::exit(cli_main(std::env::args().skip(3)));
+        std::process::exit(cli_main(args));
     }
     let mut st = State::default();
     let opener = |p: &Paths, s: &Settings, f: Option<&str>, pr: &mut dyn FnMut(&str)| open_graph(p, s, f, Flags::default(), pr);
@@ -249,9 +242,9 @@ fn parse_cli(args: impl IntoIterator<Item = String>) -> Result<CliArgs, clap::Er
     CliArgs::try_parse_from(args)
 }
 
-/// `bibox plugin run graph <args>`의 `std::env::args().skip(3)`은 `["graph", <args>...]`다.
-fn cli_main(args: impl IntoIterator<Item = String>) -> i32 {
-    let a = match parse_cli(args) {
+/// `args`는 바깥 clap이 `bibox plugin run graph <args>`에서 파싱한 `<args>`다.
+fn cli_main(args: &[String]) -> i32 {
+    let a = match parse_cli(std::iter::once("graph".to_string()).chain(args.iter().cloned())) {
         Ok(a) => a,
         Err(e) => {
             let _ = e.print();
@@ -313,14 +306,18 @@ mod tests {
     use crate::plugin::serve::serve_io;
     use std::io::Cursor;
 
+    /// bibox는 tokio 런타임 안이고 citers는 `reqwest::blocking`을 쓴다. `open_graph`가 스레드를 없애고
+    /// `citers::open`을 직접 부르면 여기서 패닉한다. DOI 없는 항목만 있어 네트워크 요청은 없다.
     #[tokio::test]
-    async fn off_runtime_allows_blocking_clients() {
-        let n = off_runtime(|| {
-            let c = reqwest::blocking::Client::new();
-            drop(c);
-            1
-        });
-        assert_eq!(n, 1);
+    async fn open_graph_runs_citers_off_the_runtime() {
+        let dir = std::env::temp_dir().join(format!("bibox-graph-rt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = Paths { db: dir.join("db.json"), notes: dir.join("notes"), templates: None, plugin_dir: Some(dir.join("plugin")) };
+        let flags = Flags { open_browser: false, ..Flags::default() };
+        let r = open_graph(&p, &Settings::default(), None, flags, &mut |_| {}).unwrap();
+        assert_eq!(r.html_path, dir.join("plugin/cache/graph.html"));
+        assert!(r.html_path.exists());
     }
 
     #[test]
