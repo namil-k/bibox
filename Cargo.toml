@@ -49,6 +49,7 @@ urlencoding = "2"
 zip = { version = "8", default-features = false, features = ["deflate", "time"] }
 pulldown-cmark = { version = "0.13.3", optional = true }
 anydoc = "0.2"
+citers = "0.1"
 
 [dev-dependencies]
 flate2 = "1"

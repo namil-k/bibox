@@ -18,7 +18,7 @@ pub struct Builtin {
     pub guide: &'static str,
 }
 
-pub const BUILTINS: &[Builtin] = &[git_sync::BUILTIN, pdf_view::BUILTIN];
+pub const BUILTINS: &[Builtin] = &[git_sync::BUILTIN, graph::BUILTIN, pdf_view::BUILTIN];
 
 pub fn find(name: &str) -> Option<&'static Builtin> {
     BUILTINS.iter().find(|b| b.name == name)

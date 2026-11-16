@@ -16,7 +16,6 @@ static SUMMARY: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)^#{2,}\s*(\d
 
 /// 템플릿 폴더의 `*.md`에서 비어 있지 않고 `#`로 시작하지 않는 줄(trim)을 모은다.
 /// 노트에 그대로 남은 템플릿 문구를 걸러내는 데 쓴다. 폴더가 없으면 빈 집합.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn template_lines(templates_dir: &Path) -> HashSet<String> {
     let mut out = HashSet::new();
     let Ok(rd) = std::fs::read_dir(templates_dir) else { return out };
@@ -76,7 +75,6 @@ fn section(lines: &[&str], head: &Regex) -> Option<String> {
 }
 
 /// (라벨, 문장). 한 줄 정의 절 -> Summary/요약 절 -> 노트 전체의 첫 산문 문단 순.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn note_summary(note: &str, boiler: &HashSet<String>) -> Option<(&'static str, String)> {
     let lines: Vec<&str> = note.lines().filter(|l| !boiler.contains(l.trim())).collect();
     if let Some(s) = section(&lines, &ONE_LINE) {
