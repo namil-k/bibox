@@ -509,6 +509,8 @@ pub struct App {
     tab_pending_since: Option<std::time::Instant>,
     /// 미리보기 항목이 바뀐 시각. `SETTLE_MS`가 지나야 요청한다(목록을 훑는 동안 지나가는 항목은 렌더하지 않음).
     tab_entry_since: std::time::Instant,
+    /// 방금 그린 화면이 시각에 따라 바뀐다(스피너, 커서가 멈추길 기다리는 탭). draw가 켜고, 켜져 있으면 루프가 다음 프레임도 그린다.
+    wants_frame: bool,
     /// 캐시에서 빠진 kitty 그림 id. 다음 프레임 뒤에 터미널에서 지운다.
     kitty_deletes: Vec<u32>,
     events: crate::events::Events,
@@ -624,6 +626,7 @@ impl App {
             tab_sliced: None,
             tab_pending_since: None,
             tab_entry_since: std::time::Instant::now(),
+            wants_frame: false,
             kitty_deletes: Vec::new(),
             ui_queue: VecDeque::new(),
             pending_messages: VecDeque::new(),
@@ -1491,6 +1494,20 @@ impl App {
     }
 
     /// 지금 화면에 보이는 항목의 키. 목록 오프셋부터 (높이/3)개.
+    /// 화면이 시각에 따라 바뀌는 중인가(스피너, 멈춤을 기다리는 커서). 그동안은 프레임마다 그리고, 아니면 무언가 일어날 때만 그린다.
+    fn animating(&self) -> bool {
+        self.wants_frame || matches!(self.mode, Mode::Loading(_)) || self.sel_since.is_some()
+    }
+
+    /// 백그라운드에서 답을 기다리는 수신기 수. 한 바퀴 사이에 바뀌면 답이 왔거나 일이 시작된 것이라 다시 그린다.
+    fn in_flight(&self) -> usize {
+        [self.plugin_run.is_some(), self.bg_result.is_some(), self.bg_meta_result.is_some(), self.bg_install.is_some(), self.bg_tab.is_some(), self.bg_search_result.is_some()]
+            .iter()
+            .filter(|b| **b)
+            .count()
+            + self.fields_rx.len()
+    }
+
     fn visible_keys(&self) -> Vec<String> {
         let rows = (self.entries_area_height as usize / 3).max(1);
         let start = self.list_state.offset();
@@ -1947,6 +1964,7 @@ fn clear_area(f: &mut Frame, area: Rect) {
 }
 
 fn draw(f: &mut Frame, app: &mut App) {
+    app.wants_frame = false;
     let size = f.area();
     // 테마 배경. 뒤의 위젯은 bg를 지정하지 않으면 칸의 bg를 그대로 두므로 한 번이면 된다
     let t = theme();
@@ -2632,9 +2650,11 @@ fn draw_preview_plugin(f: &mut Frame, app: &mut App, area: Rect, tab_index: usiz
     // error를 복제해 두어야 아래 팔에서 app.tab을 고칠 수 있다(match 대상이 빌린 채로 남는다)
     let error = app.tab.error.clone();
     let pending = app.tab.pending.is_some();
+    // 스피너와 멈춤 확인은 그릴 때 시각으로 하므로, 그동안은 다음 프레임이 있어야 한다
+    app.wants_frame |= pending || waiting;
     let (cell_w, cell_h) = app.tab_cell();
     let dim = Style::default().fg(theme().muted);
-    // 만드는 중이면 스피너. 루프가 16ms마다 그리므로 시각만으로 돈다
+    // 만드는 중이면 스피너. wants_frame이 켜져 있는 동안 루프가 16ms마다 그리므로 시각만으로 돈다
     let rendering = {
         let ms = app.tab_pending_since.map(|t| t.elapsed().as_millis()).unwrap_or(0);
         format!("{} {}", crate::preview_tabs::spinner(ms), app.config.msgs.tab_rendering(app.tab.page))
@@ -5234,20 +5254,36 @@ fn flush_kitty_deletes(app: &mut App) -> Result<()> {
     Ok(())
 }
 
+/// 무언가 움직이는 동안의 프레임 간격.
+const FRAME: std::time::Duration = std::time::Duration::from_millis(16);
+/// 아무것도 안 움직일 때 입력을 기다리는 시간. 플러그인 알림·백그라운드 답은 입력으로 깨울 수 없어 이만큼 늦게 보일 수 있다.
+const IDLE_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// 입력을 얼마나 기다릴지. 움직이는 것이 없으면 길게 기다리고 그 사이에는 그리지 않는다.
+fn poll_timeout(app: &App) -> std::time::Duration {
+    if app.animating() { FRAME } else { IDLE_POLL }
+}
+
 fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     app: &mut App,
 ) -> Result<()> {
+    // 화면을 다시 만들 일이 있었는가. 예전에는 16ms마다 무조건 그려서, 가만히 둔 TUI가 CPU를 수 % 썼다(항목 수·창 크기에 비례).
+    let mut dirty = true;
     loop {
-        let t_frame = std::time::Instant::now();
-        terminal.draw(|f| draw(f, app))?;
-        let frame_ms = t_frame.elapsed().as_secs_f64() * 1000.0;
-        flush_kitty_deletes(app)?;
-        if frame_ms >= 20.0 {
-            crate::trace::log(|| format!("frame {:.0}ms plugin_tab={} pending={}", frame_ms, matches!(app.preview_mode, PreviewMode::Plugin(_)), app.tab.pending.is_some()));
+        if dirty || app.animating() {
+            dirty = false;
+            let t_frame = std::time::Instant::now();
+            terminal.draw(|f| draw(f, app))?;
+            let frame_ms = t_frame.elapsed().as_secs_f64() * 1000.0;
+            if frame_ms >= 20.0 {
+                crate::trace::log(|| format!("frame {:.0}ms plugin_tab={} pending={}", frame_ms, matches!(app.preview_mode, PreviewMode::Plugin(_)), app.tab.pending.is_some()));
+            }
         }
+        flush_kitty_deletes(app)?;
 
-        if event::poll(std::time::Duration::from_millis(16))? {
+        if event::poll(poll_timeout(app))? {
+            dirty = true;
             let ev = event::read()?;
 
             // Drain pending events to avoid input lag from buffered mouse scrolls.
@@ -5272,12 +5308,16 @@ fn run_loop(
             }
         }
 
+        // 아래에서 받는 답이 화면을 바꾼다. 수신기 수가 바뀌면(답이 왔거나 일이 시작됨) 다시 그린다
+        let in_flight = app.in_flight();
+
         // fields/get 답 거두기
         let mut done = Vec::new();
         for (i, rx) in app.fields_rx.iter().enumerate() {
             match rx.try_recv() {
                 Ok((plugin, r)) => {
                     app.fields.set_many(&plugin, &r.fields);
+                    dirty = true;
                     done.push(i);
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => done.push(i),
@@ -5305,6 +5345,7 @@ fn run_loop(
 
         // Handle pending editor
         if let Some(note_path) = app.pending_editor.take() {
+            dirty = true;
             let editor = std::env::var("EDITOR").unwrap_or_else(|_| {
                 if std::process::Command::new("which").arg("nano").output()
                     .map(|o| o.status.success()).unwrap_or(false)
@@ -5328,14 +5369,17 @@ fn run_loop(
 
         // 플러그인이 보낸 요청·알림·종료
         while let Some(ev) = app.host.try_recv_event() {
+            dirty = true;
             app.handle_host_event(ev);
         }
         if matches!(app.mode, Mode::Normal) {
             if let Some(m) = app.pending_messages.pop_front() {
+                dirty = true;
                 app.mode = Mode::Message(m);
             }
         }
         while let Some(a) = app.queued_actions.pop_front() {
+            dirty = true;
             if execute(app, a, ExecCtx { count: 1 })? == Flow::Quit {
                 return Ok(());
             }
@@ -5581,6 +5625,10 @@ fn run_loop(
                     app.mode = Mode::Message("Search failed: thread disconnected.".into());
                 }
             }
+        }
+
+        if app.in_flight() != in_flight {
+            dirty = true;
         }
     }
     Ok(())
@@ -6355,5 +6403,55 @@ mod tests {
         assert!(screen.contains("TAIL1"), "{screen}");
         assert!(screen.contains("▶ Paris (France)  ezproxy.example.fr"), "an item that fits keeps its double space: {screen}");
         assert!(screen.contains("Esc cancel"), "{screen}");
+    }
+
+    /// 빈 라이브러리와 `manifests`의 플러그인으로 App을 만든다. 없는 home이라 db는 비고, 플러그인 프로세스는 띄우지 않는다.
+    fn test_app(manifests: Vec<crate::plugin::manifest::Manifest>) -> super::App {
+        let home = std::env::temp_dir().join(format!("bibox-idle-{}-none", std::process::id()));
+        let config = crate::config::Config { home: Some(home), ..Default::default() };
+        let env = crate::plugin::host::PluginEnv::from_config(&config);
+        let host = std::sync::Arc::new(crate::plugin::host::PluginHost::new(manifests, Default::default(), env));
+        super::App::new(config, host).unwrap()
+    }
+
+    fn draw_app(app: &mut super::App) {
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
+        term.draw(|f| super::draw(f, app)).unwrap();
+    }
+
+    /// 아무것도 안 하는 TUI는 다시 그리지 않고 입력을 오래 기다린다. 16ms마다 화면 전체를 다시 만들던 것이 유휴 CPU 9%였다.
+    #[test]
+    fn an_idle_app_does_not_ask_for_frames() {
+        let mut app = test_app(vec![]);
+        draw_app(&mut app);
+        assert!(!app.animating(), "nothing moves on an idle screen");
+        assert_eq!(super::poll_timeout(&app), super::IDLE_POLL);
+    }
+
+    /// 스피너는 시각으로 돌므로 그동안은 프레임마다 다시 그린다.
+    #[test]
+    fn a_loading_popup_keeps_drawing_frames() {
+        let mut app = test_app(vec![]);
+        app.mode = super::Mode::Loading("Fetching".into());
+        draw_app(&mut app);
+        assert!(app.animating());
+        assert_eq!(super::poll_timeout(&app), super::FRAME);
+    }
+
+    /// 플러그인 탭은 커서가 SETTLE_MS 멈춘 것을 그리면서 확인하고 요청한다. 기다리는 동안 그리기를 멈추면 요청이 안 나간다.
+    #[test]
+    fn a_plugin_tab_waiting_for_the_cursor_to_settle_keeps_drawing_frames() {
+        let mut problems = vec![];
+        let text = "api = 2\nname = \"v\"\nversion = \"0.1.0\"\ndescription = \"V\"\nrun = \"sh x\"\n[[commands]]\nid = \"go\"\ndesc = \"Go\"\n[[views]]\ntitle = \"V\"\nrun = \"go\"\n";
+        let m = crate::plugin::manifest::parse_manifest(&std::path::PathBuf::from("/x/v"), text, &mut problems).unwrap_or_else(|| panic!("{:?}", problems));
+        let mut app = test_app(vec![m]);
+        assert_eq!(app.host.views().len(), 1);
+        app.entries.push(Entry { file_path: Some("k.pdf".into()), ..entry_in(&[]) });
+        app.filtered = vec![0];
+        app.list_state.select(Some(0));
+        app.preview_mode = super::PreviewMode::Plugin(0);
+        draw_app(&mut app);
+        assert!(app.wants_frame, "the tab is waiting on the clock");
+        assert!(app.animating());
     }
 }
