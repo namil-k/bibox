@@ -391,7 +391,12 @@ fn expand_stub(
         }
     };
     let run = vec![exe, "plugin".to_string(), "run".to_string(), builtin.to_string()];
-    let mut m = build(dir, embedded, Some(run), problems)?;
+    // 내장이 `[cli]`를 선언하면 `bibox <name> ...`도 같은 실행 파일의 `plugin run <name>`으로 간다. 임베디드 `run` 문자열은 자리 표시일 뿐이다
+    let has_cli = embedded.cli.is_some();
+    let mut m = build(dir, embedded, Some(run.clone()), problems)?;
+    if has_cli {
+        m.cli = Some(run);
+    }
     m.builtin = Some(builtin.to_string());
     m.version = Some(env!("CARGO_PKG_VERSION").to_string());
     m.guide = Some(b.guide.to_string());
@@ -978,6 +983,30 @@ run = "python3 cli.py"
         let text = "api = 2\nname = \"other\"\nbuiltin = \"demo\"\n";
         assert!(parse_manifest_with(&dir("other"), text, &mut problems, TEST_BUILTINS).is_none());
         assert!(matches!(&problems[0], PluginProblem::Manifest { detail, .. } if detail.contains("must equal name")));
+    }
+
+    /// 내장도 `[cli]`를 가질 수 있다. 임베디드의 `run`은 자리 표시이고, 실제 argv는 bibox 자신을 다시 띄우는 것이다.
+    #[test]
+    fn a_builtin_cli_runs_the_bibox_executable() {
+        fn noop() {}
+        let fake = [crate::plugin::builtin::Builtin {
+            name: "fake",
+            manifest: "api = 2\nname = \"fake\"\n[cli]\nrun = \"builtin\"\n",
+            run: noop,
+            seeded: false,
+            guide: "",
+        }];
+        let stub = "api = 2\nname = \"fake\"\nbuiltin = \"fake\"\n";
+        let mut problems = vec![];
+        let m = parse_manifest_with(&dir("fake"), stub, &mut problems, &fake).expect("fake expands");
+        assert!(problems.is_empty(), "{:?}", problems);
+        let exe = std::env::current_exe().unwrap().to_string_lossy().to_string();
+        assert_eq!(m.cli, Some(vec![exe, "plugin".to_string(), "run".to_string(), "fake".to_string()]));
+
+        let stub = "api = 2\nname = \"git-sync\"\nbuiltin = \"git-sync\"\n";
+        let mut problems = vec![];
+        let m = parse_manifest_with(&dir("git-sync"), stub, &mut problems, crate::plugin::builtin::BUILTINS).expect("git-sync expands");
+        assert!(m.cli.is_none());
     }
 
     #[test]

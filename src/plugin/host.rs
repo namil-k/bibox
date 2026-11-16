@@ -72,6 +72,7 @@ pub struct PluginEnv {
     pub notes: PathBuf,
     pub pdfs: PathBuf,
     pub home: Option<PathBuf>,
+    pub templates: PathBuf,
     /// 테스트와 doctor용 추가 환경 변수. 프로토콜 프로세스와 `[cli]` 프로세스 둘 다 받는다.
     pub extra: BTreeMap<String, String>,
 }
@@ -85,6 +86,7 @@ impl PluginEnv {
             notes: config.notes_dir.clone(),
             pdfs: config.bibox_dir.clone(),
             home: config.home.as_ref().map(|h| crate::config::expand_tilde(h)),
+            templates: config.templates_dir.clone(),
             extra: BTreeMap::new(),
         }
     }
@@ -96,6 +98,7 @@ impl PluginEnv {
             notes: self.notes.clone(),
             pdfs: self.pdfs.clone(),
             home: self.home.clone(),
+            templates: Some(self.templates.clone()),
         }
     }
 }
@@ -555,6 +558,7 @@ pub fn apply_env(cmd: &mut Command, env: &PluginEnv, plugin_dir: &std::path::Pat
         .env("BIBOX_DB_PATH", &env.db)
         .env("BIBOX_NOTES_DIR", &env.notes)
         .env("BIBOX_PDF_DIR", &env.pdfs)
+        .env("BIBOX_TEMPLATES_DIR", &env.templates)
         .env("BIBOX_PLUGIN_DIR", plugin_dir);
     match &env.home {
         Some(h) => {
@@ -582,7 +586,7 @@ mod tests {
     }
 
     fn env() -> PluginEnv {
-        PluginEnv { bin: "/bin/true".into(), config_dir: "/tmp".into(), db: "/tmp/db.json".into(), notes: "/tmp/n".into(), pdfs: "/tmp/p".into(), home: None, extra: BTreeMap::new() }
+        PluginEnv { bin: "/bin/true".into(), config_dir: "/tmp".into(), db: "/tmp/db.json".into(), notes: "/tmp/n".into(), pdfs: "/tmp/p".into(), home: None, templates: "/tmp/t".into(), extra: BTreeMap::new() }
     }
 
     /// `name`으로 픽스처 `script`를 도는 플러그인 하나짜리 호스트. `events`는 [events] subscribe.
@@ -613,6 +617,17 @@ mod tests {
             }
         }
         None
+    }
+
+    #[test]
+    fn plugins_get_the_templates_dir() {
+        let mut e = env();
+        e.templates = "/tmp/tpl".into();
+        let mut cmd = Command::new("true");
+        apply_env(&mut cmd, &e, std::path::Path::new("/tmp/p"));
+        let got = cmd.get_envs().find(|(k, _)| *k == "BIBOX_TEMPLATES_DIR").and_then(|(_, v)| v.map(|v| v.to_os_string()));
+        assert_eq!(got, Some(std::ffi::OsString::from("/tmp/tpl")));
+        assert_eq!(e.paths().templates, Some(PathBuf::from("/tmp/tpl")));
     }
 
     #[test]

@@ -120,7 +120,7 @@ mod tests {
         let text = format!("api = 2\nname = \"p\"\nrun = \"python3 {}\"\n[events]\nsubscribe = [\"{}\"]\n", fixtures().join(script).display(), subscribe);
         let mut problems = vec![];
         let m = parse_manifest(&dir, &text, &mut problems).unwrap();
-        let env = PluginEnv { bin: "/bin/true".into(), config_dir: "/tmp".into(), db: "/tmp/db.json".into(), notes: "/tmp/n".into(), pdfs: "/tmp/p".into(), home: None, extra: BTreeMap::new() };
+        let env = PluginEnv { bin: "/bin/true".into(), config_dir: "/tmp".into(), db: "/tmp/db.json".into(), notes: "/tmp/n".into(), pdfs: "/tmp/p".into(), home: None, templates: "/tmp/t".into(), extra: BTreeMap::new() };
         Events { host: Arc::new(PluginHost::new(vec![m], BTreeMap::new(), env)) }
     }
 

@@ -790,13 +790,13 @@ mod tests {
     #[test]
     fn doctor_names_missing_poppler_tools_only_when_pdf_view_is_installed() {
         let m = crate::plugin::manifest::parse_manifest(&std::path::PathBuf::from("/x/pdf-view"), "api = 2\nname = \"pdf-view\"\nbuiltin = \"pdf-view\"\n", &mut vec![]).unwrap();
-        let env = crate::plugin::PluginEnv { bin: "/bin/true".into(), config_dir: "/tmp".into(), db: "/tmp/db.json".into(), notes: "/tmp/n".into(), pdfs: "/tmp/p".into(), home: None, extra: Default::default() };
+        let env = crate::plugin::PluginEnv { bin: "/bin/true".into(), config_dir: "/tmp".into(), db: "/tmp/db.json".into(), notes: "/tmp/n".into(), pdfs: "/tmp/p".into(), home: None, templates: "/tmp/t".into(), extra: Default::default() };
         let host = PluginHost::new(vec![m], Default::default(), env);
         let missing = tool_problems(&host, |t| t == "pdftoppm");
         assert_eq!(missing.len(), 2, "{:?}", missing);
         assert!(missing.iter().all(|p| matches!(p, PluginProblem::ToolMissing { plugin, hint, .. } if plugin == "pdf-view" && hint.contains("brew install poppler"))));
         assert!(missing.iter().any(|p| matches!(p, PluginProblem::ToolMissing { program, .. } if program == "pdfinfo")));
-        let env = crate::plugin::PluginEnv { bin: "/bin/true".into(), config_dir: "/tmp".into(), db: "/tmp/db.json".into(), notes: "/tmp/n".into(), pdfs: "/tmp/p".into(), home: None, extra: Default::default() };
+        let env = crate::plugin::PluginEnv { bin: "/bin/true".into(), config_dir: "/tmp".into(), db: "/tmp/db.json".into(), notes: "/tmp/n".into(), pdfs: "/tmp/p".into(), home: None, templates: "/tmp/t".into(), extra: Default::default() };
         let host = PluginHost::new(vec![], Default::default(), env);
         assert!(tool_problems(&host, |_| false).is_empty(), "no pdf-view, no complaint");
     }

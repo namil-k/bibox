@@ -17,6 +17,9 @@ pub struct Paths {
     pub notes: PathBuf,
     pub pdfs: PathBuf,
     pub home: Option<PathBuf>,
+    /// 노트 양식 폴더. 옛 bibox는 안 보내고 옛 플러그인은 무시한다.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub templates: Option<PathBuf>,
 }
 
 // ── bibox → 플러그인 ────────────────────────────────────────────────────────

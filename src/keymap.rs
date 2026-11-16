@@ -1616,7 +1616,7 @@ mod tests {
             .collect();
         let env = crate::plugin::PluginEnv {
             bin: "/bin/true".into(), config_dir: "/tmp".into(), db: "/tmp/db.json".into(),
-            notes: "/tmp/n".into(), pdfs: "/tmp/p".into(), home: None, extra: Default::default(),
+            notes: "/tmp/n".into(), pdfs: "/tmp/p".into(), home: None, templates: "/tmp/t".into(), extra: Default::default(),
         };
         crate::plugin::PluginHost::new(manifests, Default::default(), env).commands().clone()
     }

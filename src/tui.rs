@@ -6203,7 +6203,7 @@ mod tests {
             ],
             activation: crate::plugin::manifest::Activation::Lazy, fields: vec![], views: vec![], events: vec![], cli: None, settings: vec![], builtin: None, dir: "/tmp".into(), guide: None,
         };
-        let env = crate::plugin::PluginEnv { bin: "/bin/true".into(), config_dir: "/tmp".into(), db: "/tmp/db.json".into(), notes: "/tmp/n".into(), pdfs: "/tmp/p".into(), home: None, extra: Default::default() };
+        let env = crate::plugin::PluginEnv { bin: "/bin/true".into(), config_dir: "/tmp".into(), db: "/tmp/db.json".into(), notes: "/tmp/n".into(), pdfs: "/tmp/p".into(), home: None, templates: "/tmp/t".into(), extra: Default::default() };
         crate::plugin::PluginHost::new(vec![m], Default::default(), env).commands().clone()
     }
 
