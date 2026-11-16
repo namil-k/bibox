@@ -13,7 +13,6 @@ use crate::models::Database;
 /// focus로 지정되면 focus 대신 안내 문구를 남긴다.
 pub fn build_input(db: &Database, notes_dir: &Path, templates_dir: Option<&Path>, focus: Option<&str>) -> Input {
     let boiler: HashSet<String> = templates_dir.map(template_lines).unwrap_or_default();
-    let has_doi = |doi: &Option<String>| doi.as_deref().is_some_and(|d| !d.trim().is_empty());
     let works = db
         .entries
         .iter()
@@ -23,7 +22,7 @@ pub fn build_input(db: &Database, notes_dir: &Path, templates_dir: Option<&Path>
             labels.extend(e.tags.iter().map(|t| format!("#{}", t)));
             Work {
                 id: e.bibtex_key.clone(),
-                doi: e.doi.clone().filter(|d| !d.trim().is_empty()),
+                doi: entry_doi(e),
                 title: e.title.clone(),
                 authors: e.author.clone(),
                 year: e.year.map(|y| y as i32),
@@ -37,14 +36,21 @@ pub fn build_input(db: &Database, notes_dir: &Path, templates_dir: Option<&Path>
     let mut input = Input { works, focus: None, add_command: Some("bibox add --doi {doi}".to_string()), notice: None };
     if let Some(key) = focus {
         match db.entries.iter().find(|e| e.bibtex_key == key) {
-            Some(e) if !has_doi(&e.doi) => {
+            Some(e) if entry_doi(e).is_none() => {
                 input.notice = Some(format!("{} has no DOI, so it is not in the citation data", key));
             }
-            // 없는 key도 그대로 넘긴다. "not in the graph" 처리는 citers가 한다
-            _ => input.focus = Some(key.to_string()),
+            None => input.notice = Some(format!("{} is not in the library", key)),
+            // DOI가 있는 항목. 그래프에 실제로 있는지는 citers가 알려 준다(`focus_found`)
+            Some(_) => input.focus = Some(key.to_string()),
         }
     }
     input
+}
+
+/// citers는 `finish()`에서만 DOI를 정규화한다. 라이브러리로 `Input`을 직접 만드는 쪽이 정규화해서 넘겨야
+/// 캐시 키와 버전 병합이 맞는다. DOI가 아닌 문자열(`arXiv:...`)은 DOI 없음으로 본다.
+fn entry_doi(e: &crate::models::Entry) -> Option<String> {
+    e.doi.as_deref().and_then(citers::input::normalize_doi)
 }
 
 fn note_text(notes_dir: &Path, key: &str) -> Option<String> {
@@ -107,7 +113,26 @@ mod tests {
         let input = build_input(&db(vec![entry("a", Some("10.1/a"))]), &dir, None, Some("a"));
         assert_eq!(input.focus.as_deref(), Some("a"));
         let input = build_input(&db(vec![entry("a", Some("10.1/a"))]), &dir, None, Some("zzz"));
-        assert_eq!(input.focus.as_deref(), Some("zzz"));
+        assert_eq!(input.focus, None);
+        assert_eq!(input.notice.as_deref(), Some("zzz is not in the library"));
+    }
+
+    #[test]
+    fn dois_are_normalized_and_non_dois_dropped() {
+        let dir = tempfile_dir("doinorm");
+        let es = vec![
+            entry("a", Some("10.1109/TVCG.2019.1")),
+            entry("b", Some(" https://doi.org/10.1/B ")),
+            entry("c", Some("doi:10.2/C")),
+            entry("d", Some("arXiv:2101.00001")),
+            entry("e", Some("  ")),
+        ];
+        let input = build_input(&db(es), &dir, None, None);
+        let dois: Vec<Option<&str>> = input.works.iter().map(|w| w.doi.as_deref()).collect();
+        assert_eq!(dois, vec![Some("10.1109/tvcg.2019.1"), Some("10.1/b"), Some("10.2/c"), None, None]);
+        let input = build_input(&db(vec![entry("d", Some("arXiv:2101.00001"))]), &dir, None, Some("d"));
+        assert_eq!(input.focus, None);
+        assert_eq!(input.notice.as_deref(), Some("d has no DOI, so it is not in the citation data"));
     }
 
     #[test]

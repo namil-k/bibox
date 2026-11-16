@@ -83,6 +83,10 @@ pub fn note_summary(note: &str, boiler: &HashSet<String>) -> Option<(&'static st
     if let Some(s) = section(&lines, &SUMMARY) {
         return Some(("Summary", s));
     }
+    // 인식되는 제목이 있는데 내용이 비었다면 옛 템플릿 문구를 "Note"로 내보내지 않는다
+    if lines.iter().any(|l| ONE_LINE.is_match(l) || SUMMARY.is_match(l)) {
+        return None;
+    }
     first_para(&lines).map(|s| ("Note", s))
 }
 
@@ -120,6 +124,20 @@ mod tests {
         let boiler: HashSet<String> = [line.to_string()].into();
         let n = format!("# T\n\n## 1. 한 줄 정의\n{line}\n");
         assert_eq!(note_summary(&n, &boiler), None);
+    }
+
+    #[test]
+    fn empty_recognised_heading_does_not_fall_back_to_template_prose() {
+        let n = "# T\n\ncitekey: x\nyear: 2023\n\n## 0. 예측\n읽기 전에 이 논문이 무엇을 할지 먼저 적어 본다.\n\n## 1. 한 줄 정의\n(boiler)\n\n## 2. 기여\n옛 템플릿의 다른 안내 문장이다.\n";
+        let boiler: HashSet<String> = ["(boiler)".to_string()].into();
+        assert_eq!(note_summary(n, &boiler), None);
+    }
+
+    #[test]
+    fn empty_one_line_section_falls_through_to_summary() {
+        let n = "# T\n\n## 1. 한 줄 정의\n(boiler)\n\n## Summary\nReal summary.\n";
+        let boiler: HashSet<String> = ["(boiler)".to_string()].into();
+        assert_eq!(note_summary(n, &boiler), Some(("Summary", "Real summary.".to_string())));
     }
 
     #[test]
