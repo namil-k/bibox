@@ -61,14 +61,15 @@ fn oa(id: &str, doi: &str, refs: &[&str]) -> OaWork {
     OaWork { id: id.into(), doi: Some(doi.into()), title: Some(format!("OA {}", id)), year: Some(2020), authors: vec!["Kim".into()], cited_by: 1, refs: refs.iter().map(|s| s.to_string()).collect() }
 }
 
-/// a(10.1/a)는 b(10.1/b)를 인용한다. c는 DOI가 없다. a, b, d는 서재 밖의 W9(10.1/x)도 인용해서 min_shared 3을
+/// a(10.1/a)는 b(서재에는 `10.1/B`, 캐시 키는 소문자 `10.1/b`)를 인용한다. e는 OpenAlex가 b와 같은 논문(W2)으로 합친 프리프린트라, citers가 중복으로 보고 노드를 만들지 않는다. 그래서 e를 focus로 주면 "그래프에 없음"이 된다. c는 DOI가 없다. a, b, d는 서재 밖의 W9(10.1/x)도 인용해서 min_shared 3을
 /// 채우므로 W9는 "bibox add --doi" 명령이 달린 서재 밖 노드로 그려진다. W9도 캐시에 있어 요청이 나가지 않는다.
 fn prepare(tag: &str) -> Home {
     let h = Home::new(tag);
     let entries = serde_json::json!([
         {"bibtex_key": "a", "entry_type": "article", "title": "Paper A", "author": ["Kim, Namil"], "year": 2024, "doi": "10.1/a", "collections": ["ilda"]},
         {"bibtex_key": "d", "entry_type": "article", "title": "Paper D", "author": ["Choi, Ji"], "year": 2021, "doi": "10.1/d"},
-        {"bibtex_key": "b", "entry_type": "article", "title": "Paper B", "author": ["Lee, Ann"], "year": 2020, "doi": "10.1/b"},
+        {"bibtex_key": "b", "entry_type": "article", "title": "Paper B", "author": ["Lee, Ann"], "year": 2020, "doi": "10.1/B"},
+        {"bibtex_key": "e", "entry_type": "article", "title": "Paper E", "author": ["Seo, Hana"], "year": 2019, "doi": "10.1/e"},
         {"bibtex_key": "c", "entry_type": "misc", "title": "Paper C", "author": ["Park, Bo"], "year": 2022}
     ]);
     let file = h.root.join("entries.json");
@@ -83,6 +84,7 @@ fn prepare(tag: &str) -> Home {
         ("10.1/a".to_string(), Cached { work: oa("W1", "10.1/a", &["W2", "W9"]), fetched_at: now() }),
         ("10.1/b".to_string(), Cached { work: oa("W2", "10.1/b", &["W9"]), fetched_at: now() }),
         ("10.1/d".to_string(), Cached { work: oa("W3", "10.1/d", &["W9"]), fetched_at: now() }),
+        ("10.1/e".to_string(), Cached { work: oa("W2", "10.1/b", &["W9"]), fetched_at: now() }),
         ]),
         outside: HashMap::from([("W9".to_string(), Cached { work: oa("W9", "10.1/x", &[]), fetched_at: now() })]),
         ..Cache::default()
@@ -110,10 +112,11 @@ fn graph_cli_opens_from_a_prefilled_cache() {
     assert!(html.contains("\"summary\":\"S.\""), "no summary");
     assert!(html.contains("\"labels\":[\"ilda\"]"), "no labels");
     assert!(html.contains("bibox add --doi"), "no add command");
+    assert!(!out.stderr.contains(&b'\r'), "no carriage returns on a non-terminal stderr");
     assert_eq!(snapshot(&h), before, "the library must not change");
     // 요청이 나갔다면 캐시에 새 항목이나 miss가 생겼을 것이다
     let cache = Cache::load(&h.plugin_dir().join("cache"));
-    assert_eq!((cache.works.len(), cache.outside.len(), cache.misses.len()), (3, 1, 0));
+    assert_eq!((cache.works.len(), cache.outside.len(), cache.misses.len()), (4, 1, 0));
 }
 
 #[test]
@@ -134,4 +137,23 @@ fn graph_is_not_installed_by_default() {
     let out = h.bibox(&["graph", "--no-open"]);
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("No plugin named \"graph\""));
+}
+
+#[test]
+fn graph_cli_focus_that_misses_the_data_warns() {
+    let h = prepare("nofocus");
+    let out = h.bibox(&["graph", "e", "--no-open"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("Warning: e is not in the citation data"), "{}", String::from_utf8_lossy(&out.stderr));
+    let out = h.bibox(&["graph", "a", "--no-open"]);
+    assert!(!String::from_utf8_lossy(&out.stderr).contains("not in the citation data"));
+}
+
+#[test]
+fn graph_cli_focus_on_a_key_not_in_the_library_shows_the_notice() {
+    let h = prepare("nokey");
+    let out = h.bibox(&["graph", "zzz", "--no-open"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let html = std::fs::read_to_string(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert!(html.contains("zzz is not in the library"));
 }

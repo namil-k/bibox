@@ -391,11 +391,14 @@ fn expand_stub(
         }
     };
     let run = vec![exe, "plugin".to_string(), "run".to_string(), builtin.to_string()];
+    // `[cli]`용 argv는 끝에 `--`를 붙인다. 사용자 인자가 `plugin run`의 옵션(`--help` 등)으로 읽히지 않고 그대로 플러그인에 간다
+    let mut cli = run.clone();
+    cli.push("--".to_string());
     // 내장이 `[cli]`를 선언하면 `bibox <name> ...`도 같은 실행 파일의 `plugin run <name>`으로 간다. 임베디드 `run` 문자열은 자리 표시일 뿐이다
     let has_cli = embedded.cli.is_some();
     let mut m = build(dir, embedded, Some(run.clone()), problems)?;
     if has_cli {
-        m.cli = Some(run);
+        m.cli = Some(cli);
     }
     m.builtin = Some(builtin.to_string());
     m.version = Some(env!("CARGO_PKG_VERSION").to_string());
@@ -1001,7 +1004,7 @@ run = "python3 cli.py"
         let m = parse_manifest_with(&dir("fake"), stub, &mut problems, &fake).expect("fake expands");
         assert!(problems.is_empty(), "{:?}", problems);
         let exe = std::env::current_exe().unwrap().to_string_lossy().to_string();
-        assert_eq!(m.cli, Some(vec![exe, "plugin".to_string(), "run".to_string(), "fake".to_string()]));
+        assert_eq!(m.cli, Some(vec![exe, "plugin".to_string(), "run".to_string(), "fake".to_string(), "--".to_string()]));
 
         let stub = "api = 2\nname = \"git-sync\"\nbuiltin = \"git-sync\"\n";
         let mut problems = vec![];

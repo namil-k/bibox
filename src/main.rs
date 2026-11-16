@@ -631,7 +631,6 @@ enum PluginAction {
     /// Create a working plugin skeleton in the plugins directory
     New { name: String },
     /// Run a built-in plugin's protocol loop on stdin/stdout (used by bibox itself; handy for debugging)
-    #[command(disable_help_flag = true)]
     Run {
         name: String,
         /// Arguments for the plugin's command-line entry point

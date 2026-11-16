@@ -4,6 +4,7 @@
 mod input;
 mod summary;
 
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
@@ -23,6 +24,7 @@ description = "Open your library's citation graph in the browser (data from Open
 id = "open"
 desc = "Open citation graph"
 key = "r"
+layers = ["entries"]
 menus = ["context"]
 
 [[settings]]
@@ -96,22 +98,44 @@ struct GraphResult {
     offline: bool,
     warnings: Vec<String>,
     html_path: PathBuf,
+    /// 브라우저에 실제로 넘겼는가. `--no-open`이거나 브라우저를 못 띄웠으면 false.
+    opened: bool,
+    /// focus로 넘긴 key가 그래프에 없을 때 그 key.
+    focus_missing: Option<String>,
 }
 
-impl From<citers::Output> for GraphResult {
-    fn from(o: citers::Output) -> Self {
-        GraphResult { linked: o.stats.linked, edges: o.stats.edges, failed: o.fetch.failed, offline: o.fetch.offline, warnings: o.warnings, html_path: o.html_path }
+impl GraphResult {
+    fn from_output(o: citers::Output, focus: Option<&str>) -> Self {
+        let focus_missing = focus.filter(|_| !o.focus_found).map(str::to_string);
+        GraphResult {
+            linked: o.stats.linked,
+            edges: o.stats.edges,
+            failed: o.fetch.failed,
+            offline: o.fetch.offline,
+            warnings: o.warnings,
+            html_path: o.html_path,
+            opened: o.opened,
+            focus_missing,
+        }
     }
 }
 
 impl GraphResult {
+    fn headline(&self) -> String {
+        let verb = if self.opened { "Opened" } else { "Wrote" };
+        format!("{} citation graph: {} papers linked by {} citations", verb, self.linked, self.edges)
+    }
+
     fn message(&self) -> String {
-        let mut m = format!("Opened citation graph: {} papers linked by {} citations", self.linked, self.edges);
+        let mut m = self.headline();
         if let Some(r) = &self.failed {
             m.push_str(&format!("; fetch incomplete: {}", r));
         }
         if self.offline {
             m.push_str("; offline, showing cached data");
+        }
+        if let Some(k) = &self.focus_missing {
+            m.push_str(&format!("; {} is not in the citation data", k));
         }
         for w in &self.warnings {
             m.push_str("; ");
@@ -142,6 +166,7 @@ fn open_graph(paths: &Paths, settings: &Settings, focus: Option<&str>, flags: Fl
     let plugin_dir = paths.plugin_dir.as_ref().ok_or_else(|| anyhow!("BIBOX_PLUGIN_DIR is not set; run this through bibox"))?;
     let db = crate::storage::load_db(&paths.db)?;
     let input = input::build_input(&db, &paths.notes, paths.templates.as_deref(), focus);
+    let focused = input.focus.clone();
     let cache = plugin_dir.join("cache");
     let mut opts = citers::Options::default();
     opts.out = Some(cache.join("graph.html"));
@@ -165,7 +190,7 @@ fn open_graph(paths: &Paths, settings: &Settings, focus: Option<&str>, flags: Fl
             progress(&t);
         }
     }
-    join_or_resume(worker).map(GraphResult::from)
+    join_or_resume(worker).map(|o| GraphResult::from_output(o, focused.as_deref()))
 }
 
 // ── JSON-RPC ────────────────────────────────────────────────────────────────
@@ -258,10 +283,14 @@ fn cli_main(args: &[String]) -> i32 {
     let paths = Paths { db, notes, templates: env_path("BIBOX_TEMPLATES_DIR"), plugin_dir: env_path("BIBOX_PLUGIN_DIR") };
     let settings = env_path("BIBOX_CONFIG_DIR").map(|d| cli_settings(&d.join("config.toml"))).unwrap_or_default();
     let flags = Flags { open_browser: !a.no_open, refresh: a.refresh, relayout: a.relayout };
+    // 덮어쓰는 진행 줄은 터미널에서만. 파이프나 파일로 가는 stderr에는 \r을 남기지 않는다
+    let tty = std::io::stderr().is_terminal();
     let mut shown = false;
     let mut progress = |t: &str| {
-        shown = true;
-        eprint!("\r{:<40}", t);
+        if tty {
+            shown = true;
+            eprint!("\r{:<40}", t);
+        }
     };
     let result = open_graph(&paths, &settings, a.key.as_deref(), flags, &mut progress);
     if shown {
@@ -278,10 +307,13 @@ fn cli_main(args: &[String]) -> i32 {
             if r.offline {
                 eprintln!("Warning: offline, showing cached data");
             }
+            if let Some(k) = &r.focus_missing {
+                eprintln!("Warning: {} is not in the citation data", k);
+            }
             if a.no_open {
                 println!("{}", r.html_path.display());
             } else {
-                println!("Opened citation graph: {} papers linked by {} citations", r.linked, r.edges);
+                println!("{}", r.headline());
             }
             0
         }
@@ -365,7 +397,7 @@ mod tests {
             progress("Fetching citations 1/3");
             progress("Fetching citations 2/3");
             progress("Fetching cited papers 3/3");
-            Ok(GraphResult { linked: 5, edges: 7, failed: Some("rate limited".into()), offline: false, warnings: vec!["w1".into(), "w2".into()], html_path: PathBuf::from("/x/graph.html") })
+            Ok(GraphResult { linked: 5, edges: 7, failed: Some("rate limited".into()), offline: false, warnings: vec!["w1".into(), "w2".into()], html_path: PathBuf::from("/x/graph.html"), opened: true, focus_missing: None })
         });
         assert_eq!(lines.len(), 4);
         for l in &lines[..3] {
@@ -373,6 +405,34 @@ mod tests {
         }
         assert_eq!(lines[2]["params"]["text"], "Fetching cited papers 3/3");
         assert_eq!(lines[3]["result"]["message"], "Opened citation graph: 5 papers linked by 7 citations; fetch incomplete: rate limited; w1; w2");
+    }
+
+    fn result(opened: bool, focus_missing: Option<&str>) -> GraphResult {
+        GraphResult { linked: 5, edges: 7, failed: None, offline: false, warnings: vec![], html_path: PathBuf::from("/x/graph.html"), opened, focus_missing: focus_missing.map(str::to_string) }
+    }
+
+    #[test]
+    fn message_says_wrote_when_the_browser_did_not_open() {
+        let lines = run_open(&|_, _, _, _| Ok(result(false, None)));
+        assert_eq!(lines[0]["result"]["message"], "Wrote citation graph: 5 papers linked by 7 citations");
+        let lines = run_open(&|_, _, _, _| Ok(result(true, None)));
+        assert_eq!(lines[0]["result"]["message"], "Opened citation graph: 5 papers linked by 7 citations");
+    }
+
+    #[test]
+    fn message_mentions_a_focus_that_missed_the_graph() {
+        let lines = run_open(&|_, _, _, _| Ok(result(true, Some("a"))));
+        assert_eq!(lines[0]["result"]["message"], "Opened citation graph: 5 papers linked by 7 citations; a is not in the citation data");
+    }
+
+    #[test]
+    fn open_command_is_bound_to_the_entries_panel_only() {
+        use crate::keymap::LayerId;
+        let stub = "api = 2\nname = \"graph\"\nbuiltin = \"graph\"\n";
+        let mut problems = vec![];
+        let m = crate::plugin::manifest::parse_manifest_with(Path::new("/x/graph"), stub, &mut problems, &[BUILTIN]).expect("graph expands");
+        assert!(problems.is_empty(), "{:?}", problems);
+        assert_eq!(m.commands[0].layers, vec![LayerId::Entries]);
     }
 
     #[test]
