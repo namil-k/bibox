@@ -2,6 +2,7 @@
 //! 매니페스트와 코드는 여기 있다. bibox가 `bibox plugin run <name>`으로 자기 자신을 띄운다.
 
 pub mod git_sync;
+pub mod graph;
 pub mod pdf_view;
 
 #[derive(Clone, Copy)]
