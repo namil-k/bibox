@@ -4137,6 +4137,7 @@ bibox plugin new my-plugin                             # skeleton: plugin.toml, 
 bibox plugin install namil-k/bibox/plugins/citations   # from GitHub (owner/repo/subdir), asks before installing
 bibox plugin install ./my-plugin                       # symlink a local directory
 bibox plugin install pdf-view                          # turn on a built-in plugin (git-sync is on by default)
+bibox plugin install graph                             # built-in citation graph (opt-in: sends the library's DOIs to OpenAlex); then `bibox graph [<key>] [--no-open]`
 bibox plugin remove my-plugin
 # TUI: press , then Plugins for the same list, an Installed toggle and each plugin's declared settings
 ```

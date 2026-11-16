@@ -590,6 +590,7 @@ Examples:
   bibox plugin install someone/bibox-kci            # clone a GitHub repository
   bibox plugin install namil-k/bibox/plugins/summarize
   bibox plugin install git-sync                     # put a removed built-in plugin back
+  bibox plugin install graph                        # turn on the citation graph (opt-in; sends DOIs to OpenAlex)
   bibox plugin remove summarize
   bibox plugin new my-plugin                        # scaffold a working plugin")]
     Plugin {
